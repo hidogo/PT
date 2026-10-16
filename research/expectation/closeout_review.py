@@ -40,10 +40,18 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default="", help="待上传 CSV 输出目录（默认 PTRADE_BRIDGE_DIR）")
     p.add_argument("--skip-sync", action="store_true", help="跳过持仓同步（仅复盘）")
     p.add_argument("--logs", default="", help="当日交易日志 .txt（粘贴保存）-> 解析 [seal]/[l2]/[may-order] 到 data/logs")
+    p.add_argument("--selfwatch", action="store_true", help="步骤0同步：客户端自选股 -> 上传暂存 selfwatch.csv")
     p.add_argument("--api-dir", default=sp.API_DIR, help="PTradeQuantApi.py 所在目录")
     a = p.parse_args(argv)
 
     td = a.date or datetime.date.today().isoformat()
+    if a.selfwatch:
+        print("== [closeout] 步骤0 同步自选股(客户端->上传暂存) ==")
+        try:
+            import sync_selfwatch as ss
+            ss.sync()
+        except Exception as exc:
+            print("[closeout] 自选股同步失败(可跳过): %s" % exc, file=sys.stderr)
     if a.logs:
         print("== [closeout] 步骤0 采集交易日志 [seal]/[l2] ==")
         try:

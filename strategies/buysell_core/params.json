@@ -27,5 +27,7 @@
   "seal_bid_enabled": true,
   "seal_bid_fail_ratio": 0.5,
   "tick_enabled": true,
-  "tick_watch_cap": 15
+  "tick_watch_cap": 15,
+  "selfwatch_enabled": true,
+  "selfwatch_sync_interval": 8
 }

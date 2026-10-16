@@ -64,6 +64,8 @@ def initialize(context):
     g.pool_all = []     # 全市场 A 股代码（按交易日刷新）
     g.pool_day = None
     g.watch = []        # 入池候选（动态，买入/打分迭代目标）
+    g.selfwatch = []   # 手动/文件同步 自选股（实时同步 selfwatch.csv）
+    g.pool_static = [] # 固定股池 = 自选股 ∪ 超预期确认推荐池(side=buy)
     g.last_scan = 0
     g.scan_offset = 0   # 全市场滑动窗口游标
     g.auction_c = {}    # sec -> (day, 竞价涨幅%)  候选 C 缓存
@@ -91,6 +93,9 @@ def before_trading_start(context, data):
     g.state_day = _today
     _save_state()
     _load_expectation()
+    if BLS.get('selfwatch_enabled', True):
+        _load_selfwatch()
+    _sync_pool_static()
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
         df = _hist_1d(sec)
         if df is not None and len(df) >= 6:
@@ -111,6 +116,8 @@ def handle_data(context, data):
         dump_scores(context)
     if BLS.get('scan_enabled') and (g.bar_counter % BLS.get('scan_interval', 4)) == 0:
         _sync_watch(context)
+    if BLS.get('selfwatch_enabled', True) and (g.bar_counter % BLS.get('selfwatch_sync_interval', 8)) == 0:
+        _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
         g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}
@@ -579,9 +586,50 @@ def _norm_sec(code):
         return num + '.XBJ'
     return num
 
+def _selfwatch_paths():
+    base = get_research_path()
+    return [base + 'selfwatch.csv', base + 'data/selfwatch.csv']
+
+
+def _load_selfwatch():
+    # 读取手动/实时同步的自选股（每行一代码 或 code CSV；可盘中更新，N bar 重读）
+    g.selfwatch = []
+    for cand in _selfwatch_paths():
+        try:
+            with open(cand, 'rt', encoding='utf-8') as f:
+                lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith('#')]
+            codes = []
+            for ln in lines:
+                tok = ln.split(',')[0].strip()
+                if tok.lower() in ('code', 'security', 'codes'):
+                    continue
+                codes.append(tok)
+            g.selfwatch = [x for x in (_norm_sec(c) for c in codes) if x]
+            log.info('[pool] selfwatch loaded %s -> %d' % (cand, len(g.selfwatch)))
+            return len(g.selfwatch)
+        except Exception:
+            continue
+    return 0
+
+
+def _sync_pool_static():
+    # 固定池 = 自选股 + 预期文件 side=buy 的推荐（超预期优先在前）
+    sw = list(getattr(g, 'selfwatch', []) or [])
+    buy_codes = []
+    for code, en in (getattr(g, 'exp_file', {}) or {}).items():
+        if str(en.get('side') or '') == 'buy':
+            buy_codes.append(code)
+    buy_codes.sort(key=lambda c: 0 if str((getattr(g, 'exp_file', {}).get(c) or {}).get('expected_status') or '').startswith('exceed') else 1)
+    pool = list(dict.fromkeys([x for x in (_norm_sec(c) for c in (sw + buy_codes)) if x]))
+    g.pool_static = pool
+    log.info('[pool] selfwatch=%d expect_buy=%d pool_static=%d' % (len(sw), len(buy_codes), len(pool)))
+
+
 def _pool():
-    # 当前买入/打分迭代目标：入池候选优先，空则回落 universe
-    return [x for x in (_norm_sec(s) for s in (g.watch or BLS['universe'])) if x]
+    # 当前买入/打分迭代目标：动态 watch ∪ 固定池(自选股+预期推荐)；空回落 universe
+    out = [x for x in (_norm_sec(s) for s in (list(g.watch or []) + list(g.pool_static or []))) if x]
+    out = list(dict.fromkeys(out))
+    return out or BLS['universe']
 
 
 def _get_snapshot_many(codes, cap):
@@ -733,7 +781,7 @@ def _try_expected_buys(context):
         if code in positions or str(en.get("side") or "") != "buy":
             continue
         st, actual = _confirm_expected(code)
-        if st in (PM, CM):
+        if st != CS:   # CX 超预期确认/CM 符合/PM 待定都买；仅排除确认 miss
             g.exp.setdefault(code, {})["auction_status"] = st
             place_order(context, code, "buy", note="expect_buy %s auction=%.1f%%" % (st, actual))
             g.daily["bought"].append(code)
@@ -794,6 +842,11 @@ def sell_manager(context):
                 st = _eval_intraday(sec, au)[0]
                 if st in (PS, CS):
                     place_order(context, sec, 'sell', qty=amt, note='P4_exp_miss ' + st); continue
+        _en = g.exp_file.get(sec) or {}
+        if str(_en.get('side') or '') == 'sell':
+            _eun, _ea2 = _confirm_expected(sec)
+            if _eun == CS:
+                place_order(context, sec, 'sell', qty=amt, note='P4_exp_sell ' + _eun); continue
         sc = score_now(sec)
         if sc < BLS['score_sell_clear']:
             place_order(context, sec, 'sell', qty=amt, note='P5_score_clear score=%.1f' % sc)
@@ -836,13 +889,14 @@ def _tick_targets():
     # tick 采集目标：持仓 + universe 恒有 + watch 前 N（控 3s 帧负担，避免丢帧）
     pos = list(get_positions())
     uni = [x for x in BLS['universe'] if x not in pos]
+    static = [x for x in (g.pool_static or []) if x not in pos and x not in uni]
     cap = int(BLS.get('tick_watch_cap', 15))
-    watch = [x for x in (g.watch or []) if x not in pos and x not in uni][:cap]
-    return pos + uni + watch
+    watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static][:cap]
+    return pos + uni + static + watch
 
 
 def _snap_vol(s):
-    for k in ('volume', 'trd_volume', 'trade_volume', 'vol'):
+    for k in ('business_amount', 'volume', 'trd_volume', 'amount'):
         v = s.get(k)
         if v:
             try:
@@ -872,9 +926,10 @@ def tick_data(context, data):
                 if last >= u - 1e-9:            # 首次触板
                     vol = _snap_vol(s)
                     amt = float(s.get('turnover') or s.get('amount') or 0.0)
+                    ms = s.get('hsTimeStamp') or 0   # 快照毫秒时间戳，精确还原触板时刻
                     g.first_zt[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': time.time(),
-                                       'vol': vol, 'amt': amt, 'break': False, 'seal_low': False}
-                    log.info('[firstzt] %s price=%.2f vol=%.0f seal=%.0f bids=%d state=first' % (sec, last, vol, seal, bids))
+                                       'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False}
+                    log.info('[firstzt] %s price=%.2f vol=%.0f ms=%s seal=%.0f bids=%d state=first' % (sec, last, vol, ms, seal, bids))
                 continue
             if last < u - 1e-9:                 # 破板
                 if not ft.get('break'):
@@ -898,6 +953,10 @@ def after_open_probe(context):
         g.exp.setdefault(sec, {})
         au, _r = _eval_auction(sec)
         g.exp[sec]['auction_status'] = au
+        _en = g.exp_file.get(sec) or {}
+        for _k in ('entry_type', 'side', 'expected_status', 'expected_auction_change_pct', 'seal_amount_t0'):
+            if _en.get(_k) is not None:
+                g.exp[sec][_k] = _en[_k]
     dump_scores(context)
     _l2_probe(context)  # L2 可用性探针（每日一次）
 

@@ -45,6 +45,8 @@ def _classify(body):
     b = body.strip()
     if b.startswith("[l2] "):
         return "l2"
+    if b.startswith("[pool] "):
+        return "pool"
     if b.startswith("[firstzt] "):
         return "firstzt"
     if b.startswith("[seal] "):
@@ -79,7 +81,7 @@ def parse_text(text):
 
 def _agg(entries):
     dates = {}
-    keys = ["l2", "firstzt", "seal", "may_order", "score", "market_scan", "expect", "error", "init"]
+    keys = ["l2", "pool", "firstzt", "seal", "may_order", "score", "market_scan", "expect", "error", "init"]
     for e in entries:
         d = e["time"][:10]
         if d not in dates:
@@ -139,6 +141,10 @@ def summary(date):
     l2 = d.get("l2", [])
     print("L2 探针(%d):" % len(l2))
     for e in l2:
+        print("   %s %s" % (e["time"], e["body"]))
+    pools = d.get("pool", [])
+    print("股池 [pool](%d):" % len(pools))
+    for e in pools:
         print("   %s %s" % (e["time"], e["body"]))
     fzt = d.get("firstzt", [])
     print("首笔涨停 [firstzt](%d):" % len(fzt))

@@ -36,6 +36,8 @@
 - [ ] P5/P6 分数：见 P5_score_clear / P6_score_half（分数<30 / 30~50）。
 - [ ] 每笔卖出都仅 [may-order]、无真实委托（DO_ORDER=False 时）。
 
+- [ ] 【统一股池（v0.12）】[pool] 日志 selfwatch=N expect_buy=M（N 来自上传的 selfwatch.csv；推荐池 side=buy 计入）；确认超预期(CX)候选可被买入、一字板/卖侧推荐能触发。
+
 ## 4. 买入管理（入池标的）
 - [ ] MA5 低吸：见 [may-order] ma_pullback px=.. ma5=.. score=..（score>=55）。
 - [ ] 同标的冷却：同一标的两次买入间隔>=cold_secs(60)。
