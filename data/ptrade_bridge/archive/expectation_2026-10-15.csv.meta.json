@@ -1,0 +1,19 @@
+{
+  "trade_date": "2026-10-15",
+  "source": "D:\\PROJ\\AXquant\\data\\position_expectation_2026-10-15.jsonl",
+  "row_count": 4,
+  "generated_at": "2026-10-15T22:22:46",
+  "sha1": "7dfffb5aa01e0a9a77c450197affbc7541dd5375",
+  "header": [
+    "code",
+    "side",
+    "entry_type",
+    "expected_status",
+    "yesterday_open_pct",
+    "expected_auction_change_pct",
+    "seal_amount_t0",
+    "board_name",
+    "reason"
+  ],
+  "note": "供 Ptrade 自动上传识别：日期匹配 + 行数>0 + 哈希一致才视为可用。"
+}

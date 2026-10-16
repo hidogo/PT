@@ -1,0 +1,15 @@
+# 自带 Python 运行时 / 三方解释器（不入库）
+Libs/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.lock
+*.pkl
+
+# 本地运行状态/日志
+data/logs/
+
+# 系统
+.DS_Store
+Thumbs.db

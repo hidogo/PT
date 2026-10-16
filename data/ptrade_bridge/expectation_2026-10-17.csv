@@ -1,0 +1,2 @@
+code,side,entry_type,expected_status,yesterday_open_pct,expected_auction_change_pct,seal_amount_t0,board_name,reason
+603258.XSHG,hold,normal,pending_meet,0.0,6.81,104338.0,短剧游戏,

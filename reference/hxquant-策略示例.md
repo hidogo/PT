@@ -1,0 +1,268 @@
+
+# 策略示例
+
+## 股票策略示例
+
+### 集合竞价追涨停策略
+
+#### 策略说明
+
+设置股票池，每天9:23分运行集合竞价处理函数：如果最新价不小于涨停价则买入
+
+#### 示例
+
+```
+def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+    #每天9:23分运行集合竞价处理函数
+    run_daily(context, aggregate_auction_func, time='9:23')
+
+def aggregate_auction_func(context):
+    stock = g.security
+    # 获取最新价
+    snapshot = get_snapshot(stock)
+    price = snapshot[stock]['last_px']
+    # 获取涨停价
+    up_limit = snapshot[stock]['up_px']
+    # 如果最新价不小于涨停价则买入
+    if float(price) >= float(up_limit):
+        order(g.security, 100, limit_price=up_limit)
+
+def handle_data(context, data):
+    pass
+```
+
+### tick级别均线策略
+
+#### 策略说明
+
+设置股票池，盘前准备历史数据，每3秒钟触发一次：首先用最新的tick行情数据计算五日均线和十日均线，然后进行比较：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+
+#### 示例
+
+```
+def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+    # 每3秒运行一次主函数
+    run_interval(context, func, seconds=3)
+
+# 盘前准备历史数据
+def before_trading_start(context, data):
+    history = get_history(10, '1d', 'close', g.security, fq='pre', include=False)
+    g.close_array = history['close'].values
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def func(context):
+
+    stock = g.security
+
+    # 获取最新价
+    snapshot = get_snapshot(stock)
+    price = snapshot[stock]['last_px']
+
+    # 获取五日均线价格
+    days = 5
+    ma5 = get_MA_day(stock, days, g.close_array[-4:], price)
+    # 获取十日均线价格
+    days = 10
+    ma10 = get_MA_day(stock, days, g.close_array[-9:], price)
+
+    # 获取当前资金余额
+    cash = context.portfolio.cash
+
+    # 如果当前有余额，并且五日均线大于十日均线则买入
+    if ma5 > ma10:
+        # 用所有 cash 买入股票
+        order_value(stock, cash)
+        # 记录这次买入
+        log.info("Buying %s" % (stock))
+
+    # 如果五日均线小于十日均线，并且目前有头寸，则全部卖出
+    elif ma5 < ma10 and get_position(stock).amount > 0:
+        # 全部卖出
+        order_target(stock, 0)
+        # 记录这次卖出
+        log.info("Selling %s" % (stock))
+
+# 计算实时均线函数
+def get_MA_day(stock,days,close_array,current_price):
+    close_sum = close_array[-(days-1):].sum()
+    MA = (current_price + close_sum)/days
+    return MA
+
+def handle_data(context, data):
+    pass
+```
+
+### 双均线策略
+
+#### 策略说明
+
+设置股票池，每个handle_data周期进行如下判断处理：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+
+#### 示例
+
+```
+def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def handle_data(context, data):
+    security = g.security
+
+    # 获取十日历史价格
+    df = get_history(10, '1d', 'close', security, fq=None, include=False)
+
+    # 获取五日均线价格
+    ma5 = round(df['close'][-5:].mean(), 3)
+
+    # 获取十日均线价格
+    ma10 = round(df['close'][-10:].mean(), 3)
+
+    # 获取昨天收盘价
+    price = data[security]['close']
+
+    # 获取当前资金余额
+    cash = context.portfolio.cash
+
+    # 如果当前有余额，并且五日均线大于十日均线
+    if ma5 > ma10:
+        # 用所有 cash 买入股票
+        order_value(security, cash)
+        # 记录这次买入
+        log.info("Buying %s" % (security))
+
+    # 如果五日均线小于十日均线，并且目前有头寸
+    elif ma5 < ma10 and get_position(security).amount > 0:
+        # 全部卖出
+        order_target(security, 0)
+        # 记录这次卖出
+        log.info("Selling %s" % (security))
+```
+
+### macd策略
+
+#### 策略说明
+
+用历史日K线数据计算MACD指标，以计算结果进行买入卖出交易。
+
+#### 示例
+
+```
+"""
+macd强势金叉买入、macd弱势死叉卖出
+"""
+def initialize(context):
+    g.hold_num = 10
+
+def before_trading_start(context, data):
+    # 获取沪深300股票
+    g.security_list = get_index_stocks('000300.SS')
+    g.close_data_dict = {}
+    # 获取K线数据
+    history = get_history(100, frequency='1d', field=["close"], security_list=g.security_list, fq='dypre',
+                             include=False, is_dict=True)
+    for stock in g.security_list:
+        close_data = history[stock]['close']
+        g.close_data_dict[stock] = close_data
+    g.every_value = context.portfolio.portfolio_value / g.hold_num
+
+def handle_data(context, data):
+
+    for security in g.security_list:
+        close_data = g.close_data_dict[security]
+        macdDIF_data, macdDEA_data, macd_data = get_MACD(close_data, 12, 26, 9)
+        DIF = macdDIF_data[-1]
+        DEA = macdDEA_data[-1]
+        macd_current = macd_data[-1]
+        macd_pre = macd_data[-2]
+
+        # 获取当前价格
+        current_price = data[security].price
+        # 获取当前的现金
+        position = context.portfolio.positions
+        # DIF、DEA均为正，macd金叉，买入信号参考
+        if position[security].amount == 0:
+            if DIF > 0 and DEA > 0 and macd_pre < 0 and macd_current >= 0:
+                if context.portfolio.cash < g.every_value*0.8:
+                    continue
+
+                # 以市单价买入股票，日回测时即是开盘价
+                order_target_value(security, g.every_value)
+                # 记录这次买入
+                log.info("Buying %s" % (security))
+        else:
+            # DIF、DEA均为负，macd死叉，卖出信号参考
+            if DIF < 0 and DEA < 0 and macd_pre >= 0 and macd_current < 0:
+                # 卖出所有股票,使这只股票的最终持有量为0
+                order_target(security, 0)
+                # 记录这次卖出
+                log.info("Selling %s" % (security))
+```
+
+## 两融策略示例
+
+### 融资融券双均线策略
+
+#### 策略说明
+
+设置标的池，每个handle_data周期进行如下判断处理：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出。其中买入卖出所调用的API为融资融券业务专用API。
+
+#### 示例
+
+```
+def initialize(context):
+    # 初始化策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = "600570.SS"
+    set_universe(g.security)
+
+def before_trading_start(context, data):
+    # 买入标识
+    g.order_buy_flag = False
+    # 卖出标识
+    g.order_sell_flag = False
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def handle_data(context, data):
+    # 获取十日历史价格
+    df = get_history(10, "1d", "close", g.security, fq=None, include=False)
+    # 获取五日均线价格
+    ma5 = round(df["close"][-5:].mean(), 3)
+    # 获取十日均线价格
+    ma10 = round(df["close"][-10:].mean(), 3)
+    # 获取昨天收盘价
+    price = data[g.security]["close"]
+    # 如果五日均线大于十日均线
+    if ma5 > ma10:
+        if not g.order_buy_flag:
+            # 获取最大可融资数量
+            amount = get_margincash_open_amount(g.security).get(g.security)
+            # 进行融资买入操作
+            margincash_open(g.security, amount)
+            # 记录这次操作
+            log.info("Buying %s Amount %s" % (g.security, amount))
+            # 当日已融资买入
+            g.order_buy_flag = True
+
+    # 如果五日均线小于十日均线，并且目前有头寸
+    elif ma5 < ma10 and get_position(g.security).amount > 0:
+        if not g.order_sell_flag:
+            # 获取标的卖券还款最大可卖数量
+            amount = get_margincash_close_amount(g.security).get(g.security)
+            # 进行卖券还款操作
+            margincash_close(g.security, -amount)
+            # 记录这次操作
+            log.info("Selling %s Amount %s" % (g.security, amount))
+            # 当日已卖券还款
+            g.order_sell_flag = True
+```

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+
+<head>
+    <meta charset="utf-8">
+    <title>常见问题</title>
+    <meta name="keywords" content="常见问题,使用手册,ptrade,FAQ">
+    <meta name="description" content="PTrade 常见问题说明：平台使用受阻时的参考手册。">
+    <meta name="applicable-device" content="pc,mobile">
+    <meta name="robots" content="index,follow">
+    <link rel="shortcut icon" href="http://180.169.107.9:7766/hub/static/favicon.ico?v=2b08607916c12ee78673dda66397634bcb6b196f6cf1f7ce740efc7909d06cc2069bea653eb33035d14c1b2f10ef921f0adbd1b62f65e8e53cbfc5610f4c5344" type="image/x-icon">
+    <link rel="stylesheet" href="../static/css/fly.mincd67.css?v=0463e1a91b3861d0cfdd4ae57b40d10d8e9775feba49a94cfa256c9dadab62aaf4d7cf7b4816d6c7b9767a6006fb61e4016b9693dae8b21189cdf80401ec262f2017121501">
+    <link rel="stylesheet" href="../static/js/lib/bootstrap/css/bootstrap.min3692.css?v=59e121c0b579a038be2d5c48d75440e53dbcfe05087879a594773ca0911b0125e7c9be36b00f3367bd8810b4104aa54defac9a8eeb95fa3d064f931b49d555de">
+</head>
+
+
+<body class="pt52 noScroll">
+    <div class="algorithm-head clearfix" style="display:none;">
+    <style type="text/css"> .pt52 {padding-top:0} .help-nav {top:0} </style>
+    <span class="head-logo">恒生投研平台</span>
+    <ul class="head-nav" style="display:none;">
+        <li><a href="http://180.169.107.9:7766/start" target="_blank">首页</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/home" target="_blank">研究</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/strategys" target="_blank">策略</a></li>
+        <li><a href="http://180.169.107.9:7766/trades" target="_blank">交易</a></li>
+        <li><a href="http://180.169.107.9:7766/data" target="_blank">数据</a></li>
+        <li><a href="http://180.169.107.9:7766/help/api" target="_blank">帮助</a></li>
+        
+    </ul>
+</div>
+    <div class="body">
+        <div class="help ui-scrollspy" id="help-content">
+            <div class="help-nav">
+                <ul id="help-nav">
+                    <li class="level1"><a href="#常见问题" title="常见问题">常见问题</a></li>
+                    <li class="level1"><a href="#关于量化平台部署" title="关于量化平台部署">关于量化平台部署</a></li>
+                    <li class="level2"><a href="#关于量化环境" title="关于量化环境">关于量化环境</a></li>
+                    <li class="level2"><a href="#关于策略安全" title="关于策略安全">关于策略安全</a></li>
+                    <li class="level2"><a href="#Mac是否支持" title="Mac是否支持">Mac是否支持</a></li>
+                    <li class="level2"><a href="#关于付费" title="关于付费">关于付费</a></li>
+                    <li class="level2"><a href="#关于程序语言" title="关于程序语言">关于程序语言</a></li>
+                    <li class="level2"><a href="#关于Python版本" title="关于Python版本">关于Python版本</a></li>
+
+                    <li class="level1"><a href="#关于数据" title="关于数据">关于数据</a></li>
+                    <li class="level2"><a href="#数据种类" title="数据种类">数据种类</a></li>
+                    <li class="level2"><a href="#关于数据读写" title="关于数据读写">关于数据读写</a></li>
+                    <li class="level2"><a href="#关于本地数据" title="关于本地数据">关于本地数据</a></li>
+                    <li class="level2"><a href="#关于行情数据除复权" title="关于行情数据除复权">关于行情数据除复权</a></li>
+                    <li class="level2"><a href="#关于level2数据" title="关于level2数据">关于level2数据</a></li>
+
+                    <li class="level1"><a href="#关于研究" title="关于研究">关于研究</a></li>
+                    <li class="level2"><a href="#研究环境资源" title="研究环境资源">研究环境资源</a></li>
+                    <li class="level2"><a href="#文件传输限制" title="文件传输限制">文件传输限制</a></li>
+                    <li class="level2"><a href="#关于定时上传功能" title="关于定时上传功能">关于定时上传功能</a></li>
+                    <li class="level2"><a href="#上传文件夹" title="上传文件夹">上传文件夹</a></li>
+
+                    <li class="level1"><a href="#关于回测" title="关于回测">关于回测</a></li>
+                    <li class="level2"><a href="#回测与研究有什么区别" title="回测与研究有什么区别">回测与研究有什么区别</a></li>
+                    <li class="level2"><a href="#回测个数" title="回测个数">回测个数</a></li>
+                    <li class="level2"><a href="#回测的速度" title="回测的速度">回测的速度</a></li>
+                    <li class="level2"><a href="#关于回测周期" title="关于回测周期">关于回测周期</a></li>
+                    <li class="level2"><a href="#关于调试功能" title="关于调试功能">关于调试功能</a></li>
+                    <li class="level2"><a href="#关于性能分析" title="关于性能分析">关于性能分析</a></li>
+                    <li class="level2"><a href="#关于离线回测" title="关于离线回测">关于离线回测</a></li>
+                    <li class="level2"><a href="#关于策略上传和下载" title="关于策略上传和下载">关于策略上传和下载</a></li>
+                    <li class="level2"><a href="#回测撮合是否受真实成交限制" title="回测撮合是否受真实成交限制">回测撮合是否受真实成交限制</a></li>
+                    <li class="level2"><a href="#获取每次回测代码" title="获取每次回测代码">获取每次回测代码</a></li>
+
+                    <li class="level1"><a href="#关于模拟交易" title="关于模拟交易">关于模拟交易</a></li>
+                    <li class="level2"><a href="#模拟交易个数" title="模拟交易个数">模拟交易个数</a></li>
+                    <li class="level2"><a href="#不同交易的账户管理" title="不同交易的账户管理">不同交易的账户管理</a></li>
+                    <li class="level2"><a href="#交易开启的时间" title="交易开启的时间">交易开启的时间</a></li>
+                    <li class="level2"><a href="#策略中模块的运行顺序" title="策略中模块的运行顺序">策略中模块的运行顺序</a></li>
+                    <li class="level2"><a href="#重启功能" title="重启功能">重启功能</a></li>
+                    <li class="level2"><a href="#回测与交易代码兼容" title="回测与交易代码兼容">回测与交易代码兼容</a></li>
+                    <li class="level2"><a href="#关于模拟交易的稳定性" title="关于模拟交易的稳定性">关于模拟交易的稳定性</a></li>
+                    <li class="level2"><a href="#关于模拟交易的账户数据更新频率" title="关于模拟交易的账户数据更新频率">关于模拟交易的账户数据更新频率</a></li>
+                    <li class="level2"><a href="#tick_data和run_interval的关系" title="tick_data和run_interval的关系">tick_data和run_interval的关系</a></li>
+
+                    <li class="level1"><a href="#关于实盘交易" title="关于实盘交易">关于实盘交易</a></li>
+                    <li class="level2"><a href="#如何开通实盘" title="如何开通实盘">如何开通实盘</a></li>
+                    <li class="level2"><a href="#实盘与模拟交易区别" title="实盘与模拟交易区别">实盘与模拟交易区别</a></li>
+
+                    <li class="level1"><a href="#关于委托" title="关于委托">关于委托</a></li>
+                    <li class="level2"><a href="#实时行情获取失败导致委托失败" title="实时行情获取失败导致委托失败">实时行情获取失败导致委托失败</a></li>
+                    <li class="level2"><a href="#委托数量校验" title="委托数量校验">委托数量校验</a></li>
+                    <li class="level2"><a href="#集合竞价下单" title="集合竞价下单">集合竞价下单</a></li>
+                    <li class="level2"><a href="#委托状态如何监控" title="委托状态如何监控">委托状态如何监控</a></li>
+                    <li class="level2"><a href="#手动委托单策略中能否撤单" title="手动委托单策略中能否撤单">手动委托单策略中能否撤单</a></li>
+
+                    <li class="level1"><a href="#关于三方库" title="关于三方库">关于三方库</a></li>
+                    <li class="level2"><a href="#查询支持的三方库" title="查询支持的三方库">查询支持的三方库</a></li>
+                    <li class="level2"><a href="#三方库更新" title="三方库更新">三方库更新</a></li>
+
+                    <li class="level1"><a href="#其他" title="其他">其他</a></li>
+                    <li class="level2"><a href="#关于调用自有包" title="关于调用自有包">关于调用自有包</a></li>
+                    <li class="level2"><a href="#关于连接自己的数据库" title="关于连接自己的数据库">关于连接自己的数据库</a></li>
+                    <li class="level2"><a href="#如何将信号推送给自己" title="如何将信号推送给自己">如何将信号推送给自己</a></li>
+                    <li class="level2"><a href="#关于OS" title="关于OS">关于OS</a></li>
+                    <li class="level2"><a href="#关于快速地获取最新价" title="关于快速地获取最新价">关于快速地获取最新价</a></li>
+                    <li class="level2"><a href="#关于日线策略运行时间" title="关于日线策略运行时间">关于日线策略运行时间</a></li>
+                    <li class="level2"><a href="#关于get_history中的include参数" title="关于get_history中的include参数">关于get_history中的include参数</a></li>
+                    <li class="level2"><a href="#关于基准设置" title="关于基准设置">关于基准设置</a></li>
+                    <li class="level2"><a href="#策略里如何实现跨周期处理" title="策略里如何实现跨周期处理">策略里如何实现跨周期处理</a></li>
+                    <li class="level2"><a href="#关于requests" title="关于requests">关于requests</a></li>
+                    <li class="level2"><a href="#关于批量委托性能" title="关于批量委托性能">关于批量委托性能</a></li>
+                </ul>
+            </div>
+            <div class="help-content markdown-body">
+                <h1 id="常见问题">常见问题</h1>
+                <h2 id="关于量化平台部署">关于量化平台部署</h2>
+                <h3 id="关于量化环境">关于量化环境</h3>
+                <p>PTrade客户端为本地运行，但量化模块为云端部署方式，客户端通过http或https方式链接云服务器。</p>
+                <h3 id="关于策略安全">关于策略安全</h3>
+                <p>客户策略部署在券商服务器，策略文件加密存储。利用Docker容器技术，隔离多账号运行空间，有效分配各用户账号运行环境，保证策略运行环境与资源使用的独立性。</p>
+                <h3 id="Mac是否支持">Mac是否支持</h3>
+                <p>Mac目前不支持，只能在Windows环境下。</p>
+                <h3 id="关于付费">关于付费</h3>
+                <p>云纪网络提供的仿真环境目前为免费使用，包括所有数据、回测资源、模拟交易资源。券商部署环境以券商发布的使用条件为准。</p>
+                <h3 id="关于程序语言">关于程序语言</h3>
+                <p>PTrade量化目前仅支持Python语言编程。</p>
+                <h3 id="关于Python版本">关于Python版本</h3>
+                <p>目前支持Python3.11.4。</p>
+
+                <h2 id="关于数据">关于数据</h2>
+                <h3 id="数据种类">数据种类</h3>
+                <p>在研究、回测、交易模块均可调用2005年以来的历史财务数据以及历史行情数据，包含分钟、日线、周线不同周期数据。交易场景还支持tick级别行情快照数据。数据支持股票、可转债、指数等多品种。</p>
+                <h3 id="关于数据读写">关于数据读写</h3>
+                <p>研究环境可以存放文件，根目录路径为'/home/fly/notebook/'，可通过get_research_path接口获取。回测和交易中均可以通过该路径进行策略中的读写等操作，从而实现数据的保存和读取。</p>
+                <h3 id="关于本地数据">关于本地数据</h3>
+                <p>由于PTrade为云端部署，策略中是无法与本地路径进行直接交互的。</p>
+                <h3 id="关于行情数据除复权">关于行情数据除复权</h3>
+                <p>PTrade行情数据支持不复权、前复权、后复权、动态前复权四种取历史行情数据的方法，但要注意的是回测中回测引擎撮合的价格是不复权的，因此可以通过除权因子进行价格除权处理。</p>
+                <h3 id="关于level2数据">关于level2数据</h3>
+                <p>云纪网络的仿真环境不提供level2数据，券商环境是否提供，由所在券商决定。</p>
+
+                <h2 id="关于研究">关于研究</h2>
+                <h3 id="研究环境资源">研究环境资源</h3>
+                <p>目前单个的客户研究环境资源没有上限。</p>
+                <h3 id="文件传输限制">文件传输限制</h3>
+                <p>单个文件手动上传下载目前限制单个文件数据大小不超过50M。</p>
+                <h3 id="关于定时上传功能">关于定时上传功能</h3>
+                <p>定时上传功能可以实现研究环境自动从本地路径读取文件，但上传次数是有限制的（具体由券商配置决定），因此仍不能支持高频的策略中调用本地数据场景。</p>
+                <p>定时上传功能目前限制单个文件数据大小不超过50M。</p>
+                <h3 id="上传文件夹">上传文件夹</h3>
+                <p>暂时不支持文件夹上传，文件需要逐个上传。</p>
+
+
+                <h2 id="关于回测">关于回测</h2>
+                <h3 id="回测与研究有什么区别">回测与研究有什么区别</h3>
+                <p>研究环境更侧重于数据的清洗、处理、建模、画图、debug 调试等，类似于本地的Python 编程，无法调用诸如order下单，账户资产等等与交易相关的函数。回测环境则更适用于完成完整的交易策略搭建、参数调优、历史收益回测等，更贴近交易。一般的，研究环境适用于对程序有调试需求，需要知道每一步程序执行的结果的用户，而回测则更适用于想知道策略在历史时间段内的收益如何，以便对策略参数甚至是构建思想进行调优的用户。</p>
+                <h3 id="回测个数">回测个数</h3>
+                <p>目前支持同时进行5个回测。</p>
+                <h3 id="回测的速度">回测的速度</h3>
+                <p>PTrade量化中部分接口为在线调用接口，调用速度会受瞬时网络情况影响，比如get_fundamentals、get_Ashares，回测中按实际需求尽量少频次地调用这类在线调用接口。另外分钟级别策略中如果用到日频的历史数据，在before_trading_start模块处理一次就可以，这样可以提升回测的速度。</p>
+                <h3 id="关于回测周期">关于回测周期</h3>
+                <p>目前回测只支持分钟和日线周期的回测。</p>
+                <h3 id="关于调试功能">关于调试功能</h3>
+                <p>量化分步调试功能可以帮助开发者更高效地debug策略代码。该功能在回测模块中，支持调用堆栈查询、变量监视、本地变量查询功能。</p>
+                <p><img src="../static/images/QA/debug1.png" width="700" height="500"></p>
+                <p><img src="../static/images/QA/debug2.png" width="700" height="500"></p>
+                <h3 id="关于性能分析">关于性能分析</h3>
+                <p>性能分析功能会对运行结果做分析，包括语句的触发次数和耗时情况，能够帮助用户快速地做策略性能优化。</p>
+                <p><img src="../static/images/QA/nature_analysis1.png" width="1000" height="500"></p>
+                <p><img src="../static/images/QA/nature_analysis2.png" width="1000" height="500"></p>
+                <p><img src="../static/images/QA/nature_analysis3.png" width="1000" height="500"></p>
+                <h3 id="关于离线回测">关于离线回测</h3>
+                <p>PTrade量化平台目前不支持离线回测，回测期间必须保障客户端打开。</p>
+                <h3 id="关于策略上传和下载">关于策略上传和下载</h3>
+                <p>PTrade量化平台所创建的策略是可以加密下载和上传的，我们利用AES/DES加密技术对文件流进行加密处理，随机生成盐值进行干扰混淆，保障上传与下载安全私密性。该功能的用途在于支持同一策略在不同账户上实现隐藏代码地进行模拟交易。</p>
+                <p>操作方法：</p>
+                <p>一、选定策略，点鼠标右键，选择下载，然后将策略保存到指定路径，下载的文件为zip格式，下载后不要做解压。 可以对该zip文件做重命名也可以不做处理，对于上传没有影响。</p>
+                <p><img src="../static/images/QA/download.png" width="500" height="500"></p>
+                <p>二、点击交易中的上传策略。  上传的策略我们可以在回测的策略列表中查询到，策略名称跟下载时候的策略名称保持一致，假如与原策略列表中出现重名，也不会报错。上传策略不允许修改策略名称，且不允许修改策略代码。上传的策略不可以做回测，仅能用来开启交易。</p>
+                <p><img src="../static/images/QA/update.png" width="1000" height="500"></p>
+                <h3 id="回测撮合是否受真实成交限制">回测撮合是否受真实成交限制</h3>
+                <p>回测提供了两种成交撮合方式，通过set_limit_mode接口控制，一种是按初始化设定的分钟成交量比例进行成交撮合，另一种是不受分钟成交量限制。前者可以较为真实地反映流动性对策略的影响，后者比较适合低频调仓策略，比如基本面月频调仓策略之类。</p>
+                <h3 id="获取每次回测代码">获取每次回测代码</h3>
+                <p>在回测记录中找到目标回测记录，在‘操作’栏中点击详情按钮获得回测代码。</p>
+                <p><img src="../static/images/QA/strategy.png" width="1000" height="500"></p>
+
+
+                <h2 id="关于模拟交易">关于模拟交易</h2>
+                <h3 id="模拟交易个数">模拟交易个数</h3>
+                <p>默认允许同时运行5个交易，具体以券商配置为准。</p>
+                <h3 id="交易过程可以客户端离线吗">交易过程可以客户端离线吗</h3>
+                <p>交易在服务器上运行，因此客户端关闭或掉线并不影响策略运行。</p>
+                <h3 id="不同交易的账户管理">不同交易的账户管理</h3>
+                <p>所有运行的模拟交易或实盘交易都共享一个账户（资金、持仓无法隔离），暂不支持子账户交易系统。</p>
+                <h3 id="交易开启的时间">交易开启的时间</h3>
+                <p>交易在任何时间都可以开启，开启后会立刻运行initialize和before_trading_start（如果策略中定义的话），要注意的是：开盘前开启交易，before_trading_start肯定会先于handle_data开启；但开盘期间开启交易，before_trading_start和handle_data可能会同时运行，策略逻辑防止混乱。</p>
+                <h3 id="策略中模块的运行顺序">策略中模块的运行顺序</h3>
+                <p>交易中before_trading_start、handle_data、tick_data、run_interval都是独立的线程，当交易开启之后，每个线程都会启动，理论上没有先后顺序关系。因此建议在策略中设置强制顺序的控制系统，比如运行完before_trading_start后打开handle_data的运行开关，运行完handle_data后打开tick_data或者run_interval的运行开关。</p>
+                <h3 id="重启功能">重启功能</h3>
+                <p>重启功能和新建交易本质上是一样的，会重新创建交易id，原策略中的内存变量如果不做保存会清除。</p>
+                <h3 id="回测与交易代码兼容">回测与交易代码兼容</h3>
+                <p>由于交易中支持tick数据以及市价单下单，因此大多数情况下回测和交易在代码设计上会有不同。为了减少代码维护的难度，PTrade量化提供了is_trade接口。通过该接口，用户可以在一套代码中兼容回测和交易两种逻辑。</p>
+                <h3 id="关于模拟交易的稳定性">关于模拟交易的稳定性</h3>
+                <p>常见的影响交易稳定性的因素来自以下几方面：</p>
+                <p>1、历史行情K线数据服务器更新异常。这种情况往往可以通过比较入参的K线数量、实际返回数据框的长度、时间戳index去重后的返回数据框的长度来做判断（看三者是否保持一致）。</p>
+                <p>2、实时行情数据获取失败。实时行情源的推送并不能保证一直稳定，因此需要做数据保护：比如</p>
+                <pre class="prettyprint"><code class="language-python">def initialize(context):
+    # 初始化此策略
+    # 设置我们要操作的股票池, 这里我们只操作一支股票
+    g.security = ['600570.SS','600571.SS']
+    set_universe(g.security)
+    #每3秒运行一次主函数
+    run_interval(context, func, seconds=3)
+    
+def func(context):
+    for stock in g.security:
+        #获取最新价
+        snapshot = get_snapshot(stock)
+        # 非空判断
+        if snapshot[stock]:
+            # 字段数据做保护
+            price = snapshot[stock].get('last_px', 0)
+            if price == 0:
+                log.info((stock,'该股在本tick行情数据异常，不进行判断'))
+                continue
+            order(stock, 100, limit_price=price)
+
+def handle_data(context, data):
+    pass
+</code></pre>
+                <p>3、财务数据获取失败。财务数据接口是在线向数据源调用的接口，瞬时调用量过大或者其他导致网络堵塞的原因都有可能使得获取失败，因此建议加入重连机制做保护（可参考单因子demo）。</p>
+                <p>4、服务器环境异常。这种情况是用户主观不能控制的，但可以通过持久化处理，让策略在短暂停止后，重新拉起并保持原有的策略逻辑连贯（可参考持久化说明）。</p>
+                <h3 id="关于模拟交易的账户数据更新频率">关于模拟交易的账户数据更新频率</h3>
+                <p>模拟交易和实盘交易的账户数据同步理论上是6秒一次，包括资金、持仓、订单状态、撤单状态等。因此用户需要自建一定的中间变量做过度，防止重复交易或者重复判断。</p>
+                <h3 id="tick_data和run_interval的关系">tick_data和run_interval的关系</h3>
+                <p>tick_data和run_interval都可以实现tick级别周期策略，tick_data固定3秒一个间隔，run_interval可以随意设置运行间隔时间，最小间隔3秒，数据源也都是行情快照数据，因此可以选择其一进行策略设计。</p>
+
+                <h2 id="关于实盘交易">关于实盘交易</h2>
+                <h3 id="如何开通实盘">如何开通实盘</h3>
+                <p>向开展PTrade量化业务的所在券商进行申请。</p>
+                <h3 id="实盘与模拟交易区别">实盘与模拟交易区别</h3>
+                <p>模拟交易和实盘交易在数据获取的机制上是一致的，只是成交撮合机制不同。</p>
+
+                <h2 id="关于委托">关于委托</h2>
+                <h3 id="实时行情获取失败导致委托失败">实时行情获取失败导致委托失败</h3>
+                <p>限价委托接口包括order、order_target、order_value、order_target_value，如果不入参限价字段limit_price，引擎会默认以将行情最新价报单要，碰到行情异常快照数据推送为空的时候，下单会失败形成废单，日志中会有提醒，可以通过废单逻辑判断来进行二次委托。</p>
+                <h3 id="委托数量校验">委托数量校验</h3>
+                <p>委托接口有委托数量校验，如果数量不是整数，会下单失败返回None。</p>
+                <h3 id="集合竞价下单">集合竞价下单</h3>
+                <p>已支持，参考集合竞价demo。</p>
+                <h3 id="委托状态如何监控">委托状态如何监控</h3>
+                <p>get_orders接口可以获取当日本策略的所有订单信息（6秒同步更新），交易模块还可调用on_trade_response接口获取成交回报主推。</p>
+                <h3 id="手动委托单策略中能否撤单">手动委托单策略中能否撤单</h3>
+                <p>通过get_all_orders接口获取账户当日全部订单，再结合cancel_order_ex撤单接口，可以对手动委托单进行撤单。</p>
+
+
+                <h2 id="关于三方库">关于三方库</h2>
+                <h3 id="查询支持的三方库">查询支持的三方库</h3>
+                <p>研究中输入 !pip list 即可查询到目前PTrade所支持的所有三方库及其版本。</p>
+                <h3 id="三方库更新">三方库更新</h3>
+                <p>目前暂不支持用户对三方库的自主更新。</p>
+
+                <h2 id="其他">其他</h2>
+                <h3 id="关于调用自有包">关于调用自有包</h3>
+                <p>策略中不支持调包，也不支持跨策略调用函数，因此一个策略只能在一个文件中实现。</p>
+                <h3 id="关于连接自己的数据库">关于连接自己的数据库</h3>
+                <p>因合规要求，目前不支持对本地数据库读写。可以在研究环境上传db文件，通过Python自带库包sqlite进行数据库读写操作。</p>
+                <h3 id="如何将信号推送给自己">如何将信号推送给自己</h3>
+                <p>可通过邮件、企业微信接口实现，因该业务需要开通外网，实际看券商环境是否支持。</p>
+                <h3 id="关于OS">关于OS</h3>
+                <p>os模块目前无法使用。</p>
+                <h3 id="关于快速地获取最新价">关于快速地获取最新价</h3>
+                <p>在回测中建议用data[stock].price（注意这种方法取到的是不复权数据），交易中用get_snapshot接口获取行情快照的最新价。</p>
+                <h3 id="关于日线策略运行时间">关于日线策略运行时间</h3>
+                <p>回测中是15:00执行；交易中默认设置是14:50分，具体看所在券商的配置。</p>
+                <h3 id="关于get_history中的include参数">关于get_history中的include参数</h3>
+                <p>get_history中的include参数默认为False，如果设置为True，则返回包含当前周期的数据。日线周期（或以上级别）策略的回测场景设置include参数为True获取当日数据，可以使得回测更加快速便捷，其他场景建议谨慎使用该参数。</p>
+                <h3 id="关于基准设置">关于基准设置</h3>
+                <p>基准支持设置为指数/个股/ETF，可参阅set_benchmark。</p>
+                <h3 id="策略里如何实现跨周期处理">策略里如何实现跨周期处理</h3>
+                <p>可以通过run_interval和handle_data相结合实现，根据策略逻辑进行编写。</p>
+                <h3 id="关于requests">关于requests</h3>
+                <p>目前不能使用requests。</p>
+                <h3 id="关于批量委托性能">关于批量委托性能</h3>
+                <p>策略发起委托到柜台接收的速度，测试结果：300笔委托耗时2秒。</p>
+            </div>
+            <div class="help-return">
+    <a class="returnHash" href="#"></a>
+    <a class="returnTop" href="#"></a>
+</div>
+        </div>
+    </div>
+    <script src="../static/js/lib/jquery-1.9.1.minaf43.js?v=6ef1e9c156e7131726cdec6f2f0d15d009d1a3acd2787c82fd1e28112381611104b6455973c85c00bd2b2cc3843ae212745855820ea8a5cc14d9254eb7f0d563"></script>
+    <script src="../static/js/lib/bootstrap/js/bootstrap.min0735.js?v=d9ef2aab411371f5912381c9073422037528c8593ab5b3721bea926880592f25bd5dfdec5991cdfe5c5ef5f4e1d54e390e93dfd3bca3f782ac5071d67b8624d4"></script>
+    <script src="../static/js/lib/utils.min0300.js?v=d6f88598eaac82d771f7db8c85d73f1007fd0a900e69c4e32991de6ceb3b4418f361234ba68633ebbf5dbdcfc9566180612608c9aebcd085ba3af61e2582f5f5"></script>
+    <script src="../static/js/lib/prettify.min8a50.js?v=b6b1cb14323ff6aa0fd68a1ea3dda84362608cbc3fbe6b27ce1d1f7cf5fa04c3983aa493b4ae63a10bb327444c7b2ae3bb1495aa0a40d59278604fae0c3a12df"></script>
+    <script src="../static/js/fly.min6b7a.js?v=2a56bca38b00790aee9191b8f829f5170bdef9ca076115f1d1d8e9eaeda8da6576490430b0cecfc5017017b0f0987d11ed64f90a23b22ac0a068daf90a3b6db9"></script>
+    <script src="../static/js/api-search.js"></script>
+</body>
+
+</html>

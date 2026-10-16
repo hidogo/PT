@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+
+
+<head>
+    <meta charset="utf-8">
+    <title>企业微信功能相关说明</title>
+    <meta name="keywords" content="企业微信,send_qywx,消息推送,ptrade">
+    <meta name="description" content="PTrade 企业微信功能使用手册：通过 send_qywx 接口发送企业微信消息的配置与使用方法。">
+    <meta name="applicable-device" content="pc,mobile">
+    <meta name="robots" content="index,follow">
+    <link rel="shortcut icon" href="http://180.169.107.9:7766/hub/static/favicon.ico?v=2b08607916c12ee78673dda66397634bcb6b196f6cf1f7ce740efc7909d06cc2069bea653eb33035d14c1b2f10ef921f0adbd1b62f65e8e53cbfc5610f4c5344" type="image/x-icon">
+    <link rel="stylesheet" href="../static/css/fly.mincd67.css?v=0463e1a91b3861d0cfdd4ae57b40d10d8e9775feba49a94cfa256c9dadab62aaf4d7cf7b4816d6c7b9767a6006fb61e4016b9693dae8b21189cdf80401ec262f2017121501">
+    <link rel="stylesheet" href="../static/js/lib/bootstrap/css/bootstrap.min3692.css?v=59e121c0b579a038be2d5c48d75440e53dbcfe05087879a594773ca0911b0125e7c9be36b00f3367bd8810b4104aa54defac9a8eeb95fa3d064f931b49d555de">
+</head>
+
+<body class="pt52 noScroll">
+    <div class="algorithm-head clearfix" style="display:none;">
+    <style type="text/css"> .pt52 {padding-top:0} .help-nav {top:0} </style>
+    <span class="head-logo">恒生投研平台</span>
+    <ul class="head-nav" style="display:none;">
+        <li><a href="http://180.169.107.9:7766/start" target="_blank">首页</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/home" target="_blank">研究</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/strategys" target="_blank">策略</a></li>
+        <li><a href="http://180.169.107.9:7766/trades" target="_blank">交易</a></li>
+        <li><a href="http://180.169.107.9:7766/data" target="_blank">数据</a></li>
+        <li><a href="http://180.169.107.9:7766/help/api" target="_blank">帮助</a></li>
+        
+    </ul>
+</div>
+    <div class="body">
+        <div class="help ui-scrollspy" id="help-content">
+            <div class="help-nav">
+                <ul id="help-nav">
+                    <li class="level1"><a href="#企业微信功能相关说明">企业微信功能相关说明</a></li>
+                    <li class="level2"><a href="#注册企业微信">注册企业微信</a></li>
+                    <li class="level2"><a href="#获取corp_id">获取corp_id</a></li>
+                    <li class="level2"><a href="#获取agent_id、secret">获取agent_id、secret</a></li>
+                    <li class="level2"><a href="#设置接收信息对象">设置接收信息对象</a></li>
+                </ul>
+            </div>
+            <div class="help-content markdown-body">
+                <h1 id="企业微信功能相关说明">企业微信功能相关说明</h1>
+                <h2 id="注册企业微信">注册企业微信</h2>
+                <p> 企业微信注册链接：https://work.weixin.qq.com/nl/sem/registe?s=c&from=1011029478&bd_vid=10277243242845458530</p>
+                <p>第一步</p>
+                <p><img src="../static/images/help/register1.png" width="1000" height="500"></p>
+                <p>第二步</p>
+                <p><img src="../static/images/help/register2.png" width="1000" height="500"></p>
+                <p>第三步</p>
+                <p><img src="../static/images/help/register3.png" width="1000" height="500"></p>
+                <h2 id="获取corp_id">获取corp_id</h2>
+                <p>第一步</p>
+                <p>登录企业微信，企业微信登录链接：https://work.weixin.qq.com/wework_admin/loginpage_wx</p>
+                <p>第二步</p>
+                <p>点击我的企业-企业ID，即是企业微信corp_id</p>
+                <p><img src="../static/images/help/get_corp_id.png" width="1000" height="500"></p>
+                <h2 id="获取agent_id、secret">获取agent_id、secret</h2>
+                <p>第一步</p>
+                <p>企业微信管理后台WEB页面，点击应用管理，创建一个用于接收消息的应用，创建应用的时候需要设置可见范围，可以先随便选一个。这个可见范围即为信息接收对象的候选对象。具体如何设置接收对象在下文有详细介绍</p>
+                <p><img src="../static/images/help/get_agent_id_secret1.png" width="1000" height="500"></p>
+                <p>第二步</p>
+                <p>点击创建好的应用，可以获取对应的agent_id、secret</p>
+                <p><img src="../static/images/help/get_agent_id_secret2.png" width="1000" height="500"></p>
+                <h2 id="设置接收信息对象">设置接收信息对象</h2>
+                <p>第一步</p>
+                <p>点击创建的某应用，然后点击编辑，进入设置页面</p>
+                <p><img src="../static/images/help/set_sender1.png" width="1000" height="500"></p>
+                <p>第二步</p>
+                <p>点击添加，把所有需要发送的对象都添加到可见范围</p>
+                <p><img src="../static/images/help/set_sender2.png" width="1000" height="500"></p>
+                <p>第三步</p>
+                <p>接收信息的对象一共有3种，一种是组织(API中的toparty)，一种是个人(API中的touser)，一种是标签(API中的totag)，组织和个人在组织架构中选择，标签对象在标签中选择。勾选后的各类对象会在右侧呈现。完成后按确认</p>
+                <p><img src="../static/images/help/set_sender3.png" width="1000" height="500"></p>
+                <p>第四步</p>
+                <p>点击完成</p>
+                <p><img src="../static/images/help/set_sender4.png" width="1000" height="500"></p>
+                <h4>关于如何查询各个组织、个人、标签的ID</h4>
+                <p>进入通讯录进行查询</p>
+                <p><img src="../static/images/help/set_sender5.png" width="1000" height="500"></p>
+                <p><img src="../static/images/help/set_sender6.png" width="1000" height="500"></p>
+                <p><img src="../static/images/help/set_sender7.png" width="1000" height="500"></p>
+                <p><img src="../static/images/help/set_sender8.png" width="1000" height="500"></p>               
+            </div>
+            <div class="help-return">
+    <a class="returnHash" href="#"></a>
+    <a class="returnTop" href="#"></a>
+</div>
+        </div>
+    </div>
+    <script src="../static/js/lib/jquery-1.9.1.minaf43.js?v=6ef1e9c156e7131726cdec6f2f0d15d009d1a3acd2787c82fd1e28112381611104b6455973c85c00bd2b2cc3843ae212745855820ea8a5cc14d9254eb7f0d563"></script>
+    <script src="../static/js/lib/bootstrap/js/bootstrap.min0735.js?v=d9ef2aab411371f5912381c9073422037528c8593ab5b3721bea926880592f25bd5dfdec5991cdfe5c5ef5f4e1d54e390e93dfd3bca3f782ac5071d67b8624d4"></script>
+    <script src="../static/js/lib/utils.min0300.js?v=d6f88598eaac82d771f7db8c85d73f1007fd0a900e69c4e32991de6ceb3b4418f361234ba68633ebbf5dbdcfc9566180612608c9aebcd085ba3af61e2582f5f5"></script>
+    <script src="../static/js/lib/prettify.min8a50.js?v=b6b1cb14323ff6aa0fd68a1ea3dda84362608cbc3fbe6b27ce1d1f7cf5fa04c3983aa493b4ae63a10bb327444c7b2ae3bb1495aa0a40d59278604fae0c3a12df"></script>
+    <script src="../static/js/fly.min6b7a.js?v=2a56bca38b00790aee9191b8f829f5170bdef9ca076115f1d1d8e9eaeda8da6576490430b0cecfc5017017b0f0987d11ed64f90a23b22ac0a068daf90a3b6db9"></script>
+    <script src="../static/js/api-search.js"></script>
+</body>
+
+</html>

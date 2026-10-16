@@ -1,0 +1,83 @@
+"""PT 自包含复盘/预期桥接包（从 AXquant 迁移，零 axquant 依赖，独立运行）。"""
+
+from .model import (
+    OpenReasonRecord,
+    PositionReviewRecord,
+    ExpectationRecord,
+    ROLE_FIRST_BOARD,
+    ROLE_CONSECUTIVE_LIMIT_UP,
+    ROLE_ELASTIC_ARB,
+    ROLE_CAPACITY_TREND,
+    ENTRY_TYPE_NORMAL,
+    ENTRY_TYPE_ONE_WORD,
+)
+from .expectation_store import (
+    append_open_reason,
+    append_expectation_record,
+    write_expectation_records,
+    read_position_reviews,
+    write_position_reviews,
+    default_open_reason_path,
+    default_expectation_path,
+    default_review_path,
+    all_expectations,
+    latest_expectation_status_map,
+    export_expectation_csv,
+    PTRADE_BRIDGE_DIR,
+)
+from . import calendar  # noqa: F401
+
+from .rules import (
+    evaluate_one_word_expectation,
+    evaluate_auction_status,
+    evaluate_intraday_status,
+)
+from .publish import (
+    make_review_records,
+    confirm_auction,
+    confirm_intraday,
+    update_intraday_state,
+    IntradayState,
+    resolve_review_date,
+    load_snapshot_map,
+    derive_role_detail,
+    derive_expectation_weight,
+    derive_sell_policy_hint,
+)
+
+__all__ = [
+    "OpenReasonRecord",
+    "PositionReviewRecord",
+    "ExpectationRecord",
+    "ROLE_FIRST_BOARD",
+    "ROLE_CONSECUTIVE_LIMIT_UP",
+    "ROLE_ELASTIC_ARB",
+    "ROLE_CAPACITY_TREND",
+    "ENTRY_TYPE_NORMAL",
+    "ENTRY_TYPE_ONE_WORD",
+    "append_open_reason",
+    "append_expectation_record",
+    "write_expectation_records",
+    "read_position_reviews",
+    "write_position_reviews",
+    "default_open_reason_path",
+    "default_expectation_path",
+    "default_review_path",
+    "all_expectations",
+    "latest_expectation_status_map",
+    "export_expectation_csv",
+    "PTRADE_BRIDGE_DIR",
+    "evaluate_one_word_expectation",
+    "evaluate_auction_status",
+    "evaluate_intraday_status",
+    "make_review_records",
+    "confirm_auction",
+    "confirm_intraday",
+    "update_intraday_state",
+    "IntradayState",
+    "resolve_review_date",
+    "load_snapshot_map",
+    "derive_role_detail",
+    "derive_expectation_weight",
+    "derive_sell_policy_hint",
+]

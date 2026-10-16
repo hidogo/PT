@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <title>策略示例</title>
+    <meta name="keywords" content="策略示例,量化策略,ptrade,回测">
+    <meta name="description" content="PTrade 策略示例文档：平台量化策略编写示例代码。">
+    <meta name="applicable-device" content="pc,mobile">
+    <meta name="robots" content="index,follow">
+    <link rel="shortcut icon" href="http://180.169.107.9:7766/hub/static/favicon.ico?v=2b08607916c12ee78673dda66397634bcb6b196f6cf1f7ce740efc7909d06cc2069bea653eb33035d14c1b2f10ef921f0adbd1b62f65e8e53cbfc5610f4c5344" type="image/x-icon">
+    <link rel="stylesheet" href="../static/css/fly.mincd67.css?v=0463e1a91b3861d0cfdd4ae57b40d10d8e9775feba49a94cfa256c9dadab62aaf4d7cf7b4816d6c7b9767a6006fb61e4016b9693dae8b21189cdf80401ec262f2017121501">
+    <link rel="stylesheet" href="../static/js/lib/bootstrap/css/bootstrap.min3692.css?v=59e121c0b579a038be2d5c48d75440e53dbcfe05087879a594773ca0911b0125e7c9be36b00f3367bd8810b4104aa54defac9a8eeb95fa3d064f931b49d555de">
+</head>
+
+<body class="pt52 noScroll">
+    <div class="algorithm-head clearfix" style="display:none;">
+    <style type="text/css"> .pt52 {padding-top:0} .help-nav {top:0} </style>
+    <span class="head-logo">恒生投研平台</span>
+    <ul class="head-nav" style="display:none;">
+        <li><a href="http://180.169.107.9:7766/start" target="_blank">首页</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/home" target="_blank">研究</a></li>
+        
+        <li><a href="http://180.169.107.9:7766/strategys" target="_blank">策略</a></li>
+        <li><a href="http://180.169.107.9:7766/trades" target="_blank">交易</a></li>
+        <li><a href="http://180.169.107.9:7766/data" target="_blank">数据</a></li>
+        <li><a href="http://180.169.107.9:7766/help/api" target="_blank">帮助</a></li>
+        
+    </ul>
+</div>
+    <div class="body" >
+        <div class="help ui-scrollspy" id="help-content">
+            <div class="help-nav">
+                <ul id="help-nav">
+                    <li class="level1"><a href="#策略示例" title="策略示例">策略示例</a></li>
+
+                    <li class="level2"><a href="#股票策略示例" title="股票策略示例">股票策略示例</a></li>
+                    <li class="level3"><a href="#集合竞价追涨停策略" title="集合竞价追涨停策略">集合竞价追涨停策略</a></li>
+                    <li class="level3"><a href="#tick级别均线策略" title="tick级别均线策略">tick级别均线策略</a></li>
+                    <li class="level3"><a href="#双均线策略" title="双均线策略">双均线策略</a></li>
+                    <li class="level3"><a href="#macd策略" title="MACD策略">MACD策略</a></li>
+
+                    <li class="level2"><a href="#两融策略示例" title="两融策略示例">两融策略示例</a></li>
+                    <li class="level3"><a href="#融资融券双均线策略" title="融资融券双均线策略">融资融券双均线策略</a></li>
+
+<!--                    <li class="level2"><a href="#期货策略示例" title="期货策略示例">期货策略示例</a></li>-->
+
+<!--                    <li class="level2"><a href="#期权策略示例" title="期权策略示例">期权策略示例</a></li>-->
+
+<!--                    <li class="level2"><a href="#港股通策略示例" title="港股通策略示例">港股通策略示例</a></li>-->
+                </ul>
+            </div>
+            <div class="help-content markdown-body">
+                <h1 id="策略示例">策略示例</h1>
+                <div class="strategy-demo-secu">
+                    <h2 id="股票策略示例">股票策略示例</h2>
+                    <div class="strategy-demo">
+                    <h3 id="集合竞价追涨停策略">集合竞价追涨停策略</h3>
+                    <h4>策略说明</h4>
+                    <p>设置股票池，每天9:23分运行集合竞价处理函数：如果最新价不小于涨停价则买入</p>
+                    <h4>示例</h4>
+                    <pre class="prettyprint"><code class="language-python">def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+    #每天9:23分运行集合竞价处理函数
+    run_daily(context, aggregate_auction_func, time='9:23')
+
+def aggregate_auction_func(context):
+    stock = g.security
+    # 获取最新价
+    snapshot = get_snapshot(stock)
+    price = snapshot[stock]['last_px']
+    # 获取涨停价
+    up_limit = snapshot[stock]['up_px']
+    # 如果最新价不小于涨停价则买入
+    if float(price) >= float(up_limit):
+        order(g.security, 100, limit_price=up_limit)
+
+def handle_data(context, data):
+    pass
+</code></pre>
+                </div>
+                    <div class="strategy-demo">
+                    <h3 id="tick级别均线策略">tick级别均线策略</h3>
+                    <h4>策略说明</h4>
+                    <p>设置股票池，盘前准备历史数据，每3秒钟触发一次：首先用最新的tick行情数据计算五日均线和十日均线，然后进行比较：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出</p>
+                    <h4>示例</h4>
+                    <pre class="prettyprint"><code class="language-python">def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+    # 每3秒运行一次主函数
+    run_interval(context, func, seconds=3)
+
+# 盘前准备历史数据
+def before_trading_start(context, data):
+    history = get_history(10, '1d', 'close', g.security, fq='pre', include=False)
+    g.close_array = history['close'].values
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def func(context):
+
+    stock = g.security
+
+    # 获取最新价
+    snapshot = get_snapshot(stock)
+    price = snapshot[stock]['last_px']
+
+    # 获取五日均线价格
+    days = 5
+    ma5 = get_MA_day(stock, days, g.close_array[-4:], price)
+    # 获取十日均线价格
+    days = 10
+    ma10 = get_MA_day(stock, days, g.close_array[-9:], price)
+
+    # 获取当前资金余额
+    cash = context.portfolio.cash
+
+    # 如果当前有余额，并且五日均线大于十日均线则买入
+    if ma5 > ma10:
+        # 用所有 cash 买入股票
+        order_value(stock, cash)
+        # 记录这次买入
+        log.info("Buying %s" % (stock))
+
+    # 如果五日均线小于十日均线，并且目前有头寸，则全部卖出
+    elif ma5 < ma10 and get_position(stock).amount > 0:
+        # 全部卖出
+        order_target(stock, 0)
+        # 记录这次卖出
+        log.info("Selling %s" % (stock))
+
+# 计算实时均线函数
+def get_MA_day(stock,days,close_array,current_price):
+    close_sum = close_array[-(days-1):].sum()
+    MA = (current_price + close_sum)/days
+    return MA
+
+def handle_data(context, data):
+    pass
+</code></pre>
+                </div>
+                    <div class="strategy-demo">
+                    <h3 id="双均线策略">双均线策略</h3>
+                    <h4>策略说明</h4>
+                    <p>设置股票池，每个handle_data周期进行如下判断处理：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出</p>
+                    <h4>示例</h4>
+                    <pre class="prettyprint"><code class="language-python">def initialize(context):
+    # 初始化此策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = '600570.SS'
+    set_universe(g.security)
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def handle_data(context, data):
+    security = g.security
+
+    # 获取十日历史价格
+    df = get_history(10, '1d', 'close', security, fq=None, include=False)
+
+    # 获取五日均线价格
+    ma5 = round(df['close'][-5:].mean(), 3)
+
+    # 获取十日均线价格
+    ma10 = round(df['close'][-10:].mean(), 3)
+
+    # 获取昨天收盘价
+    price = data[security]['close']
+
+    # 获取当前资金余额
+    cash = context.portfolio.cash
+
+    # 如果当前有余额，并且五日均线大于十日均线
+    if ma5 > ma10:
+        # 用所有 cash 买入股票
+        order_value(security, cash)
+        # 记录这次买入
+        log.info("Buying %s" % (security))
+
+    # 如果五日均线小于十日均线，并且目前有头寸
+    elif ma5 < ma10 and get_position(security).amount > 0:
+        # 全部卖出
+        order_target(security, 0)
+        # 记录这次卖出
+        log.info("Selling %s" % (security))
+</code></pre>
+                </div>
+                    <div class="strategy-demo">
+                    <h3 id="macd策略">macd策略</h3>
+                    <h4>策略说明</h4>
+                    <p>用历史日K线数据计算MACD指标，以计算结果进行买入卖出交易。</p>
+                    <h4>示例</h4>
+                    <pre class="prettyprint"><code class="language-python">"""
+macd强势金叉买入、macd弱势死叉卖出
+"""
+def initialize(context):
+    g.hold_num = 10
+
+def before_trading_start(context, data):
+    # 获取沪深300股票
+    g.security_list = get_index_stocks('000300.SS')
+    g.close_data_dict = {}
+    # 获取K线数据
+    history = get_history(100, frequency='1d', field=["close"], security_list=g.security_list, fq='dypre',
+                             include=False, is_dict=True)
+    for stock in g.security_list:
+        close_data = history[stock]['close']
+        g.close_data_dict[stock] = close_data
+    g.every_value = context.portfolio.portfolio_value / g.hold_num
+
+def handle_data(context, data):
+
+    for security in g.security_list:
+        close_data = g.close_data_dict[security]
+        macdDIF_data, macdDEA_data, macd_data = get_MACD(close_data, 12, 26, 9)
+        DIF = macdDIF_data[-1]
+        DEA = macdDEA_data[-1]
+        macd_current = macd_data[-1]
+        macd_pre = macd_data[-2]
+
+        # 获取当前价格
+        current_price = data[security].price
+        # 获取当前的现金
+        position = context.portfolio.positions
+        # DIF、DEA均为正，macd金叉，买入信号参考
+        if position[security].amount == 0:
+            if DIF > 0 and DEA > 0 and macd_pre < 0 and macd_current >= 0:
+                if context.portfolio.cash < g.every_value*0.8:
+                    continue
+
+                # 以市单价买入股票，日回测时即是开盘价
+                order_target_value(security, g.every_value)
+                # 记录这次买入
+                log.info("Buying %s" % (security))
+        else:
+            # DIF、DEA均为负，macd死叉，卖出信号参考
+            if DIF < 0 and DEA < 0 and macd_pre >= 0 and macd_current < 0:
+                # 卖出所有股票,使这只股票的最终持有量为0
+                order_target(security, 0)
+                # 记录这次卖出
+                log.info("Selling %s" % (security))</code></pre>
+                </div>
+                </div>
+                <div class="strategy-demo-crdt">
+                    <h2 id="两融策略示例">两融策略示例</h2>
+                    <div class="strategy-demo">
+                    <h3 id="融资融券双均线策略">融资融券双均线策略</h3>
+                    <h4>策略说明</h4>
+                    <p>设置标的池，每个handle_data周期进行如下判断处理：当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出。其中买入卖出所调用的API为融资融券业务专用API。</p>
+                    <h4>示例</h4>
+                    <pre class="prettyprint"><code class="language-python">def initialize(context):
+    # 初始化策略
+    # 设置股票池, 这里我们只操作一支股票
+    g.security = "600570.SS"
+    set_universe(g.security)
+
+def before_trading_start(context, data):
+    # 买入标识
+    g.order_buy_flag = False
+    # 卖出标识
+    g.order_sell_flag = False
+
+# 当五日均线高于十日均线时买入，当五日均线低于十日均线时卖出
+def handle_data(context, data):
+    # 获取十日历史价格
+    df = get_history(10, "1d", "close", g.security, fq=None, include=False)
+    # 获取五日均线价格
+    ma5 = round(df["close"][-5:].mean(), 3)
+    # 获取十日均线价格
+    ma10 = round(df["close"][-10:].mean(), 3)
+    # 获取昨天收盘价
+    price = data[g.security]["close"]
+    # 如果五日均线大于十日均线
+    if ma5 > ma10:
+        if not g.order_buy_flag:
+            # 获取最大可融资数量
+            amount = get_margincash_open_amount(g.security).get(g.security)
+            # 进行融资买入操作
+            margincash_open(g.security, amount)
+            # 记录这次操作
+            log.info("Buying %s Amount %s" % (g.security, amount))
+            # 当日已融资买入
+            g.order_buy_flag = True
+
+    # 如果五日均线小于十日均线，并且目前有头寸
+    elif ma5 < ma10 and get_position(g.security).amount > 0:
+        if not g.order_sell_flag:
+            # 获取标的卖券还款最大可卖数量
+            amount = get_margincash_close_amount(g.security).get(g.security)
+            # 进行卖券还款操作
+            margincash_close(g.security, -amount)
+            # 记录这次操作
+            log.info("Selling %s Amount %s" % (g.security, amount))
+            # 当日已卖券还款
+            g.order_sell_flag = True
+</code></pre>
+                </div>
+                </div>
+<!--                <div class="strategy-demo-future">-->
+<!--                    <h2 id="期货策略示例">期货策略示例</h2>-->
+<!--                </div>-->
+<!--                <div class="strategy-demo-option">-->
+<!--                    <h2 id="期权策略示例">期权策略示例</h2>-->
+<!--                </div>-->
+<!--                <div class="strategy-demo-hk">-->
+<!--                    <h2 id="港股通策略示例">港股通策略示例</h2>-->
+<!--                </div>-->
+            </div>
+            <div class="help-return">
+    <a class="returnHash" href="#"></a>
+    <a class="returnTop" href="#"></a>
+</div>
+        </div>
+    </div>
+    <script src="../static/js/lib/jquery-1.9.1.minaf43.js?v=6ef1e9c156e7131726cdec6f2f0d15d009d1a3acd2787c82fd1e28112381611104b6455973c85c00bd2b2cc3843ae212745855820ea8a5cc14d9254eb7f0d563"></script>
+    <script src="../static/js/lib/bootstrap/js/bootstrap.min0735.js?v=d9ef2aab411371f5912381c9073422037528c8593ab5b3721bea926880592f25bd5dfdec5991cdfe5c5ef5f4e1d54e390e93dfd3bca3f782ac5071d67b8624d4"></script>
+    <script src="../static/js/lib/utils.min0300.js?v=d6f88598eaac82d771f7db8c85d73f1007fd0a900e69c4e32991de6ceb3b4418f361234ba68633ebbf5dbdcfc9566180612608c9aebcd085ba3af61e2582f5f5"></script>
+    <script src="../static/js/lib/prettify.min8a50.js?v=b6b1cb14323ff6aa0fd68a1ea3dda84362608cbc3fbe6b27ce1d1f7cf5fa04c3983aa493b4ae63a10bb327444c7b2ae3bb1495aa0a40d59278604fae0c3a12df"></script>
+    <script src="../static/js/fly.min6b7a.js?v=2a56bca38b00790aee9191b8f829f5170bdef9ca076115f1d1d8e9eaeda8da6576490430b0cecfc5017017b0f0987d11ed64f90a23b22ac0a068daf90a3b6db9"></script>
+    <script src="../static/js/api-search.js"></script>
+</body>
+
+</html>

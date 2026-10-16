@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>PTrade量化官网-量化交易系统下载</title>
+    <meta name="keywords" content="PTrade">
+    <meta name="description" content="PTrade是一款专为专业投资者打造的高性能量化交易系统，集成行情显示、策略研发、回测及自动化实盘交易功能，提供极速行情通道与丰富的API接口支持。">
+    
+    <!-- Canonical URL -->
+    <link rel="canonical" href="https://ptradeapp.cn/">
+    
+    <!-- Favicon -->
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    
+    <!-- 移动端友好 -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="format-detection" content="telephone=no">
+    <meta name="HandheldFriendly" content="true">
+    <meta name="MobileOptimized" content="width">
+    
+    <!-- SEO -->
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    
+    <!-- Open Graph -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="PTrade量化官网-量化交易系统下载">
+    <meta property="og:description" content="PTrade是一款专为专业投资者打造的高性能量化交易系统，集成行情显示、策略研发、回测及自动化实盘交易功能，提供极速行情通道与丰富的API接口支持。">
+    <meta property="og:url" content="https://ptradeapp.cn/">
+    <meta property="og:site_name" content="PTrade">
+    <meta property="og:locale" content="zh_CN">
+    
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="PTrade量化官网-量化交易系统下载">
+    <meta name="twitter:description" content="PTrade是一款专为专业投资者打造的高性能量化交易系统，集成行情显示、策略研发、回测及自动化实盘交易功能，提供极速行情通道与丰富的API接口支持。">
+    
+    <!-- Google Font: Inter -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.15.4/css/all.min.css">
+    <!-- AdminLTE -->
+    <link rel="stylesheet" href="/adminlte.min.css">
+    
+    <style>
+    /* ========== 全局变量（纯黑白配色） ========== */
+    :root {
+        --primary: #111111;
+        --primary-hover: #333333;
+        --text: #111111;
+        --text-secondary: #666666;
+        --bg: #ffffff;
+        --sidebar-bg: #fafafa;
+        --card-bg: #f5f5f5;
+        --border-color: #e5e5e5;
+        --input-bg: #f5f5f5;
+        --input-bg-focus: #ffffff;
+        --input-radius: 28px;
+        --transition-speed: 0.3s;
+        --ease-curve: cubic-bezier(0.2, 0.0, 0, 1.0);
+    }
+
+    /* 夜间模式 */
+    .dark-mode {
+        --primary: #ffffff;
+        --primary-hover: #cccccc;
+        --text: #e5e5e5;
+        --text-secondary: #999999;
+        --bg: #111111;
+        --sidebar-bg: #1a1a1a;
+        --card-bg: #1e1e1e;
+        --border-color: #333333;
+        --input-bg: #222222;
+        --input-bg-focus: #111111;
+    }
+
+    html, body, .wrapper {
+        overflow-x: hidden;
+    }
+
+    body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+        background-color: var(--bg) !important;
+        color: var(--text) !important;
+        transition: background-color 0.3s, color 0.3s;
+        font-size: 1.0625rem;
+        line-height: 1.75;
+    }
+
+    a {
+        color: var(--text);
+        text-decoration: none;
+        transition: opacity 0.2s;
+    }
+    a:hover {
+        opacity: 0.7;
+        color: var(--text);
+        text-decoration: none;
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.4); }
+
+    .wrapper, .content-wrapper {
+        background-color: var(--bg) !important;
+        transition: margin-left var(--transition-speed) var(--ease-curve);
+    }
+
+    /* ========== 顶部导航 ========== */
+    .main-header {
+        background-color: var(--bg) !important;
+        border-bottom: 1px solid var(--border-color) !important;
+        box-shadow: none !important;
+        height: 60px;
+    }
+    .main-header .nav-link {
+        color: var(--text-secondary) !important;
+        font-size: 1rem;
+    }
+    .main-header .nav-link:hover {
+        color: var(--text) !important;
+    }
+
+    /* ========== 左侧边栏 ========== */
+    .main-sidebar {
+        background-color: var(--sidebar-bg) !important;
+        border-right: 1px solid var(--border-color);
+        box-shadow: none !important;
+    }
+
+    .brand-link {
+        height: 60px;
+        border-bottom: 1px solid var(--border-color) !important;
+        color: var(--text) !important;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 1rem;
+        font-size: 1.3rem;
+        font-weight: 700;
+    }
+    .brand-link:hover {
+        color: var(--text) !important;
+    }
+
+    .nav-sidebar .nav-item .nav-link {
+        color: var(--text);
+        border-radius: 0 50px 50px 0;
+        margin-right: 10px;
+        padding: 12px 1rem;
+        font-size: 1rem;
+    }
+    .nav-sidebar .nav-item .nav-link.active {
+        background-color: var(--card-bg) !important;
+        color: var(--text) !important;
+        font-weight: 600;
+    }
+    .nav-sidebar .nav-item .nav-link:hover:not(.active) {
+        background-color: rgba(0,0,0,0.03) !important;
+    }
+    .dark-mode .nav-sidebar .nav-item .nav-link:hover:not(.active) {
+        background-color: rgba(255,255,255,0.03) !important;
+    }
+
+    .sidebar-custom {
+        border-top: 1px solid var(--border-color) !important;
+        padding: 1rem;
+    }
+
+    /* ========== 搜索框 ========== */
+    .home-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 50px 20px;
+    }
+
+    .home-shell {
+        width: 100%;
+        max-width: 720px;
+        text-align: center;
+    }
+
+    .home-logo {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 24px;
+        color: var(--text);
+    }
+    .home-logo a {
+        color: var(--text);
+    }
+    .home-logo a:hover {
+        opacity: 0.8;
+    }
+
+    .chat-input-box {
+        background-color: var(--input-bg);
+        border-radius: var(--input-radius);
+        border: 1px solid var(--border-color);
+        display: flex;
+        align-items: flex-end;
+        padding: 6px;
+        transition: all 0.2s;
+    }
+    .chat-input-box:focus-within {
+        background-color: var(--input-bg-focus);
+        box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+        border-color: var(--text-secondary);
+    }
+    .dark-mode .chat-input-box:focus-within {
+        box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+    }
+
+    .chat-input-main {
+        flex: 1;
+        padding: 10px 0 6px 16px;
+        display: flex;
+        flex-direction: column;
+        min-height: 60px;
+    }
+
+    .chat-input-text {
+        width: 100%;
+        border: none;
+        outline: none;
+        background: transparent;
+        resize: none;
+        font-size: 1.0625rem;
+        line-height: 1.5;
+        color: var(--text);
+        max-height: 200px;
+        font-family: inherit;
+    }
+    .chat-input-text::placeholder {
+        color: var(--text-secondary);
+        opacity: 0.6;
+    }
+
+    .chat-input-footer {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .chat-input-actions {
+        display: flex;
+        align-items: center;
+        padding-bottom: 4px;
+        padding-right: 8px;
+        gap: 8px;
+    }
+
+    .icon-btn {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
+        cursor: pointer;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+    }
+    .icon-btn i { font-size: 1.1rem; }
+    .icon-btn:hover {
+        background-color: rgba(0,0,0,0.05);
+        color: var(--text);
+    }
+    .dark-mode .icon-btn:hover {
+        background-color: rgba(255,255,255,0.05);
+    }
+
+    .send-btn {
+        display: none;
+        opacity: 0.5;
+    }
+    .chat-input-box.has-content .send-btn {
+        display: flex;
+        background-color: var(--primary);
+        color: var(--bg);
+        opacity: 1;
+    }
+    .close-btn {
+        display: none;
+    }
+    .chat-input-box.has-content .close-btn {
+        display: flex;
+    }
+
+    /* ========== 内容区域 ========== */
+    .content-section {
+        padding: 60px 0;
+    }
+
+    .section-title {
+        text-align: center;
+        margin-bottom: 40px;
+    }
+    .section-title h2 {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--text);
+        margin-bottom: 12px;
+    }
+    .section-title h2 a {
+        color: var(--text);
+    }
+    .section-title p {
+        color: var(--text-secondary);
+        font-size: 1.0625rem;
+    }
+
+    /* 特性卡片 */
+    .feature-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 28px 24px;
+        text-align: center;
+        transition: all 0.2s;
+        height: 100%;
+    }
+    .feature-card:hover {
+        border-color: var(--text-secondary);
+    }
+
+    .feature-icon {
+        width: 64px;
+        height: 64px;
+        background: var(--primary);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 16px;
+        color: var(--bg);
+        font-size: 1.5rem;
+    }
+
+    .feature-card h3 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 8px;
+    }
+    .feature-card p {
+        color: var(--text-secondary);
+        font-size: 0.9375rem;
+        line-height: 1.6;
+        margin: 0;
+    }
+
+    /* 内容卡片 */
+    .content-card {
+        background: var(--card-bg);
+        border-radius: 16px;
+        padding: 32px;
+        margin-bottom: 24px;
+    }
+    .content-card p {
+        font-size: 1.0625rem;
+        line-height: 1.8;
+        color: var(--text);
+        margin-bottom: 16px;
+    }
+    .content-card p:last-child {
+        margin-bottom: 0;
+    }
+
+    /* FAQ */
+    .faq-item {
+        background: var(--bg);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 20px 24px;
+        margin-bottom: 12px;
+    }
+    .faq-question {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .faq-question .badge {
+        background: var(--primary);
+        color: var(--bg);
+        font-size: 0.8rem;
+        padding: 4px 10px;
+        border-radius: 50%;
+    }
+    .faq-answer {
+        color: var(--text-secondary);
+        font-size: 1rem;
+        line-height: 1.7;
+        padding-left: 36px;
+    }
+
+    /* ========== 合作伙伴 ========== */
+    .partners-section {
+        padding: 60px 0;
+        background: var(--card-bg);
+    }
+
+    .partners-grid {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 16px;
+    }
+
+    .partner-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 10px 20px;
+        background: var(--bg);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        color: var(--text);
+        font-size: 0.9375rem;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    .partner-link:hover {
+        border-color: var(--text-secondary);
+        color: var(--text);
+        opacity: 1;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .dark-mode .partner-link:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    /* ========== 右侧工作台 ========== */
+    .workspace-sidebar {
+        position: fixed;
+        top: 0;
+        right: -320px;
+        width: 320px;
+        height: 100vh;
+        background-color: var(--sidebar-bg);
+        border-left: 1px solid var(--border-color);
+        z-index: 1050;
+        display: flex;
+        flex-direction: column;
+        transition: right 0.3s var(--ease-curve);
+    }
+    .workspace-sidebar.open {
+        right: 0;
+    }
+
+    .workspace-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border-color);
+        height: 60px;
+    }
+
+    .workspace-tab {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+        background: transparent;
+        border: none;
+    }
+
+    .workspace-header-btn {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .workspace-header-btn:hover {
+        background-color: rgba(0,0,0,0.05);
+        color: var(--text);
+    }
+    .dark-mode .workspace-header-btn:hover {
+        background-color: rgba(255,255,255,0.05);
+    }
+
+    .workspace-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+    }
+
+    .workspace-info-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 0;
+        color: var(--text);
+        font-size: 0.9375rem;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .workspace-info-item:last-child {
+        border-bottom: none;
+    }
+    .workspace-info-item i {
+        width: 20px;
+        text-align: center;
+        color: var(--text-secondary);
+    }
+
+    /* ========== 页脚 ========== */
+    .main-footer {
+        background: #111 !important;
+        color: rgba(255,255,255,0.75);
+        border: none !important;
+        padding: 50px 0 0;
+    }
+    .dark-mode .main-footer {
+        background: #000 !important;
+    }
+
+    .footer-content {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 40px;
+        padding-bottom: 40px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .footer-section h4 {
+        font-size: 1.125rem;
+        margin-bottom: 20px;
+        color: #fff;
+        font-weight: 600;
+    }
+    .footer-section ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+    .footer-section li {
+        margin-bottom: 12px;
+    }
+    .footer-section a {
+        color: rgba(255,255,255,0.7);
+        font-size: 0.9375rem;
+    }
+    .footer-section a:hover {
+        color: #fff;
+        opacity: 1;
+    }
+    .footer-section p {
+        font-size: 0.9375rem;
+        line-height: 1.7;
+    }
+
+    .footer-bottom {
+        text-align: center;
+        padding: 24px 0;
+        color: rgba(255,255,255,0.5);
+        font-size: 0.875rem;
+    }
+    .footer-bottom a {
+        color: rgba(255,255,255,0.5);
+    }
+    .footer-bottom a:hover {
+        color: rgba(255,255,255,0.8);
+    }
+
+    /* ========== 搜索弹窗 ========== */
+    .history-search-modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        padding-top: 15vh;
+        z-index: 2000;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+    .history-search-modal.open {
+        display: flex;
+        opacity: 1;
+    }
+    .history-search-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(0,0,0,0.5);
+        backdrop-filter: blur(4px);
+    }
+    .history-search-dialog {
+        position: relative;
+        z-index: 2;
+        width: 500px;
+        max-width: 90%;
+        background-color: var(--bg);
+        border-radius: 16px;
+        box-shadow: 0 24px 48px rgba(0,0,0,0.2);
+        border: 1px solid var(--border-color);
+        transform: scale(0.95);
+        transition: transform 0.2s;
+    }
+    .history-search-modal.open .history-search-dialog {
+        transform: scale(1);
+    }
+    .history-search-header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: 500;
+        color: var(--text);
+    }
+    .history-search-body {
+        padding: 20px;
+    }
+    #history-search-input {
+        width: 100%;
+        background-color: var(--input-bg);
+        border: 1px solid var(--border-color);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 12px;
+        font-size: 1rem;
+    }
+    #history-search-input:focus {
+        outline: none;
+        border-color: var(--text-secondary);
+    }
+
+    /* ========== 广告位 ========== */
+    .ad-section {
+        padding: 30px 0;
+    }
+
+    .ad-banner-container {
+        width: 100%;
+        border-radius: 12px;
+        overflow: hidden;
+        background: var(--card-bg);
+    }
+
+    .ad-banner-link {
+        display: block;
+        width: 100%;
+    }
+
+    .ad-banner-img {
+        width: 100%;
+        object-fit: cover;
+        display: block;
+        transition: opacity 0.2s;
+    }
+
+    .ad-banner-link:hover .ad-banner-img {
+        opacity: 0.9;
+    }
+
+    /* ========== 响应式 ========== */
+    @media (max-width: 768px) {
+        body { font-size: 1rem; }
+        .home-logo { font-size: 1.75rem; }
+        .section-title h2 { font-size: 1.5rem; }
+        .content-card { padding: 24px 20px; }
+        .workspace-sidebar { width: 100%; right: -100%; }
+        .partners-grid { gap: 10px; }
+        .partner-link { padding: 8px 14px; font-size: 0.875rem; }
+    }
+    </style>
+    
+    <script>
+    (function () {
+        var KEY = 'site_theme';
+        try {
+            var theme = localStorage.getItem(KEY);
+            if (!theme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                theme = 'dark';
+            }
+            if (theme === 'dark') {
+                document.documentElement.classList.add('dark-mode');
+            }
+        } catch (e) {}
+    })();
+    </script>
+</head>
+<body class="hold-transition sidebar-mini layout-fixed">
+<div class="wrapper">
+
+<!-- 顶部导航 -->
+<nav class="main-header navbar navbar-expand">
+    <ul class="navbar-nav">
+        <li class="nav-item">
+            <a class="nav-link" data-widget="pushmenu" href="#" role="button">
+                <i class="fas fa-bars"></i>
+            </a>
+        </li>
+        <li class="nav-item d-none d-sm-inline-block">
+            <a href="https://ptradeapp.cn/" class="nav-link">
+                PTrade            </a>
+        </li>
+    </ul>
+
+    <ul class="navbar-nav ml-auto">
+        <li class="nav-item">
+            <a class="nav-link" href="#" id="themeToggle" role="button" title="切换夜间模式">
+                <i class="fas fa-moon" id="themeIcon"></i>
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="#" id="workspaceToggle" role="button" title="工作台">
+                <i class="fas fa-columns"></i>
+            </a>
+        </li>
+    </ul>
+</nav>
+
+<!-- 左侧边栏 -->
+<aside class="main-sidebar elevation-0">
+    <a href="https://ptradeapp.cn/" class="brand-link">
+        <span class="brand-text">PTrade</span>
+        <button class="btn btn-link p-0 brand-search-btn" type="button" title="搜索" style="color: var(--text-secondary);">
+            <i class="fas fa-search"></i>
+        </button>
+    </a>
+
+    <div class="sidebar">
+        <nav class="mt-3">
+            <ul class="nav nav-pills nav-sidebar flex-column" data-widget="treeview" role="menu">
+                <li class="nav-item">
+                    <a href="#" class="nav-link active">
+                        <i class="nav-icon fas fa-home"></i>
+                        <p>首页</p>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#product" class="nav-link">
+                        <i class="nav-icon fas fa-cube"></i>
+                        <p>产品介绍</p>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#content" class="nav-link">
+                        <i class="nav-icon fas fa-file-alt"></i>
+                        <p>详细内容</p>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#faq" class="nav-link">
+                        <i class="nav-icon fas fa-question-circle"></i>
+                        <p>常见问题</p>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#partners" class="nav-link">
+                        <i class="nav-icon fas fa-handshake"></i>
+                        <p>合作伙伴</p>
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a href="#contact" class="nav-link">
+                        <i class="nav-icon fas fa-envelope"></i>
+                        <p>联系我们</p>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+    </div>
+
+    <div class="sidebar-custom">
+        <button class="btn btn-block btn-sm" type="button" id="sidebarThemeBtn"
+            style="border-radius: 20px; border: 1px solid var(--border-color); color: var(--text); background: transparent;">
+            <i class="fas fa-adjust mr-1"></i> 外观切换
+        </button>
+    </div>
+</aside>
+
+<!-- 主内容区域 -->
+<div class="content-wrapper">
+    <div class="content p-0">
+
+        <!-- 搜索框区域 -->
+        <div class="home-container">
+            <div class="home-shell">
+                <h1 class="home-logo">
+                    <a href="https://ptradeapp.cn/">PTrade</a>
+                </h1>
+                <div class="home-input-wrapper">
+                    <div class="chat-input-box">
+                        <div class="chat-input-main">
+                            <textarea id="chat-input" class="chat-input-text" rows="1" 
+                                placeholder="输入您想了解的内容..."></textarea>
+                            <div class="chat-input-footer">
+                                <button class="icon-btn" type="button" title="语音">
+                                    <i class="fas fa-microphone"></i>
+                                </button>
+                                <button class="icon-btn" type="button" title="附件">
+                                    <i class="fas fa-paperclip"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="chat-input-actions">
+                            <button class="icon-btn close-btn" type="button" title="清空">
+                                <i class="fas fa-times"></i>
+                            </button>
+                            <button class="icon-btn send-btn" type="button" title="发送">
+                                <i class="fas fa-arrow-up"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 广告位 -->
+        <section class="ad-section">
+            <div class="container">
+                <div id="ad-banner" class="ad-banner-container"></div>
+            </div>
+        </section>
+
+        <!-- 产品介绍 -->
+        <section class="content-section" id="product">
+            <div class="container">
+                <div class="section-title">
+                    <h2>产品介绍</h2>
+                    <p>我们致力于为您提供最优质的服务体验</p>
+                </div>
+                <div class="row">
+                    <div class="col-lg-3 col-md-6 mb-4">
+                        <div class="feature-card">
+                            <div class="feature-icon"><i class="fas fa-bullseye"></i></div>
+                            <h3>专业服务</h3>
+                            <p>多年行业经验，为您提供专业可靠的解决方案</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6 mb-4">
+                        <div class="feature-card">
+                            <div class="feature-icon"><i class="fas fa-bolt"></i></div>
+                            <h3>高效快捷</h3>
+                            <p>快速响应您的需求，提供及时有效的服务</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6 mb-4">
+                        <div class="feature-card">
+                            <div class="feature-icon"><i class="fas fa-shield-alt"></i></div>
+                            <h3>安全可靠</h3>
+                            <p>严格的安全措施，保障您的数据和隐私安全</p>
+                        </div>
+                    </div>
+                    <div class="col-lg-3 col-md-6 mb-4">
+                        <div class="feature-card">
+                            <div class="feature-icon"><i class="fas fa-award"></i></div>
+                            <h3>品质保证</h3>
+                            <p>高标准的质量控制，确保服务品质始终如一</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 详细内容 -->
+        <section class="content-section" id="content" style="background: var(--card-bg);">
+            <div class="container">
+                <div class="section-title">
+                    <h2><a href="https://ptradeapp.cn/">PTrade</a></h2>
+                    <p>PTrade</p>
+                </div>
+                <div class="row justify-content-center">
+                    <div class="col-lg-8">
+                        <div class="content-card">
+                            <p>PTrade是一款专为专业投资者打造的高性能量化交易系统，集成行情显示、策略研发、回测及自动化实盘交易功能，提供极速行情通道与丰富的API接口支持。</p>
+                            <p>我们专注于为用户提供优质的产品和服务，凭借多年的行业经验和专业团队，已经成功服务了众多客户。我们始终坚持以用户需求为导向，不断优化和改进我们的产品。</p>
+                            <p>无论您有什么需求，我们都将竭诚为您服务。选择我们，就是选择专业、选择品质、选择放心。期待与您的合作！</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 常见问题 -->
+        <section class="content-section" id="faq">
+            <div class="container">
+                <div class="section-title">
+                    <h2>常见问题</h2>
+                    <p>您可能想了解的问题</p>
+                </div>
+                <div class="row justify-content-center">
+                    <div class="col-lg-8">
+                        <div class="faq-item">
+                            <div class="faq-question">
+                                <span class="badge">Q</span>
+                                如何开始使用服务？
+                            </div>
+                            <div class="faq-answer">
+                                您可以直接通过网站联系我们，PTrade量化交易的客服人员会为您详细介绍并指导您完成注册和使用流程。
+                            </div>
+                        </div>
+                        <div class="faq-item">
+                            <div class="faq-question">
+                                <span class="badge">Q</span>
+                                服务是否收费？
+                            </div>
+                            <div class="faq-answer">
+                                我们提供多种服务方案，包括免费和付费版本。您可以根据自己的需求选择合适的方案。
+                            </div>
+                        </div>
+                        <div class="faq-item">
+                            <div class="faq-question">
+                                <span class="badge">Q</span>
+                                如何联系客服？
+                            </div>
+                            <div class="faq-answer">
+                                您可以通过页面底部的联系方式与我们取得联系，我们的客服团队将为您提供及时的帮助。
+                            </div>
+                        </div>
+                        <div class="faq-item">
+                            <div class="faq-question">
+                                <span class="badge">Q</span>
+                                数据安全如何保障？
+                            </div>
+                            <div class="faq-answer">
+                                我们采用业界领先的安全技术，对所有数据进行加密存储和传输，确保您的信息安全。
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 合作伙伴 -->
+        <section class="partners-section" id="partners">
+            <div class="container">
+                <div class="section-title">
+                    <h2>合作伙伴</h2>
+                    <p>我们的友情链接与合作站点</p>
+                </div>
+                <div class="partners-grid">
+                                                            <a href="https://supermindapp.cn/" 
+                       class="partner-link" 
+                       target="_blank" 
+                       rel="noopener">
+                        SuperMind                    </a>
+                                                                                <a href="https://tradingviewapp.cn/" 
+                       class="partner-link" 
+                       target="_blank" 
+                       rel="noopener">
+                        TradingView                    </a>
+                                                                                <a href="https://ptradeapp.cn/" 
+                       class="partner-link" 
+                       target="_blank" 
+                       rel="noopener">
+                        PTrade                    </a>
+                                                                                <a href="https://mt5-com.cn/" 
+                       class="partner-link" 
+                       target="_blank" 
+                       rel="noopener">
+                        MT5                    </a>
+                                                                                <a href="https://vn-py.cn/" 
+                       class="partner-link" 
+                       target="_blank" 
+                       rel="noopener">
+                        VN.PY官网                    </a>
+                                                        </div>
+            </div>
+        </section>
+
+    </div>
+</div>
+
+<!-- 右侧工作台 -->
+<aside class="workspace-sidebar" id="workspaceSidebar">
+    <div class="workspace-header">
+        <button class="workspace-tab">工作台</button>
+        <button class="workspace-header-btn" id="workspaceClose" title="关闭">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+    <div class="workspace-body">
+        <h5 style="font-size: 0.9rem; font-weight: 600; margin-bottom: 16px; color: var(--text);">站点信息</h5>
+        <div class="workspace-info-item">
+            <i class="fas fa-globe"></i>
+            <span>ptradeapp.cn</span>
+        </div>
+        <div class="workspace-info-item">
+            <i class="fas fa-heading"></i>
+            <span>PTrade</span>
+        </div>
+        <div class="workspace-info-item">
+            <i class="fas fa-link"></i>
+            <span style="word-break: break-all;">https://ptradeapp.cn/</span>
+        </div>
+        <div class="workspace-info-item">
+            <i class="fas fa-tags"></i>
+            <span>PTrade</span>
+        </div>
+        
+        <h5 style="font-size: 0.9rem; font-weight: 600; margin: 24px 0 16px; color: var(--text);">快捷操作</h5>
+        <div class="workspace-info-item" style="cursor: pointer;" onclick="window.open('https://ptradeapp.cn/', '_blank')">
+            <i class="fas fa-external-link-alt"></i>
+            <span>访问站点</span>
+        </div>
+        <div class="workspace-info-item" style="cursor: pointer;" onclick="copyUrl()">
+            <i class="fas fa-copy"></i>
+            <span>复制链接</span>
+        </div>
+    </div>
+</aside>
+
+<!-- 页脚 -->
+<footer class="main-footer" id="contact">
+    <div class="container">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h4>关于我们</h4>
+                <p>PTrade是一款专为专业投资者打造的高性能量化交易系统，集成行情显示、策略研发、回测及自动化实盘交易功能，提供极速行情通道与丰富的API接口支持。</p>
+            </div>
+            <div class="footer-section">
+                <h4>快速链接</h4>
+                <ul>
+                    <li><a href="#product">产品介绍</a></li>
+                    <li><a href="#content">详细内容</a></li>
+                    <li><a href="#faq">常见问题</a></li>
+                    <li><a href="#partners">合作伙伴</a></li>
+                </ul>
+            </div>
+            <div class="footer-section">
+                <h4>相关链接</h4>
+                <ul>
+                    <li><a href="#">服务条款</a></li>
+                    <li><a href="#">隐私政策</a></li>
+                    <li><a href="#">帮助中心</a></li>
+                    <li><a href="#">网站地图</a></li>
+                </ul>
+            </div>
+            <div class="footer-section">
+                <h4>联系方式</h4>
+                <ul>
+                    <li><a href="mailto:contact@example.com"><i class="fas fa-envelope mr-2"></i>contact@example.com</a></li>
+                    <li><a href="#"><i class="fas fa-comments mr-2"></i>在线客服</a></li>
+                    <li><a href="#"><i class="fas fa-mobile-alt mr-2"></i>关注我们</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>© 2026 PTrade All Rights Reserved. | <a href="#">隐私政策</a> | <a href="#">使用条款</a></p>
+        </div>
+    </div>
+</footer>
+
+<!-- 搜索弹窗 -->
+<div id="history-search-modal" class="history-search-modal">
+    <div class="history-search-backdrop"></div>
+    <div class="history-search-dialog">
+        <div class="history-search-header">
+            <span>搜索</span>
+            <button type="button" class="btn btn-link p-0 close-history-search" style="color: var(--text);">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="history-search-body">
+            <input id="history-search-input" type="text" placeholder="输入关键词搜索...">
+        </div>
+    </div>
+</div>
+
+</div>
+
+<!-- jQuery -->
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+<!-- Bootstrap -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.0/dist/js/bootstrap.bundle.min.js"></script>
+<!-- AdminLTE -->
+<script src="https://cdn.jsdelivr.net/npm/admin-lte@3.2/dist/js/adminlte.min.js"></script>
+<!-- 站点配置 -->
+<script src="/index.js"></script>
+
+<script>
+(function() {
+    var KEY = 'site_theme';
+    var toggle = document.getElementById('themeToggle');
+    var sidebarBtn = document.getElementById('sidebarThemeBtn');
+    var icon = document.getElementById('themeIcon');
+
+    function updateIcon() {
+        if (document.documentElement.classList.contains('dark-mode')) {
+            icon.classList.remove('fa-moon');
+            icon.classList.add('fa-sun');
+        } else {
+            icon.classList.remove('fa-sun');
+            icon.classList.add('fa-moon');
+        }
+    }
+
+    function toggleTheme() {
+        document.documentElement.classList.toggle('dark-mode');
+        document.body.classList.toggle('dark-mode');
+        var isDark = document.documentElement.classList.contains('dark-mode');
+        localStorage.setItem(KEY, isDark ? 'dark' : 'light');
+        updateIcon();
+    }
+
+    if (document.documentElement.classList.contains('dark-mode')) {
+        document.body.classList.add('dark-mode');
+    }
+    updateIcon();
+
+    toggle.addEventListener('click', function(e) { e.preventDefault(); toggleTheme(); });
+    sidebarBtn.addEventListener('click', function(e) { e.preventDefault(); toggleTheme(); });
+
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+        if (!localStorage.getItem(KEY)) {
+            document.documentElement.classList.toggle('dark-mode', e.matches);
+            document.body.classList.toggle('dark-mode', e.matches);
+            updateIcon();
+        }
+    });
+
+    // 搜索框
+    var chatInput = document.getElementById('chat-input');
+    var chatBox = document.querySelector('.chat-input-box');
+    var sendBtn = document.querySelector('.send-btn');
+    var clearBtn = document.querySelector('.close-btn');
+
+    function updateState() {
+        if (!chatInput) return;
+        chatBox.classList.toggle('has-content', chatInput.value.trim().length > 0);
+    }
+
+    if (chatInput) {
+        chatInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            updateState();
+        });
+        chatInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+        });
+    }
+
+    function handleSend() {
+        if (!chatInput) return;
+        var text = chatInput.value.trim();
+        if (!text) return;
+        alert('您输入了：' + text);
+        chatInput.value = '';
+        chatInput.style.height = 'auto';
+        updateState();
+    }
+
+    if (sendBtn) sendBtn.addEventListener('click', handleSend);
+    if (clearBtn) clearBtn.addEventListener('click', function() {
+        chatInput.value = '';
+        chatInput.style.height = 'auto';
+        updateState();
+        chatInput.focus();
+    });
+
+    // 搜索弹窗
+    var modal = document.getElementById('history-search-modal');
+    var openSearchBtn = document.querySelector('.brand-search-btn');
+    var closeModalBtn = document.querySelector('.close-history-search');
+    var backdrop = document.querySelector('.history-search-backdrop');
+
+    function openModal() { modal && modal.classList.add('open'); }
+    function closeModal() { modal && modal.classList.remove('open'); }
+
+    if (openSearchBtn) openSearchBtn.addEventListener('click', function(e) { e.preventDefault(); openModal(); });
+    if (closeModalBtn) closeModalBtn.addEventListener('click', closeModal);
+    if (backdrop) backdrop.addEventListener('click', closeModal);
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { closeModal(); closeWorkspace(); }
+    });
+
+    // 工作台
+    var workspaceToggle = document.getElementById('workspaceToggle');
+    var workspaceSidebar = document.getElementById('workspaceSidebar');
+    var workspaceClose = document.getElementById('workspaceClose');
+
+    function openWorkspace() { workspaceSidebar.classList.add('open'); }
+    function closeWorkspace() { workspaceSidebar.classList.remove('open'); }
+
+    if (workspaceToggle) workspaceToggle.addEventListener('click', function(e) {
+        e.preventDefault();
+        workspaceSidebar.classList.contains('open') ? closeWorkspace() : openWorkspace();
+    });
+    if (workspaceClose) workspaceClose.addEventListener('click', closeWorkspace);
+
+    // 平滑滚动
+    document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
+        anchor.addEventListener('click', function(e) {
+            var targetId = this.getAttribute('href');
+            if (targetId === '#') return;
+            var target = document.querySelector(targetId);
+            if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        });
+    });
+})();
+
+function copyUrl() {
+    var url = window.location.href;
+    navigator.clipboard ? navigator.clipboard.writeText(url).then(function() { alert('链接已复制'); }) : prompt('请复制：', url);
+}
+</script>
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.src = "https://hm.baidu.com/hm.js?4ab4665813fe79d259edc1a0c5e962fa";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+</body>
+</html>

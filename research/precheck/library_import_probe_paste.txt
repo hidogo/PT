@@ -1,0 +1,7 @@
+# --- 跨文件 import 冒烟（可选，单独验证用） ---
+def _import_probe(context):
+    try:
+        import mylib
+        _log(context, 'import mylib (self-module)', mylib.hello(g.security) + ' | flag=' + getattr(mylib, 'PROBE_OK', '?'))
+    except Exception as e:
+        _log(context, 'import mylib (self-module)', 'ERR %r' % e)

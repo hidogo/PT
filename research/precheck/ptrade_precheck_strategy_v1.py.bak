@@ -1,0 +1,141 @@
+# -*- coding: utf-8 -*-
+"""
+PTrade 托管策略 —— 前期必要冒烟测试（只读，不真实下单）
+用途：上传到「研究」目录后，用「交易(模拟/实盘)」运行，重点验证：
+  账户/持仓、行情(日线/分时)、证券信息、板块/财务、L2(逐笔与档位笔数)、涨跌停、持久化。
+运行说明：
+  1) 把 g.security 改成你实际会交易的标的（默认 600570.SS 恒生电子）。
+  2) 不同券商 PTrade 版本各 get_* 入参可能略有差异，请对照终端「帮助/示例」微调。
+  3) L2 相关接口只在「交易」模块返回真实数据；回测中会报错/返回 None，属正常。
+  4) 默认 DO_ORDER=False 只读；如需委托测试请置 True 且务必先在模拟盘跑。
+结果：写入 get_research_path() 下的 precheck_result_YYYYMMDD.txt，另见日志。
+"""
+import pickle, time
+
+DO_ORDER = False               # 前期阶段保持只读
+WRITE_RESULT = True
+
+def initialize(context):
+    g.security = '600570.SS'   # 改这里
+    set_universe(g.security)
+    g.done = False
+    g.lines = []
+    g.t0 = time.time()
+
+def _log(context, tag, obj):
+    line = '[%s] %s -> %s' % (tag, time.strftime('%H:%M:%S'), obj)
+    g.lines.append(line)
+    try:
+        log.info(line)
+    except Exception:
+        pass
+
+def _rl(s):
+    """截断超长串，便于日志/结果文件阅读"""
+    s = str(s)
+    return s if len(s) <= 800 else s[:800] + '...(truncated %d)' % len(s)
+
+def save_result():
+    if not WRITE_RESULT:
+        return
+    try:
+        path = get_research_path()
+        day = str(get_trading_day())
+        with open(path + 'precheck_result_' + day + '.txt', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(g.lines))
+        log.info('result saved -> %sprecheck_result_%s.txt' % (path, day))
+    except Exception as e:
+        try:
+            log.warn('save_result failed: %r' % e)
+        except Exception:
+            pass
+
+def before_trading_start(context, data):
+    try:
+        _log(context, 'before_trading_start', '交易日=%s 可用资金=%s' % (
+            str(get_trading_day()),
+            getattr(context.portfolio, 'available_cash', 'n/a')))
+    except Exception as e:
+        _log(context, 'before_trading_start', 'ERR %r' % e)
+
+def handle_data(context, data):
+    if g.done:
+        return
+    g.done = True
+    s = g.security
+    _log(context, 'handle_data', 'start security=%s' % s)
+
+    # A) 账户与持仓
+    for tag, fn in [
+            ('get_positions', lambda: _rl(get_positions())),
+            ('get_snapshot', lambda: _rl(get_snapshot(s)))]:
+        try:
+            _log(context, tag, fn())
+        except Exception as e:
+            _log(context, tag, 'ERR %r' % e)
+
+    # B) 历史行情
+    for tag, fn in [
+            ('get_history(1d)', lambda: _rl(get_history(5, '1d', 'close', s, fq=None, include=False))),
+            ('get_price(1m)', lambda: _rl(get_price(s, start_date=None, end_date=None, count=5, frequency='1m', rsp_type='dataframe')))]:
+        try:
+            _log(context, tag, fn())
+        except Exception as e:
+            _log(context, tag, 'ERR %r' % e)
+
+    # C) 证券信息
+    for tag, fn in [
+            ('get_stock_name', lambda: get_stock_name(s)),
+            ('get_stock_info', lambda: _rl(get_stock_info(s))),
+            ('get_stock_status', lambda: _rl(get_stock_status(s)))]:
+        try:
+            _log(context, tag, fn())
+        except Exception as e:
+            _log(context, tag, 'ERR %r' % e)
+
+    # D) 板块 / 财务 / 指数
+    for tag, fn in [
+            ('get_stock_blocks', lambda: _rl(get_stock_blocks(s))),
+            ('get_index_stocks', lambda: _rl(get_index_stocks('000001.XSHG')[:10])),
+            ('get_fundamentals', lambda: _rl(get_fundamentals(s, 'balance_statement', 'total_assets')))]:
+        try:
+            _log(context, tag, fn())
+        except Exception as e:
+            _log(context, tag, 'ERR %r' % e)
+
+    # E) L2 相关（仅交易模块有真实数据）
+    for tag, fn in [
+            ('get_gear_price(L2五档)', lambda: _rl(get_gear_price(s))),
+            ('get_individual_transaction(L2逐笔成交)', lambda: _rl(get_individual_transaction([s], data_count=10, is_dict=True))),
+            ('get_individual_entrust(L2逐笔委托)', lambda: _rl(get_individual_entrust([s], data_count=10, is_dict=True)))]:
+        try:
+            _log(context, tag, fn())
+        except Exception as e:
+            _log(context, tag, 'ERR %r' % e)
+
+    # F) 涨跌停
+    try:
+        _log(context, 'check_limit', _rl(check_limit(s)))
+    except Exception as e:
+        _log(context, 'check_limit', 'ERR %r' % e)
+
+    # G) 持久化自检（写研究目录 pickle）
+    try:
+        p = get_research_path() + 'g_test.pkl'
+        with open(p, 'wb') as f:
+            pickle.dump({'sec': s, 'ts': g.t0}, f, protocol=2)
+        with open(p, 'rb') as f:
+            d = pickle.load(f)
+        _log(context, 'persistence(pickle)', 'OK sec=%s' % d.get('sec'))
+    except Exception as e:
+        _log(context, 'persistence(pickle)', 'ERR %r' % e)
+
+    save_result()
+    log.info('precheck done')
+
+def after_trading_end(context, data):
+    save_result()
+    try:
+        log.info('[after_trading_end] probe finished %.1fs' % (time.time() - g.t0))
+    except Exception:
+        pass
