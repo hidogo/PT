@@ -1,5 +1,6 @@
-code,side,entry_type,expected_status,yesterday_open_pct,expected_auction_change_pct,seal_amount_t0,board_name,reason
-601188.XSHG,hold,normal,position_cleared,0.0,-6.8,0.0,,
-603528.XSHG,sell,normal,confirmed_miss,0.0,-0.43,0.0,,
-000823.XSHE,sell,one_word_board,confirmed_miss,0.0,2.36,0.0,,
-603968.XSHG,hold,normal,confirmed_exceed,0.0,4.94,0.0,,
+code,side,entry_type,expected_status,yesterday_open_pct,expected_auction_change_pct,seal_amount_t0,board_name,reason,sell_policy_hint
+603690.XSHG,hold,normal,pending_meet,6.98,6.98,651.0,半导体,,fast_exit_on_weak
+601811.XSHG,hold,normal,pending_meet,2.03,2.03,4834452.0,知识产权保护,,fast_exit_on_weak
+600825.XSHG,buy,normal,pending_exceed,10.01,10.01,33496020.0,复牌,,hold_higher_tolerance
+000530.XSHE,buy,normal,pending_exceed,-4.18,3.0,9640824.0,冰雪工程,,hold_higher_tolerance
+600668.XSHG,buy,normal,pending_exceed,2.0,3.0,1148853.0,医药,,hold_higher_tolerance

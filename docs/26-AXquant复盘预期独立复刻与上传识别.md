@@ -90,3 +90,48 @@ py -3.10 build_expectation_bridge.py validate    --date 2026-10-16
 ## 8. 后续（剩余项）
 - 定时上传落地：把 `ptrade_bridge\` 配为该券商「定时上传」选中的本地文件夹即可；若实际
   只支持单文件，改选 `archive\ptrade_today.csv` 固定上传源、云端同名消费。
+## 2026-10-18 增补：前瞻预期需同时含「持仓 + 核心苗子」
+- 复盘 review（AXquant review/position_review_<T>.jsonl）区分 holding / seedling。前瞻预期应并集两者：
+  - 持仓 holding -> side=hold（pending_meet）
+  - 核心苗子 seedling -> side=buy（pending_exceed），是次日「超预期确认买入」的候选池
+- 契约：CSV side 现允许显式 buy（exporter 优先取记录 side；缺省按 status 建仓方向回落）。
+- expected_auction_change_pct：核心苗子用 max(当日竞价涨幅, 3.0) 作为竞价超预期达标阈值（Ptrade 侧 _exp_rt_status 竞价格 a >= 阈值 判 CX -> 3s 触发买入）。
+- 重建工具：research/expectation/rebuild_expect_from_review.py + from-jsonl。
+- 注意：601811 属连板（三连板），AXquant 复盘曾误标 first_board_arb；以快照 consecutive_board 池为准。
+
+## 2026-10-18 增补：收盘/盘前「构建+校验」一键脚本（并入同步流程）
+- 新增 `research/expectation/run_expectation_build.py`：一条命令完成
+  `from-jsonl -> validate -> 报告待上传文件夹就绪`，插在
+  `sync_positions / closeout_review（生成 position_expectation_<T+1>.jsonl）` 之后、
+  Ptrade「定时上传」之前。
+- 用法（默认日期=下一交易日，收盘跑=次日 T+1、盘前跑=当日）：
+  ```text
+  py -3.10 run_expectation_build.py [--date YYYY-MM-DD] [--source 预期.jsonl] [--out-dir 目录]
+  ```
+- 职责边界：脚本复用 `build_expectation_bridge.cmd_from_jsonl / cmd_validate`，只保证
+  `data/ptrade_bridge/expectation_<T+1>.csv` 新鲜+校验通过；不代传网络，真正上送由
+  Ptrade 客户端「定时上传」绑定该文件夹触发。归档 meta / `ptrade_today.csv` 在 `archive\` 不上传。
+## 2026-10-18 增补：收盘一键总入口（单文件串联 同步持仓→复盘→构建校验）
+- 新增 `research/expectation/run_one_click_after_close.py`（+ `.cmd` 双击入口），一次跑完：
+  `sync_positions`（同步持仓）→ `closeout_review.review`（复盘→预期 CSV）→
+  `run_expectation_build`（from-jsonl+validate→待上传就绪）。
+- 用法（含持仓同步需已登录连接 PTrade 客户端；用 API 自带 Python3.7）：
+  ```text
+  双击 research\expectation\run_one_click_after_close.cmd
+  # 或：
+  "D:/gjzq/ptrade/Libs/Python/api/Libs/Python/python3/python.exe" ^
+     research\expectation\run_one_click_after_close.py --date 2026-10-16 --next-date 2026-10-19
+  ```
+- 常用开关：`--skip-sync`（跳过持仓同步）、`--logs <当日日志.txt>`（采 [seal]/[l2]/[may-order]）、
+  `--selfwatch`（同步自选股）、`--source/--out-dir`（透传 from-jsonl）。
+- 已冒烟：py310 `--skip-sync --date 2026-10-16` → 复盘 records=2、预期行=5、from-jsonl+validate 通过。
+## 2026-10-18 增补：昨日开盘涨幅自动回填（消除 validate 缺列提醒）
+- 问题：`cmd_review` 重建的持仓记录 `yesterday_open_pct=null`，导出后 `validate` 报
+  「昨日开盘涨幅缺失/空行数=N」，云端 `_yesterday_open_chg` 只能走 1d 历史兜底。
+- 口径确认（AXquant review）：`yesterday_open_pct = open(S-1)/close(S-2)-1`（S=reviews日），
+  种子(buy)记录本就 verbatim 复制该值；持仓同口径应一致。
+- 实现（`build_expectation_bridge.py`）：导出前 `_backfill_yopen()` 就地回填空白列——
+  优先读 review jsonl（AXquant 权威 → PT 本地）verbatim；未覆盖的再以日线 open/close 兜底
+  （akshare，缓存 `data/kline_cache/`，失败不阻断）。回填含 2 条路径（`cmd_from_jsonl` 与 `cmd_review`）。
+- 效果：`expectation_2026-10-19.csv` 持仓 603690=-4.16 / 601811=-2.24；validate 不再提示缺列；
+  预期 jsonl 也已持久化带值，后续 from-jsonl 无需重复网络。校验点=`run_one_click_after_close` 步骤3 validate 通过。

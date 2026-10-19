@@ -42,6 +42,7 @@ import bridge  # noqa: E402
 CSV_HEADER = [
     "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
     "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
+    "sell_policy_hint",
 ]
 
 
@@ -110,6 +111,28 @@ def cmd_from_jsonl(args: argparse.Namespace) -> int:
     meta_path = os.path.join(archive_dir, "expectation_%s.csv.meta.json" % td)
     today_path = os.path.join(archive_dir, "ptrade_today.csv")
 
+    # 回填空白昨日开盘涨幅（review 值 verbatim；缺失再日线 open/close 兜底）
+    import datetime as _dt
+    review_day = bridge.calendar.previous_trading_day(_dt.date.fromisoformat(td)).isoformat()
+    _recs = _read_jsonl(src)
+    _n = _correct_yopen(_recs, review_day)
+    if _n:
+        _src_raw = src
+        _norm = os.path.join(out_dir, "archive", "expectation_%s.normalized.jsonl" % td)
+        with open(_norm, "w", encoding="utf-8") as _f:
+            for _r in _recs:
+                _f.write(json.dumps(_r, ensure_ascii=False, default=str) + "\n")
+        src = _norm
+        # 源为本地预期 jsonl 时同步写回，保证持久化与导出一致（AXquant 只读源不覆盖）
+        try:
+            _local = bridge.expectation_store.default_expectation_path(td)
+            if _src_raw and os.path.abspath(_src_raw) == os.path.abspath(_local):
+                with open(_src_raw, "w", encoding="utf-8") as _f2:
+                    for _r in _recs:
+                        _f2.write(json.dumps(_r, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
+        print("[from-jsonl] 修正昨日开盘涨幅 %d 行(open(S)/close(S-1))" % _n)
     rows = bridge.expectation_store.export_expectation_csv(td, out_path=csv_path, src_path=src)
     if rows <= 0:
         print("[from-jsonl] 未导出任何行（recs 为空）", file=sys.stderr)
@@ -177,6 +200,160 @@ def _next_date(dstr):
     import datetime as _dt
     d = _dt.date.fromisoformat(dstr)
     return bridge.calendar.next_trading_day(d).isoformat()
+
+
+
+def _ptrade_to_ax(code):
+    """Ptrade .XSHG/.XSHE/.XBJ -> AXquant .SH/.SZ/.BJ（回填昨日开盘涨幅用）。"""
+    c = str(code or "").strip()
+    if not c:
+        return ""
+    parts = c.split(".")
+    head = parts[0]
+    suf = parts[1].upper() if len(parts) > 1 else ""
+    if suf in ("XSHG", "SH", "SHANGHAI"):
+        return head + ".SH"
+    if suf in ("XSHE", "SZ", "SHENZHEN"):
+        return head + ".SZ"
+    if suf in ("XBJ", "BJ", "BEIJING"):
+        return head + ".BJ"
+    return head + (".SH" if head[:1] in ("6", "5", "9") else ".SZ")
+
+
+def _review_auction_map(review_date):
+    """读 review(开盘复盘) jsonl 的 auction_change_pct（review 日自身开盘涨幅 open(S)/close(S-1)-1）。
+
+    语义：T+1 的"昨日"= review 日 S，昨日开盘涨幅应取 S 自身开盘涨幅（=review auction_change_pct），
+    而非 review 存的 yesterday_open_pct（那是 open(S-1)/close(S-2)，2 天滞后的值）。"""
+    m = {}
+    if not review_date:
+        return m
+    cands = []
+    _ax = os.path.join(_HERE, "..", "..", "..", "AXquant", "data", "review",
+                       "position_review_%s.jsonl" % review_date)
+    _pt = os.path.join(_HERE, "..", "..", "data", "review",
+                       "position_review_%s.jsonl" % review_date)
+    for p_ in (_ax, _pt):
+        if os.path.isfile(p_):
+            cands.append(p_)
+    for p_ in cands:
+        for r in _read_jsonl(p_):
+            v = r.get("auction_change_pct")
+            if v is None or v == "":
+                continue
+            code = str(r.get("code") or "").strip()
+            if code:
+                m[code] = round(float(v), 2)
+    return m
+    m = {}
+    if not review_date:
+        return m
+    cands = []
+    _ax = os.path.join(_HERE, "..", "..", "..", "AXquant", "data", "review",
+                       "position_review_%s.jsonl" % review_date)
+    _pt = os.path.join(_HERE, "..", "..", "data", "review",
+                       "position_review_%s.jsonl" % review_date)
+    for p_ in (_ax, _pt):
+        if os.path.isfile(p_):
+            cands.append(p_)
+    for p_ in cands:
+        for r in _read_jsonl(p_):
+            v = r.get("yesterday_open_pct")
+            if v is None or v == "":
+                continue
+            code = str(r.get("code") or "").strip()
+            if code:
+                m[code] = round(float(v), 2)
+    return m
+
+
+def _daily_yopen_from_net(ax_code, review_date):
+    """日线 open/close 兜底：open(review日)/close(review前一日)-1（review 日自身开盘涨幅）。
+
+    用 akshare 拉近 10 日日K，磁盘缓存到 data/kline_cache；失败/回撤返回 None（不阻断）。
+    """
+    if not ax_code or not review_date or "." not in ax_code:
+        return None
+    sym = ax_code.split(".")[0]
+    cache_dir = os.path.join(_HERE, "..", "..", "data", "kline_cache")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception:
+        cache_dir = None
+    cpath = os.path.join(cache_dir, "%s_%s.json" % (sym, review_date)) if cache_dir else ""
+    data = None
+    if cpath and os.path.isfile(cpath):
+        try:
+            with open(cpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = None
+    if not data or not data.get("rows"):
+        try:
+            import akshare as ak
+            import datetime as _dt
+            start = (_dt.date.fromisoformat(review_date) - _dt.timedelta(days=10)).isoformat().replace("-", "")
+            end = review_date.replace("-", "")
+            df = ak.stock_zh_a_hist(symbol=sym, period="daily",
+                                    start_date=start, end_date=end, adjust="")
+            rows = []
+            if df is not None:
+                for _, r in df.iterrows():
+                    rows.append({"date": str(r["日期"])[:10],
+                                 "open": float(r["开盘"]), "close": float(r["收盘"])})
+            data = {"code": ax_code, "rows": rows}
+            if cpath:
+                with open(cpath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            data = None
+    rows = (data or {}).get("rows") or []
+    if not rows:
+        return None
+    rows = sorted(rows, key=lambda r: r["date"])
+    idx = [i for i, r in enumerate(rows) if str(r["date"]) == review_date]
+    if not idx:
+        return None
+    i = idx[0]
+    if i < 1:
+        return None
+    o = rows[i]["open"]; pc = rows[i - 1]["close"]
+    if not o or not pc or pc <= 0:
+        return None
+    return round((o / pc - 1.0) * 100.0, 2)
+
+
+def _has_yopen(rec):
+    v = rec.get("yesterday_open_pct")
+    return v is not None and v != ""
+
+
+def _correct_yopen(records, review_date, net_fetch=True):
+    """统一修正昨日开盘涨幅=review 日自身开盘涨幅 open(S)/close(S-1)-1（T+1 的昨日=review 日 S）。
+
+    原记录存 open(S-1)/close(S-2)（2 天滞后），与云端 _eval_auction 的 chg>yesterday 语义不符；
+    本函数覆盖为 S 自身开盘涨幅（review auction_change_pct 优先，日线 open/close 兜底）。返回修改行数。
+    """
+    if not records:
+        return 0
+    rmap = _review_auction_map(review_date)
+    n = 0
+    for r in records:
+        ax = _ptrade_to_ax(str(r.get("code") or ""))
+        v = rmap.get(ax)
+        if v is None and net_fetch:
+            v = _daily_yopen_from_net(ax, review_date)
+        if v is None:
+            continue
+        old = r.get("yesterday_open_pct")
+        r["yesterday_open_pct"] = v
+        try:
+            if old is None or old == "" or abs(float(old) - float(v)) > 1e-9:
+                n += 1
+        except Exception:
+            n += 1
+    return n
+
 
 
 
@@ -302,6 +479,9 @@ def cmd_review(args):
         ex.write_position_reviews(td, records, path=review_path)
 
     expected = [_init_expectation_from_review(r.to_dict(), next_td, td) for r in records]
+    _n = _correct_yopen(expected, td)
+    if _n:
+        print("[review] 修正昨日开盘涨幅 %d 行(open(S)/close(S-1))" % _n)
     exp_path = args.expectation_out or ex.default_expectation_path(next_td)
     if expected:
         ex.write_expectation_records(next_td, expected, path=exp_path)
@@ -334,6 +514,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     meta_path = os.path.join(out_dir, "archive", "expectation_%s.csv.meta.json" % td)
 
     problems = []
+    warns = []
     if not os.path.isfile(csv_path):
         problems.append("缺少当天 CSV")
     else:
@@ -348,6 +529,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
             problems.append("表头不匹配")
         if len(lines) <= 1:
             problems.append("无数据行")
+        if len(lines) > 1 and header.split(",") == CSV_HEADER:
+            _yi = CSV_HEADER.index("yesterday_open_pct")
+            _ai = CSV_HEADER.index("expected_auction_change_pct")
+            _my = _ma = 0
+            for _ln in lines[1:]:
+                _cells = _ln.split(",")
+                if len(_cells) > _yi and not (_cells[_yi] or "").strip():
+                    _my += 1
+                if len(_cells) > _ai and not (_cells[_ai] or "").strip():
+                    _ma += 1
+            if _my:
+                warns.append("昨日开盘涨幅缺失/空行数=%d" % _my)
+            if _ma:
+                warns.append("预期开盘基准(exp_auc)缺失/空行数=%d" % _ma)
         if age_min > 720:
             problems.append("文件过旧(%.0f分钟)" % age_min)
         if os.path.isfile(meta_path):
@@ -359,6 +554,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 problems.append("行数与 meta 不符")
             if meta.get("sha1") != _sha1(csv_path):
                 problems.append("哈希不一致(可能被改动)")
+    if warns:
+        print("[validate] 提醒(不阻上传):", "; ".join(warns))
     if problems:
         print("[validate] 未通过:", "; ".join(problems))
         return 1

@@ -456,6 +456,13 @@ def _num(v):
         return 0.0
 
 
+def _fmt_empty(v):
+    # 供方字段缺失(None/'') 输出空串（区别于 0），便于消费端区分“缺基”与“恰好0%”
+    s = str(v if v is not None else "").strip()
+    return s if s else ""
+
+
+
 def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
     """把 position_expectation JSONL 聚合导出为 Ptrade 消费的 CSV（PT/docs/25 契约）。
 
@@ -473,6 +480,7 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
     header = [
         "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
         "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
+        "sell_policy_hint",
     ]
     rows = []
     for r in recs:
@@ -480,16 +488,20 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
         code = _ptrade_code(str(r.get("code") or ""))
         if not code:
             continue
-        side = "sell" if status.lower().endswith("miss") else "hold"
+        side = str(r.get("side") or "").strip().lower()
+        if side not in ("buy", "sell", "hold"):
+            # 缺显式 side 时按状态端末回落（miss->sell，否则 hold）；显式 buy 用于「核心苗子前瞻建仓」
+            side = "sell" if status.lower().endswith("miss") else "hold"
         rows.append([
             code, side,
             str(r.get("entry_type") or "normal"),
             status,
-            _num(r.get("yesterday_open_pct")),
-            _num(r.get("auction_change_pct")),
+            _fmt_empty(r.get("yesterday_open_pct")),
+            _fmt_empty(r.get("auction_change_pct")),
             _num(r.get("seal_amount_t0")),
             str(r.get("board_name") or ""),
             str(r.get("limit_up_reason") or r.get("reason") or ""),
+            str(r.get("sell_policy_hint") or ""),
         ])
     print("[expectation_csv] ->", out_path)
     tmp = out_path + ".tmp"

@@ -1,5 +1,0 @@
-code,side,entry_type,expected_status,yesterday_open_pct,expected_auction_change_pct,seal_amount_t0,board_name,reason
-601188.XSHG,hold,normal,position_cleared,0.0,-6.8,0.0,,
-603528.XSHG,sell,normal,confirmed_miss,0.0,-0.43,0.0,,
-000823.XSHE,sell,one_word_board,confirmed_miss,0.0,2.36,0.0,,
-603968.XSHG,hold,normal,confirmed_exceed,0.0,4.94,0.0,,

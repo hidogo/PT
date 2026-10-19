@@ -91,3 +91,18 @@
 放多注：托管-模拟盘实测 L2 逐笔/十档可用、账户/行情/财务/板块/持久化全通；
 “逐笔/档位封单”与“集合竞价细粒度”两行受限评级可上调（用 get_individual_transaction/get_gear_price 十档近似封单）。
 打板/封单微观仍受 3s 节拍限制，需重标定参数（评级维持）。
+
+## 2026-10-19 增补：红盘比/量比可行性 + 动态仓位（对齐 AXquant 仓控）
+### 1. 云端能否实现红盘比、量比——可行
+- **量比**：`get_snapshot(sec)` 自带 `vol_ratio`（PTrade 标准量比）。已让 `_volume_ratio(sec)` 优先取快照 `vol_ratio`，缺失回退 今日量/前5日均量（1d 近似）。
+- **红盘比**：Ptrade 无直接「全市场红盘占比」；但板块级可算。已新增 `_red_ratio(sec)`：`get_stock_blocks→板块代码 → get_industry_stocks→成分股 → get_snapshot 逐只涨跌`，统计 上涨家数/(上涨+下跌)。与既有板块强度 `_board_strength` 复用一个缓存函数 `_board_member_changes`（60s），无成员返回 0.5 中性。
+- 另有 `get_sort_msg(sort_type_grp)` 返回板块/行业 `rise_count/fall_count/member_count`/`vol_ratio`；但该券商对本函数签名不适配（此前刷 `入参错误:sort_type_grp`），故统一走板块成员聚合口径（已实测可用）。
+- 全市场红盘比：如需，可后续把多个板块/概念成员并集聚合，或对宽基指数用 get_sort_msg；当前仓控以个股所属板块红盘比收敛。
+
+### 2. 按资金动态百分比设置（去硬编码 0.3）
+- 新增 BLS：`single_stock_cap=0.30`（单支=总资产×30%）、`ordinary_buy_ratio=0.10`（普通买入=总资产×10%，AXquant 1/10）、`board_buy_budget_ratio=0.20`（打板=总资产×20%）、`exp_order_pct=0.30`（预期买入比例，可调小如 0.01）。
+- 统一入口 `_calc_buy_qty(context,sec,price,ratio)`：期望金额=`min(现金×比例, 单支上限, 现金)`；单支上限=`总资产×single_stock_cap - 已持该股市值`；100 股整手。`_total_asset` 优先 `portfolio.total_value`，缺失回退 cash+持仓市值。
+- `place_order` 买仓去掉硬编码 `cash*0.3` → 走 `ordinary_buy_ratio`；`place_expected_order` 打板走 `board_buy_budget_ratio`、非打板走 `exp_order_pct`。
+- 红盘比买入门（`red_gate_enabled`，默认关）：开启才要求 ma5 买入标的板块红盘比≥`red_ratio_buy_min=0.55`（对齐 AXquant 首板回暖下限）。
+- 自测：selftest_exp_rt 新增 T22（6 条：cash×比例、单支上限、total_value 优先、ordinary 比例、红盘比 0.75/0.5、量比快照），全量 62/62、0 FAIL；strategy 在 py310 与 PT3.7 均 py_compile 通过。
+- 生效：策略文件需重传；`red_gate_enabled` 默认关不改变现有行为，`_calc_buy_qty` 在 DO_ORDER=TRUE 真实下单时按新仓位生效。

@@ -145,3 +145,91 @@ VWAP 扣分：现价<快照 wavg_px 时每 1 分钟扣1，日上限 12。
   - --sync：客户端自选(IndividualData.xml) -> 上传暂存 data/ptrade_bridge/selfwatch.csv + 本地 data/selfwatch.csv。
   - --verify-log：用 log_collector 比 [pool] selfwatch=N 与客户端自选数（一致/不一致）。
 - 并入 closeout_review.py --selfwatch（步骤0同步自选股）。
+
+## 2026-10-16 预期买入敏捷化 v0.13（tick 3s 触发 + 实盘单门控 EXPECT_ORDER）
+- 问题：预期买入只在 1m handle_data 评估，且确认用按日缓存的 _auction_change——「超预期确认」被固定在自己第一次求值时刻，盘中快速上攻(超预期)那段完全采不到，触发延迟至多~60s。
+- 解法（采集/决策解耦变为「采集即决策」的精准版，仅针对预期买入路径）：
+  - tick_data 3s 帧末统一调 _try_expected_buys()，竞价超预期/盘中快速上攻一道确认立买；handle_data(1m) 兜底共用同一入口。
+  - 实时三态 _exp_rt_status()：超预期(竞价已达标 CX / two_1m 快速上攻 CX / below_vwap 放弃 CS)；一字板走 _exp_one_word L2 封单；miss 放弃；meet/未标注走 _eval_intraday。
+  - 一次触发去重 g.exp_fired：买/放弃皆记，持久化进 buysell_core_state.pkl（跨重启不双买，日切清空）。
+- 独立实盘门控：EXPECT_ORDER（默认 False）只放行预期买入发真实 order()；其余买入仍受 DO_ORDER 门控 → 可「模拟盘仅对预期路径小额真实下单」验证敏捷度与成交。
+- 新参数：EXPECT_ORDER、tick_exp_enabled、exp_order_pct(0.3，可调小如 0.01)。
+- 修隐患：g.pending 从未初始化（EXPECT_ORDER=True 真实下单会在 place_order 第 ~990 行崩）→ initialize 补 g.pending={}。
+- 日志：预期买入发单打 [exp-order]（True/False 标注），放弃打 [exp] ... miss -> skip；log_collector 新增 exp_order 分桶。
+- 编译：PT 3.7 & 本地 py310 均通过。逻辑自测 research/expectation/selftest_exp_rt.py 13/13 过（竞价/上攻触发、走弱放弃、去重、重启恢复、日切、真实发单）。
+- 待重传 strategy.py；明日盘中核对 [exp-order] 在超预期确认后 3s 内出现、EXPECT_ORDER=True 时真实委托。
+
+## 2026-10-18 前瞻预期含「持仓+核心苗子」+ 显式 side=buy（rebuild）
+- 问题：原 export_expectation_csv 的 side 由 status 推导（miss->sell，否则 hold），永远产不出 buy ——「核心苗子前瞻建仓」进不了待上传 CSV，实盘单测试也没候选。
+- 修复：export_expectation_csv 优先采用记录显式 side（buy/sell/hold），缺失再按 status 回落。核心苗子可标 side=buy。
+- 重建：research/expectation/rebuild_expect_from_review.py 读 AXquant review/position_review_<T>.jsonl（kind=holding/seedling）→ 生成 <T+1> position_expectation jsonl（持仓->hold，苗子->buy: pending_exceed，expected_auction_change_pct=floor(竞价,3.0)）→ from-jsonl 导出待上传 CSV。
+- 结果：2026-10-19 预期 5 行 = 持仓 603690/601811(hold) + 核心苗子 600825/000530/600668(buy, pending_exceed)。
+- 角色纠正：601811 为连板（三连板，快照 consecutive_board 池），非首板；AXquant 复盘对 601811 误标 first_board_arb（与快照连板池不一致）→ rebuild 内置 role_fix 纠正，建议修 AXquant 角色引擎保持一致。
+
+## 2026-10-18 预期买入改两阶段（v0.14，用户确认逻辑）
+- 用户申明逻辑：前瞻预期股（side=buy，预期超预期）-> T+1 竞价终态初步确认「竞价超预期」-> 观察流程（不买）；分时确认超预期 -> 执行买入；分时转弱 -> 放弃。
+- 修复 startswith 坑：CSV expected_status=pending_exceed（前缀 pending_），startswith("exceed") 匹配不上 -> 分支根本没走。改 "exceed" in exp_status / "miss" in exp_status（_confirm_expected、_exp_rt_status、_sync_pool_static 排序三处）。
+- 新两阶段 _exp_rt_status（超预期分支）：
+  1. 分时确认已现（_two_1m_break 且未破 VWAP）-> CX intraday_exceed -> 买入；
+  2. 分时转弱（破 VWAP）-> CS below_vwap_weak -> 放弃；
+  3. 竞价超预期初步确认（_confirm_expected==CX，即真实竞价>=预期阈值）-> PM observe_auction_exceed -> 观察，等分时（一次 observe_seen 日志）；
+  4. 其余 -> PM await_intraday_confirm。
+- 观察流程日志：首次进入观察打 [exp] <code> observe ... -> 观察中(等分时确认)。
+- 自测 selftest_exp_rt.py 9/9 通过（观察不买、分时买、破VWAP放弃、去重、重启、日切、真实发单、pending_exceed匹配）。
+- 待重传 strategy.py 生效；明日盘中核对：超预期苗子先 [exp] observe，随后分时上攻才 [exp-order]。
+
+## 2026-10-18 分时确认超预期：两分钟上攻 或 一分钟冲涨停（v0.14 细化）
+- 用户补充：分时确认超预期 = 两分钟上攻(_two_1m_break) **或** 一分钟冲涨停(_limit_up_within_1m)，且未破 VWAP。
+- 新增 _limit_up_within_1m(sec)：当前价>=涨停价*0.998 且时段 09:30-09:32（开盘 ~1 分钟冲板）。
+- _exp_rt_status 超预期分支 CX 判定改为 `(_two_1m_break or _limit_up_within_1m) and not below_vwap`。
+- 自测 13/13 通过（新增 T2b 一分钟冲涨停触发、T2c helper 时段 09:31 True / 14:00 False）。
+
+## 2026-10-18 买入定价：打板/追高/回踩 + 修 order() 限价传参
+- 隐患：order(security, amount, limit_price=None) 第三参是价格；原两处 order(sec,qty,'buy'/'sell') 把方向串当 limit_price 传，真实开盘必错价/失败。已修为 order(sec,qty,limit_price=limit)（limit 为 None 时走默认最新价）。
+- 定价策略 _order_limit(sec,side,mode)：price_precision=2(A股) 取整；
+  - board(打板) = 涨停价 up_px；
+  - chase(追高) = 现价*(1+buy_chase_pct=0.008) 后封顶涨停价（防过度追高）；
+  - pullback(回踩) = 现价限价；sell = 现价限价（防急跌垃圾价，需注意走弱中可能不成交）。
+- 场景决策：
+  - 超预期分时确认-一分钟冲涨停 -> 打板（挂涨停价排队，前一日买入）；
+  - 超预期分时确认-两分钟上攻（未触板） -> 追高（上浮0.8%封顶涨停价）；
+  - 一字板封单超预期 -> 打板（同 board）；
+  - ma5 回踩 -> 现价限价（pullback）。
+- 现金仓位按 limit（最坏价）计 qty（打板时用涨停价算，确保可成交不超仓）。
+- 自测 15/15（新增 T7 限价数值断言、T9 三场景定价、T10 打板挂涨停价）。
+- 再修：一字板超预期(one_word + "+exceed") 封单 CM(未超预期) 曾会触发买入 -> 收紧为仅封单超预期(CX)才买，CM 降级等待。自测 17/17。
+
+## 2026-10-18 对齐 AXquant 买卖逻辑核心（v0.15）
+- 一字板·封单超预期**不参考排单**：新增 _sealed_at_limit(sec)（现价>=涨停价*0.998 且 L2 卖盘空=封死；无盘口判非封死，与 AXquant has_book 一致）。buy 路径统一在 _block_sealed_buy 拦截（place_expected_order + _order_limit board 双保险），返回"不买、不置 fired、可再评估"，同标的每日仅告警一次 [seal] sealed at limit。对齐 AXquant P1-3 limit_up_sealed_no_queue。
+- 竞价核卖 P2E（AXquant _sell_expectation_miss）：sell_manager 在 P1 之后、P3 之前插入 P2E——预期 expected_status in {confirmed_miss, degraded}（可选加 pending_miss，exp_sell_on_pending_miss=False 默认不加）-> 清仓。优先级对齐 AUCTION 链 P1>P2E>P3。
+- 弹性买入价 10% 上限（AXquant _elastic_20cm_max_buy_price）：新增 _is_elastic_20cm(300/301/688/689) 与 _max_elastic_buy_price=前收*(1+elastic_max_buy_pct=10%)。_order_limit chase 追高路径封顶 10%（board 打板豁免），对齐 300/688 非打板不超前收*1.10。
+- 编译：PT3.7 + py310 均 py_compile 通过；自测 selftest_exp_rt.py 30/30 通过（新增 T12 封死不排队买 / T12b 未封死可排队 / T13 弹性10%上限+打板豁免 / T14 P2E核卖 / T14b pending_miss默认不卖）。
+- 待重传 strategy.py；明日盘中核对：[seal] sealed at limit、P2E_exp_miss 日志、300/688 追高限价不超前收*1.10。
+
+## 2026-10-18 节奏验证：9:20上传 -> 9:25竞价终态初步确认 -> 9:30+分时确认
+- 验证结论（原代码有断点）：before_trading_start 约 9:10 前就跑，_load_expectation() 只在其内调用 -> 9:20 上传的预期前瞻文件全天读不到；也无 9:25 竞价终态钩子，「初步确认->观察」步骤缺失。
+- 修复：新增 run_daily auction_pre_confirm time='09:25'（initialize 注册，定时任务现共 3 个 <5）：
+  1) 幂等重读 _load_expectation() + selfwatch + _sync_pool_static()，命中 9:20 上传文件；
+  2) 对 side=buy 候选刷 _eval_auction + _exp_rt_status，竞价超预期初步确认(CX) -> 打 [exp] <code> 09:25竞价终态初步确认超预期 -> 观察(等分时确认)（不买、不置 fired）；
+  3) 不走上单路径，纯观察。
+- after_open_probe(09:31) 加幂等重读兜底（应对稍晚到上传）。
+- 分时确认(9:30+)沿用 _exp_rt_status 超预期分支（_two_1m_break 或 _limit_up_within_1m 且不破 VWAP -> CX 买单；tick 3s 触发）。_auction_change 用 get_trend_data，9:25 竞价终态缓存正确。
+- 自测 selftest_exp_rt.py 34/34（新增 T15：09:25 重读 + observe_seen + 观察日志 + 不买）。PT3.7+py310 py_compile 通过。
+- 待重传；明日盘中核对：09:25 日志 auction_pre_confirm done exp_file=N + [exp] ...观察，随后 9:30+ 才 [exp-order]。
+
+## 2026-10-18 逻辑链路兜底盘点 + 竞价初判未达标即放弃
+- 兜底盘点（已具备）：文件缺失/坏格式不崩(_load_expectation try/路径候选)；预期文件空则走 watch 打分+ma5 扫码兜底；9:25+09:31 双重重读(盘中重启 before_trading_start 也重读)；_auction_change get_trend_data→open/昨收回退；观察/分时评估 try/except；place_expected_order 失败不置 fired 下帧重试；exp_fired+每日买入计数持久化防同日二买/重启重放。
+- 修复缺口：原先竞价初判未超预期(acon!=CX)只进 await，盘中两分钟上攻仍会买，违背「竞价超预期才观察」。现改为 _exp_rt_status exceed 分支：未达标 -> CS auction_not_met(放弃,置 fired)；真竞价缺失(hq/open=0 致 actual~-100)兜底 `< -90` 不误弃，保持 await。auction_pre_confirm 增加「09:25未超预期->放弃」日志。
+- 已知设计取舍（未改，待定）：1) 分时确认依赖两分钟上攻/一分钟冲涨停特征，若无进攻形态将持续 observe 不触发（靠破VWAP放弃兜底）；2) place_expected_order 成功后即置 fired，若真实委托被拒/未成交当日不再回购（防重复优先）。
+- 自测 37/37（新增 T16 未达标->CS 放弃、T16b 数据缺失不误弃）；PT3.7+py310 py_compile 通过。
+
+## 2026-10-18 供方数据健壮性 v0.17（预期三态供方字段 + 云端自取兜底）
+- 结论：T-1 开盘涨幅(yesterday_open_pct) 与 达标基准(expected_auction_change_pct) 属「有条件提供」——AXquant 复盘缺该字段时桥接 CSV 会缺，16/17 文件曾缺失(→0)。消费端有隐患：负基不判高开、缺失基准被当0->超预期过触发。
+- **云端自取**（答：可行，get_price 1d 历史已用于 ma5）：
+  - _yesterday_open_chg：T-1开盘涨幅，供方缺失用 open[-3]/close[-4]-1 折算；返回 (chg, provided)。
+  - _auction_benchmark：预期达标基准，供方缺失/<=0 用 open[-2]/close[-3]-1(T日/复盘日开盘涨幅) 折算；返回 (bm, valid)。
+- **A** _eval_auction：`yopen>0and chg>yopen` -> `has and chg>yopen`，负基也判高开，缺基不误判。
+- **B** _confirm_expected/_exp_rt_status：基准缺失(has_bm=False)或<=0 -> 不算达标(PM,不CX)、不误弃(不CS)；修复「缺失基准被当0->恒超预期过触发」。exp_auc>0 才校验 actual>=bm。
+- **C** 供方 expectation_store 导出：昨日开盘/预期基准缺失 -> 空串(非0)，consumer 用 has_yesterday_open/has_expected_auction 区分；build_expectation_bridge validate 加「缺失行数」非阻断提醒。
+- 自测 43/43（T16/T16b 调整mock基准；新增 T17 缺基准不超预期不放弃、T18 负基高开+云端折算、T19 云端基准折算不达标）；PT3.7+py310 py_compile 通过。
+- 注：预期前瞻文件仍需提供「当日/复盘日开盘涨幅」作为 expected_auction_change_pct 基准；云端1d折算仅为缺失兜底。

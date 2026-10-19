@@ -53,6 +53,8 @@ def _classify(body):
         return "seal"
     if b.startswith("[may-order] "):
         return "may_order"
+    if b.startswith("[exp-order] ") or b.startswith("[exp] "):
+        return "exp_order"
     if b.startswith("score "):
         return "score"
     if b.startswith("market_scan "):
@@ -81,7 +83,7 @@ def parse_text(text):
 
 def _agg(entries):
     dates = {}
-    keys = ["l2", "pool", "firstzt", "seal", "may_order", "score", "market_scan", "expect", "error", "init"]
+    keys = ["l2", "pool", "firstzt", "seal", "may_order", "exp_order", "score", "market_scan", "expect", "error", "init"]
     for e in entries:
         d = e["time"][:10]
         if d not in dates:
@@ -157,6 +159,10 @@ def summary(date):
     mo = d.get("may_order", [])
     print("may-order(%d):" % len(mo))
     for e in mo:
+        print("   %s %s" % (e["time"], e["body"]))
+    expo = d.get("exp_order", [])
+    print("exp-order/exp(%d):" % len(expo))
+    for e in expo:
         print("   %s %s" % (e["time"], e["body"]))
     err = list(d.get("error", []))
     print("errors/异常(%d):" % len(err))

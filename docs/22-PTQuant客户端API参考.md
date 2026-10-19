@@ -89,3 +89,6 @@ entrust_type 取值：0 委托 / 2 撤单 / 4 确认 / 6 信用融资 / 7 信用
 - 前提：PTrade 客户端本机登录并连接服务端（get_engine 断线 60s 重连）。
 
 来源：D:/gjzq/ptrade/.../PTQuantAPI.pdf。配套：docs/16、docs/18、docs/19、docs/21。
+
+
+> 2026-10-19 验证补充：PTQuant 无 L2 逐笔订阅接口（PTradeQuantApi.py 全方法清单 + PTQuantAPI.pdf 均无）；stocks_subscribe 仅快照且延迟>3s。完整验证矩阵见 docs/37。
