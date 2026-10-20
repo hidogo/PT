@@ -37,3 +37,23 @@
 ## 2026-10-16 实测结论（已确认）
 - `[l2] code=601811.XSHG tx=10 entrust=10 gear_bid_cnt=3 -> L2_OK`（盘中 10:31）。
 - 交易模块具备 逐笔成交/逐笔委托/十档委托笔数 真实 L2，权限 OK。
+
+## 2026-10-19 总买/总卖量验证（v0.26b）
+
+- **接口结论（docs/06 权威字段表）**：云端交易模块 `get_snapshot` 标准字段直接含总买/总卖量——
+  - `total_bidqty` 委买量 / `total_offerqty` 委卖量（str:int，单位手；示例 18900/28900，等于五档合计）。
+  - `entrust_diff` 委差 / `entrust_rate` 委比。
+  - `bid_grp`/`offer_grp` 委买/委卖档位（第一档含委托队列 `{int:int}` 仅 L2 支持；`get_gear_price` 委托笔数无 L2 时为 0）。
+  - 注意：`total_bid_turnover`/`total_offer_turnover`（委买/委卖金额）主推 tick 数据中为 0，仅在线请求支持；**量字段不受此限制**。
+- 已加实盘探针（strategy `_l2_probe`）：下一交易日日志应出现
+  `[l2] <code> snap total_bidqty=.. total_offerqty=.. entrust_diff=.. entrust_rate=.. bid1_queue_l2=..`（L2 首档队列是否有值）与
+  `[l2] <code> gear bid_sum=.. offer_sum=..`（十档买卖量合计）。
+- 自测 T60 探针空数据不崩；全量 240 PASS / 0 FAIL；双编译通过。
+- 用途（待盘中确认后接线）：封单大减可用 total_bidqty 补充/替代买一档封单；炸板/封死可用 total_offerqty==0 判卖方无挂单；委差/委比可做强弱辅助。
+- 接线口径（用户确认 2026-10-19）：
+  - 封单大减保持「买一量」口径（`_seal_metrics` 取 bid_grp[1] 挂单金额，不换 total_bidqty）。
+  - 封死不排队：`_sealed_at_limit` 用 `total_offerqty==0`（快照总委卖量，单位手）判卖方无挂单，缺失回退 ask_grp 显式空判；
+    封死状态需持续 >= `sealed_fresh_secs`(5s) 才生效（防瞬时零卖盘误判不排单）。
+  - 新参数：`sealed_fresh_secs=5.0`、`sealed_offerqty_enabled=True`（BLS 可调）。
+  - 自测：T12 更新为预置持续 6s 封死 + 新增 T61 八项（total_offerqty==0/持续确认/总委卖量>0/解除清起点/ask 兜底/卖档有量/未触涨停）；全量 248 PASS / 0 FAIL；双编译通过。
+

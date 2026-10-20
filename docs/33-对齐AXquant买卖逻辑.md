@@ -6,6 +6,7 @@
 - AXquant P1-3：除 auction/add_position/elastic_arb 外，`_is_sealed_at_limit` 命中即 `limit_up_sealed_no_queue` 拦单——挂涨停价只是排队，不参考/不参与排单成交。
 - PT 对齐：新增 `_sealed_at_limit(sec)` = 现价>=涨停价*0.998 且 L2 十档卖盘空（封死）。无 L2 盘口(回测)判非封死，与 AXquant `has_book` 一致。
 - 拦截点统一在 `_block_sealed_buy`（place_expected_order 兜底 + _order_limit mode=board 双保险）：返回 False、不置 fired、可再评估；同标的每日仅告警一次 `[seal] sealed at limit`。
+- v0.26c：`try_core_buy` 增 `_is_one_word_open` 闸门（开盘即涨停的一字板不追，对齐 first_board/elastic 排除）；`auction_pre_confirm(09:25)`/`after_open_probe(09:31)` 增 `_mark_one_word_open()` 一字板识别（开=涨停价且无卖盘 -> `g.one_word_open`，`_sealed_at_limit` 免 5s 持续门槛立即封死）。
 
 ## 2. 竞价核卖 P2E
 - AXquant AUCTION 卖出链：P0 强清 > P1 核卖 > P2 熔断 > BUFF > **P2E 预期不及卖** > P3 止损。
@@ -282,3 +283,77 @@
 ### 4. 自测与编译
 - selftest T36-T39：core_buy 门禁 / 首板闸门 / 首板下单 / tick 端到端（当前 148 PASS / 0 FAIL）
 - 双编译：py310 + PT3.7 通过
+
+## v0.26 tick 级卖出（2026-10-19，事件驱动 3s 响应）
+
+- 验证结论（审查 sell_manager 全路径）：炸板卖出此前未生效（tick 只采集 first_zt.break 打日志，无消费方）；封单大减卖出仅对一字板预期标的（_exp_one_word CS）生效且只在 1m 评估。
+- 落地：新增 `tick_sell_manager`（tick_data 3s 帧末）：
+  - 炸板卖出：`first_zt.break` 首触发 -> 卖（现价限价，`TICK_break_sell`；break_sold 当日一次 + 持久化）。
+  - 封单大减卖出：`first_zt.seal_low` 首触发（封单<=首封×seal_fail_ratio）-> 卖（`TICK_seal_low_sell`）。
+  - 急卖迁移：P1 绿开 / P2E 预期 miss / P3 止损 3s 响应（核卖限价跌停地板价）；P4-P6 留 1m sell_manager。
+  - 去重：_sell_inflight + sold_log 30s 冷却 + break_sold/seal_sold 跨重启持久化。
+- 参数：tick_sell_enabled / break_sell_enabled / seal_low_sell_enabled（均可单独关）。
+- 自测：T59 六项（炸板首触发卖/标记/不重复、封单大减卖/标记、P3 tick 止损）。全量 259 PASS / 0 FAIL；双编译通过。
+
+## v0.32 云端持仓预期管理（2026-10-20）
+
+> 背景：本地拉取持仓不可行（客户端 Quant API 无本地 LISTEN 端口，sync_positions 无限阻塞）→ 持仓预期管理全部改为云端策略内算法完成，不依赖本地文件。
+
+- 新增 _hold_exp_init(sec, force=False)：对任一只持仓股建立/刷新 g.exp 预期条目：
+  - 基准全部来自云端算法：竞价三态 _eval_auction（get_trend_data 真口径 + 云端 1d 历史折算）、分时三态 _eval_intraday（两分钟上攻/破 VWAP）、一字板判定 _is_one_word_open。
+  - 回填预期文件字段 sell_policy_hint / expected_status / expected_auction_change_pct / seal_amount_t0（有文件则对齐 T-1 复盘，无文件则纯云端算法兜底）。
+  - 幂等：已确认的 uction_status/status 不覆盖；orce=True 跨日重算（handle_data 日切）。
+  - 首次初始化打 [hold] <名称>(code) 持仓预期管理初始化 entry_type=.. auction_status=.. status=.. sell_policy=.. 日志。
+- 接线三处：
+  - on_trade_response 成交回报：买入/任意成交即建立条目 → 补「盘中新买入持仓无预期条目」缺口（此前 g.exp 仅 09:25/09:31/日切初始化）。
+  - sell_manager（1m）与 	ick_sell_manager（3s）循环开头：确保条目存在（幂等），重启后自动重建。
+  - handle_data 日切：改 _hold_exp_init(sec, force=True)（原内联重算逻辑统一收敛）。
+- 效果：P4 卖出链（普通预期 _eval_intraday / 一字板 _exp_one_word 封单实时化）对「当日盘中买入的持仓」也立即生效，卖出决策基准=云端实时三态。
+- 自测：T66（初始化/回填/幂等/一字板继承）、T67（买入成交回调建条目）、T68（跨日 force）。全量 312 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py。
+
+## v0.33 文件持仓预期 vs 云端实时 防冲突仲裁（2026-10-20）
+
+> 背景：上传的复盘文件（expectation CSV）side=hold/sell 行携带 xpected_status(pending_*)、sell_policy_hint、ntry_type、seal_amount_t0。文件是 T-1 静态预期，云端是 T+1 实时算法——两者方向冲突时需仲裁，原则：**云端实时硬信号优先，文件只作方向/容忍度参考**。
+
+- 新增 _realtime_weak(sec)（廉价版）：竞价绿开(_auction_change<0) 或 破 VWAP → 实时走弱。不调用 _eval_intraday/_two_1m_break（避免 tick 3s 帧吃 1m get_price 帧预算）；P4 仍用完整分时三态。
+- 新增 _hold_arb_log(sec, msg)：[arb] <名称>(code) ... 60s/股节流防刷屏。
+- 三处仲裁：
+  1. _role_tolerance：文件乐观容忍（如 hold_higher_tolerance green_tol=2.5/stop_adj=1.3）在实时走弱时回落 P1 绿开/P3 止损因子到 1.0（实时硬信号优先）；评分类软阈值（score_clear_adj/score_half_adj）仍按文件缩放；激进/保守因子（<=1.0，如 fast_exit）保持（本就该更敏感）。
+  2. sell_manager P2E：文件悲观（confirmed_miss/degraded）但实时竞价超预期反证（_confirm_expected==CX）→ 不核卖，交实时分时三态；未反证仍核卖（对齐 AXquant）。
+  3. sell_manager P4：文件 ntry_type=one_word 但实时已开板（_is_one_word_open False）→ 回落普通分时三态评估（防封单误判/漏卖）；实时仍封板 → 走 _exp_one_word 封单逻辑。
+- 自测：T69（文件 miss+实时 CX 反证不核卖）、T69b（未反证核卖）、T70（实时绿开回落乐观容忍 P1/P3）、T71/T71b（一字板实时开板回落 / 实时封板走封单）。全量 318 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py。
+
+## v0.34 连板中位股规避（2026-10-20）
+
+> 背景：AXquant 复盘对持仓/苗子已标注连板角色（role_detail），其中「连板中位股」（既非首板/一进二低位，也非唯一性高标）在云端此前无规避 → 新增消费与兜底。
+> 参考点：低位=首板/一进二（first_board_arb / leading_first_board）；高位=唯一性展现（unique_high_board_consecutive）；中位=mid_consecutive_limit_up（规避）。
+
+- AXquant 侧（D:/PROJ/AXquant/strategy/expectation/publish.py `derive_role_detail`）：mid_consecutive_limit_up（中位）/ unique_high_board_consecutive（高位唯一性，板块内唯一高板 + follower_count>=1）/ leading_first_board（低位领涨首板）/ first_board_arb（首板弹性套利）。
+- 链路打通：AXquant 复盘 jsonl 标注 → bridge CSV 新增 `role_detail` 列（expectation_store.export_expectation_csv + build_expectation_bridge.CSV_HEADER）→ 云端 `_load_expectation` 读入 g.exp_file[code]['role_detail']。
+- 新增 `_mid_board_avoid(sec)`（v0.34）：
+  - role_detail=mid_consecutive_limit_up → 规避（True）。
+  - role_detail=unique_high_board_consecutive / leading_first_board / first_board_arb → 放行（False）。
+  - 无标注兜底：仅当权威 zt_lianban 有记录且 T-1 board_cnt∈[2,5] → 近似中位规避（role 为复盘口径，盘中是否续板不改分档；board_cnt<2 首板/一进二放行，>=6 高位候选放行）。
+- 挂闸点（全部为买入侧；卖出链不挂闸，持仓卖出照常走 P1/P2E/P3/P4）：
+  - `_attempt_expected_buy` / `place_expected_order` / `place_order`（buy 分支统一兜底）→ `[mid-avoid] <名称>(code) 连板中位股规避(expected_buy|exp-order|order)`。
+  - `try_core_buy`（[mid-avoid] core_buy）/ `try_ma5_buy`（ma5）/ `_try_first_board_buy`（first_board）。
+  - `_synth_pool_expect` 涨停池合成（云端兜底）同口径过滤中位：合成日志加 `mid_skip=N`。
+- 自测：T72 系列（role_detail 分档规避/放行、无标注 zt 兜底 1/3/6 连板、place_order/place_expected_order/_attempt_expected_buy/try_core_buy/try_ma5_buy/_try_first_board_buy 拦截、涨停池合成中位过滤）。全量 333 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py；bridge CSV 需重跑（build_expectation_bridge.py / export_expectation_csv）带出 role_detail 列。
+
+## v0.34b 连板中位股规避-唯一高度板兜底修正（2026-10-20）
+
+> 漏洞修复：兜底按 T-1 连板数 2–5 一刀切规避，会把「高度压制到 3/4 板但展现唯一性（板块内唯一高度板+跟风低位板）」的龙头误杀。
+> 对齐 AXquant 收盘地位重算的唯一身位判定（publish.py）：板块内最高身位唯一 + 板块内≥2 家（或全市场唯一高标特例）→ unique_high_board。
+
+- 新增 `_annotate_zt_uniqueness()`（云端兜底标注）：`_load_zt_lianban` 补读 `reason` 列后预计算唯一性：
+  - 板块口径 = 涨停原因首 token（云端无权威板块映射，首 token 兜底分组，与 AXquant 复盘 board_name 同源）。
+  - 组内最高身位唯一 + 组内≥2 家 → `unique_high=True`，`follower_count`=组内更低身位家数（跟风低位板）。
+  - 特例：全市场最高身位唯一（高度压制到 3/4 板等场景）也授唯一。
+  - 并列最高（两票同板数）不授唯一。
+- `_mid_board_avoid` 兜底改：`2<=board_cnt<=5` 时，若 `unique_high` → 放行（对齐 unique_high_board_consecutive）；否则规避。
+- 权威优先不变：复盘 `role_detail=mid_consecutive_limit_up` 仍规避；`unique_high_board_consecutive` 仍放行（不依赖兜底）。
+- 自测：T73 系列（板块唯一 3 板+跟风放行 / 并列最高规避 / 全市场唯一高标放行 / 板块有更高身位时 3 板规避 / role_detail 权威优先）。全量 346 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py；zt_lianban CSV 需含 `reason` 列（export_lianban.py 已导出）。

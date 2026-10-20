@@ -193,6 +193,7 @@ ns['_exp_one_word'] = lambda c: (ns['CX'], ['seal_increase'])
 ns['_below_vwap'] = lambda c: False
 ns['_eval_auction'] = lambda c: (ns['AW'], [])
 ns['get_gear_price'] = lambda sec: {'ask_grp': {}}   # 卖盘为空 -> 封死
+ns['g'].sealed_since = {'600043.XSHG': time.time() - 6.0}   # 已持续 6s(≥5s)，封死生效（v0.26b 新规）
 ns['BLS']['EXPECT_ORDER'] = True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600043.XSHG')
 ok('T12 sealed one_word CX no queue buy', r is None and len(ns['_RECC']['calls']) == 0)
@@ -865,9 +866,9 @@ ns['get_price'] = lambda *a, **k: _Bar([10.0, 10.0], [10.0, 10.4])
 ok('T42 1m 大阳线 4.0%', abs(ns['_elastic_1m_surge']('600001.XSHG') - 4.0) < 1e-9)
 ns['get_price'] = lambda *a, **k: _Bar([10.0, 10.0], [10.0, 9.8])
 ok('T42 15s 缓存复用 4.0%', abs(ns['_elastic_1m_surge']('600001.XSHG') - 4.0) < 1e-9)
-ns['g'].ds.cache.clear()
+ns['_DS'].cache.clear()
 ok('T42 失效后 1m 阴线 -2.0%', abs(ns['_elastic_1m_surge']('600001.XSHG') - (-2.0)) < 1e-9)
-ns['g'].ds.cache.clear()
+ns['_DS'].cache.clear()
 ns['get_price'] = lambda *a, **k: None
 ok('T42 无 1m 数据 -> 0.0', ns['_elastic_1m_surge']('600001.XSHG') == 0.0)
 
@@ -876,7 +877,7 @@ ns['g'].spot['X'] = {'last_px': 10.3}
 ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [10.5, 1000.0, 2]}}
 ok('T42b ask1 卖一价', abs(ns['_elastic_ask1']('X') - 10.5) < 1e-9)
 ok('T42b 3s 盘口缓存复用 10.5', abs(ns['_elastic_ask1']('X') - 10.5) < 1e-9)
-ns['g'].ds.cache.clear()
+ns['_DS'].cache.clear()
 ns['get_gear_price'] = lambda sec: {}
 ok('T42b 缺盘口回退最新价', abs(ns['_elastic_ask1']('X') - 10.3) < 1e-9)
 
@@ -1214,3 +1215,705 @@ ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 33, 0)
 ok('T57 09:33 快速刷新 3s', abs(ns['_board_refresh_ttl']() - 3.0) < 1e-9)
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 1, 0)
 ok('T57 10:01 慢刷新 60s', abs(ns['_board_refresh_ttl']() - 60.0) < 1e-9)
+
+
+# --- T58 ???????v0.25 Phase 3????/????/????/???? ---
+class _FakeTime(object):
+    def __init__(self, t0=1000.0):
+        self.t = t0
+    def time(self):
+        return self.t
+
+ns = fresh(); fake = _FakeTime(1000.0); ns['time'] = fake
+dh = ns['DataHub'](); ns['g'].ds = dh
+ok('T58 snapshot ????2?', dh.spend('snapshot') is True and dh.spend('snapshot') is True)
+ok('T58 ?3??? False', dh.spend('snapshot') is False)
+ok('T58 over ??=1', dh.frame['over'].get('snapshot') == 1)
+fake.t += 3.0
+ok('T58 ?? used ????', dh.spend('snapshot') is True and dh.frame['used'].get('snapshot') == 1 and dh.frame['over'] == {})
+r = dh.frame_report()
+ok('T58 report ? snapshot=1/2', 'snapshot=1/2' in r)
+
+ns2 = fresh(); fake2 = _FakeTime(2000.0); ns2['time'] = fake2
+dh2 = ns2['DataHub'](); ns2['g'].ds = dh2
+calls = {'n': 0}
+def _fetch():
+    calls['n'] += 1
+    return 42
+ok('T58 P0 ?????', dh2.cached('gear', 'S1', 3.0, _fetch, budget='gear') == 42)
+for _ in range(14):
+    dh2.spend('gear')
+v = dh2.cached('gear', 'S2', 3.0, _fetch, budget='gear')
+ok('T58 P0 ??????? None', v is None and calls['n'] == 1)
+fake2.t += 3.0
+ok('T58 ??????', dh2.cached('gear', 'S2', 3.0, _fetch, budget='gear') == 42 and calls['n'] == 2)
+
+ns3 = fresh(); fake3 = _FakeTime(3000.0); ns3['time'] = fake3
+dh3 = ns3['DataHub'](); ns3['g'].ds = dh3
+ok('T58 P1 stale ??', dh3.cached('board_chgs', 'B1', 3.0, lambda: 7.0, budget='board', stale_ok=True) == 7.0)
+fake3.t += 3.0
+for _ in range(6):
+    dh3.spend('board')
+ok('T58 P1 ??????', dh3.cached('board_chgs', 'B1', 3.0, lambda: 9.0, budget='board', stale_ok=True) == 7.0)
+ok('T58 P1 ????? None', dh3.cached('board_chgs', 'B2', 3.0, lambda: 9.0, budget='board', stale_ok=True) is None)
+
+ns4 = fresh(); fake4 = _FakeTime(4000.0); ns4['time'] = fake4
+cnt = {'n': 0}
+def _calc(sec):
+    cnt['n'] += 1
+    return True
+ns4['_calc_two_1m_break'] = _calc
+ok('T58 two_1m ??? True', ns4['_two_1m_break']('S1') is True)
+ok('T58 two_1m ??????', ns4['_two_1m_break']('S1') is True and cnt['n'] == 1)
+fake4.t += 3.0
+ok('T58 two_1m ????', ns4['_two_1m_break']('S1') is True and cnt['n'] == 2)
+
+
+# --- T59 tick 级卖出（v0.26）：炸板/封单大减首触发卖 + 去重 + 急卖 ---
+ns = fresh(); ns['time'] = _FakeTime(5000.0)
+g = ns['g']
+g.first_zt = {}
+g.spot['600001.XSHG'] = {'last_px': 9.5, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+g.first_zt['600001.XSHG'] = {'first_seal': 100000.0, 'first_bids': 5, 'ts': 5000.0, 'break': True, 'break_ts': 5001.0, 'seal_low': False}
+ns['get_positions'] = lambda: {'600001.XSHG': {'enable_amount': 1000, 'cost_basis': 9.0}}
+ns['_sellable_source'] = lambda: ns['get_positions']()
+ns['_sellable'] = lambda raw, p: 1000
+ns['last_px'] = lambda sec: 9.5
+ns['_auction_change'] = lambda sec: 3.0
+ns['my_cost'] = lambda raw, p: 9.0
+ns['get_stop_loss_pct'] = lambda sec: 0.05
+ns['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+ns['_save_state'] = lambda *a, **k: None
+ns['_sell_inflight'] = lambda sec: False
+out = []
+ns['_do_sell'] = lambda c, sec, qty, note, urgent=False: out.append((sec, note, urgent))
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T59 炸板首触发卖(现价)', len(out) == 1 and 'TICK_break_sell' in out[0][1] and out[0][2] is False)
+ok('T59 炸板标记', '600001.XSHG' in ns['g'].break_sold)
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T59 二次帧不重复卖', len(out) == 1)
+
+ns2 = fresh(); ns2['time'] = _FakeTime(6000.0)
+g2 = ns2['g']
+g2.first_zt = {}
+g2.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+g2.first_zt['600001.XSHG'] = {'first_seal': 100000.0, 'first_bids': 5, 'ts': 6000.0, 'break': False, 'seal_low': True}
+ns2['get_positions'] = lambda: {'600001.XSHG': {'enable_amount': 1000, 'cost_basis': 9.0}}
+ns2['_sellable_source'] = lambda: ns2['get_positions']()
+ns2['_sellable'] = lambda raw, p: 1000
+ns2['last_px'] = lambda sec: 11.0
+ns2['_auction_change'] = lambda sec: 5.0
+ns2['my_cost'] = lambda raw, p: 9.0
+ns2['get_stop_loss_pct'] = lambda sec: 0.05
+ns2['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+ns2['_save_state'] = lambda *a, **k: None
+ns2['_sell_inflight'] = lambda sec: False
+out2 = []
+ns2['_do_sell'] = lambda c, sec, qty, note, urgent=False: out2.append((sec, note))
+ns2['tick_sell_manager'](ns2['_CTX'])
+ok('T59 封单大减卖', len(out2) == 1 and 'TICK_seal_low_sell' in out2[0][1])
+ok('T59 封单标记', '600001.XSHG' in ns2['g'].seal_sold)
+
+ns3 = fresh(); ns3['time'] = _FakeTime(7000.0)
+g3 = ns3['g']
+g3.first_zt = {}
+g3.spot['600001.XSHG'] = {'last_px': 9.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+ns3['get_positions'] = lambda: {'600001.XSHG': {'enable_amount': 1000, 'cost_basis': 10.0}}
+ns3['_sellable_source'] = lambda: ns3['get_positions']()
+ns3['_sellable'] = lambda raw, p: 1000
+ns3['last_px'] = lambda sec: 9.0
+ns3['_auction_change'] = lambda sec: -1.0
+ns3['my_cost'] = lambda raw, p: 10.0
+ns3['get_stop_loss_pct'] = lambda sec: 0.05
+ns3['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+ns3['_save_state'] = lambda *a, **k: None
+ns3['_sell_inflight'] = lambda sec: False
+out3 = []
+ns3['_do_sell'] = lambda c, sec, qty, note, urgent=False: out3.append((sec, note, urgent))
+ns3['tick_sell_manager'](ns3['_CTX'])
+ok('T59 P3 止损 tick 3s 触发(核卖)', len(out3) == 1 and 'P3_stop_loss_tick' in out3[0][1] and out3[0][2] is True)
+
+
+# --- T60 L2 总买/总卖量探针（v0.26b）：空数据不崩、置位 l2_probed ---
+ns = fresh()
+ns['g'].watch = []; ns['g'].pool_static = []
+ns['_l2_probe'](ns['_CTX'])
+ok('T60 l2_probe 空数据不崩且置位', ns['g'].l2_probed is True)
+
+
+# --- T61 封死不排队（v0.26b）：total_offerqty==0 + 5s 持续确认 + ask 兜底 ---
+ns = fresh(); ns['time'] = _FakeTime(8000.0)
+g = ns['g']; g.sealed_since = {}
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'total_offerqty': 0}
+ns['get_gear_price'] = lambda sec: {'ask_grp': {}, 'bid_grp': {}}
+ok('T61 首帧封死起点(未生效)', ns['_sealed_at_limit']('600001.XSHG') is False)
+ns['time'].t += 6.0
+ok('T61 持续6s 封死不排单', ns['_sealed_at_limit']('600001.XSHG') is True)
+ns['time'].t += 3.0
+g.spot['600001.XSHG']['total_offerqty'] = 500
+ok('T61 总委卖量>0 未封死', ns['_sealed_at_limit']('600001.XSHG') is False)
+ok('T61 解除后起点清空', '600001.XSHG' not in g.sealed_since)
+
+ns2 = fresh(); ns2['time'] = _FakeTime(9000.0)
+g2 = ns2['g']; g2.sealed_since = {}
+g2.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0}
+ns2['get_gear_price'] = lambda sec: {'ask_grp': {}, 'bid_grp': {}}
+ok('T61 无总量走ask空判(起点)', ns2['_sealed_at_limit']('600001.XSHG') is False)
+ns2['time'].t += 6.0
+ok('T61 ask空判 6s 封死', ns2['_sealed_at_limit']('600001.XSHG') is True)
+ns2['time'].t += 4.0   # 超过 gear 3s TTL 才会重拉新桩
+ns2['get_gear_price'] = lambda sec: {'ask_grp': {1: [11.0, 100, 1]}, 'bid_grp': {}}
+ok('T61 卖档有量未封死', ns2['_sealed_at_limit']('600001.XSHG') is False)
+
+ns3 = fresh(); ns3['g'].spot['600001.XSHG'] = {'last_px': 10.5, 'preclose_px': 10.0, 'up_px': 11.0, 'total_offerqty': 0}
+ok('T61 未触涨停不判封死', ns3['_sealed_at_limit']('600001.XSHG') is False)
+
+
+# --- T62/T63 v0.26c 预期文件日期对齐 + 一字板 09:25 识别 ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)   # 周五
+paths = ns['_expectation_paths']()
+ok('T62 验证日命名在候选', any(p.endswith('expectation_2026-10-16.csv') for p in paths))
+ok('T62 生成日(T-1)命名在候选', any(p.endswith('expectation_2026-10-15.csv') for p in paths))
+zpaths = ns['_zt_lianban_paths']()
+ok('T62 zt 生成日(T-1)在候选', any(p.endswith('zt_lianban_2026-10-15.csv') for p in zpaths))
+ok('T62 周五 prev=周四', str(ns['_prev_trade_day']()) == '2026-10-15')
+ns2 = fresh(); ns2['get_trading_day'] = lambda: datetime.date(2026, 10, 19)   # 周一
+ok('T62 周一 prev=周五', str(ns2['_prev_trade_day']()) == '2026-10-16')
+ns3 = fresh(); ns3['get_trading_day'] = lambda: datetime.date(2026, 10, 20)   # 周二
+ok('T62 周二 prev=周一', str(ns3['_prev_trade_day']()) == '2026-10-19')
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']; g.one_word_open = set(); g.pool_static = ['600001.XSHG']
+g.watch = []; g.selfwatch = []; g.zt_lianban = {}; g.exp_file = {}
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 11.0, 'total_offerqty': 0}
+ns['get_gear_price'] = lambda sec: {'ask_grp': {}}
+ns['_mark_one_word_open']()
+ok('T63 一字板 09:25 识别入 one_word_open', '600001.XSHG' in g.one_word_open)
+ok('T63 一字板 _sealed_at_limit 立即封死', ns['_sealed_at_limit']('600001.XSHG') is True)
+ok('T63 一字板 _block_sealed_buy 不排队', ns['_block_sealed_buy']('600001.XSHG') is True)
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']; g.one_word_open = set()
+g.watch = ['600001.XSHG']; g.pool_static = []; g.selfwatch = []; g.zt_lianban = {}; g.exp_file = {}
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 11.0, 'total_offerqty': 0}
+g.daily = {'bought': []}; g.buy_log = {}; g.now_dt = datetime.datetime(2026, 10, 16, 9, 33, 0)
+ns['_min_age'] = lambda: 3
+ns['_tags'] = lambda sec: ['CORE', 'LB']
+ns['_limitup_days'] = lambda sec: 1
+ns['try_core_buy'](ns['_CTX'])
+ok('T63 一字板 core_buy 跳过(不排队)', g.daily['bought'] == [] and len(ns['_RECC']['calls']) == 0)
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']; g.one_word_open = set()
+g.watch = ['600001.XSHG']; g.pool_static = []; g.selfwatch = []; g.zt_lianban = {}; g.exp_file = {}
+g.spot['600001.XSHG'] = {'last_px': 10.5, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.3}
+g.daily = {'bought': []}; g.buy_log = {}; g.now_dt = datetime.datetime(2026, 10, 16, 9, 33, 0)
+ns['_min_age'] = lambda: 3
+ns['_tags'] = lambda sec: ['CORE', 'LB']
+ns['_limitup_days'] = lambda sec: 1
+ns['score_now'] = lambda sec: 72.0
+ns['try_core_buy'](ns['_CTX'])
+ok('T63 非一字 CORE 可触发 core_buy', '600001.XSHG' in g.daily['bought'] and g.buy_log.get('600001.XSHG', 0) > 0)
+
+
+# --- T64 v0.27 涨停池预期三态初步确认（竞价超预期->观察，窗口内分最高/最主动优先） ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 0}, '600002.XSHG': {'board_cnt': 1}, '600003.XSHG': {'board_cnt': 1}}
+g.exp_file = {}; g.auction_c = {}
+g.spot['600001.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.8}   # +8% 超预期
+g.spot['600002.XSHG'] = {'last_px': 9.6, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 9.6}     # -4% 绿开 miss
+g.spot['600003.XSHG'] = {'last_px': 10.2, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.2}   # +2% 未超昨日 meet
+ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
+n = ns['_synth_pool_expect']()
+en1 = g.exp_file.get('600001.XSHG') or {}
+en2 = g.exp_file.get('600002.XSHG') or {}
+en3 = g.exp_file.get('600003.XSHG') or {}
+ok('T64 涨停池超预期 -> exceed/观察', n == 3 and en1.get('expected_status') == 'pending_exceed' and en1.get('_src') == 'zt_pool' and en1.get('side') == 'buy')
+ok('T64 涨停池绿开 -> miss', en2.get('expected_status') == 'pending_miss')
+ok('T64 涨停池未超昨日 -> meet', en3.get('expected_status') == 'pending_meet')
+ok('T64 二次合成幂等', ns['_synth_pool_expect']() == 0 and len(g.exp_file) == 3)
+ok('T64 预置竞价涨幅缓存', abs(g.auction_c.get('600001.XSHG', (0, 0))[1] - 8.0) < 1e-9)
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']
+g.exp_file['600001.XSHG'] = {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'pending_exceed',
+                             'expected_auction_change_pct': 2.0, 'has_expected_auction': True,
+                             'yesterday_open_pct': 2.0, '_src': 'zt_pool'}
+g.exp.setdefault('600001.XSHG', {})
+ns['_auction_change'] = lambda sec: 8.0
+ns['_two_1m_break'] = lambda c: False
+ns['_limit_up_within_1m'] = lambda c: False
+ns['_below_vwap'] = lambda c: False
+st, reason = ns['_exp_rt_status']('600001.XSHG')
+ok('T64 涨停池竞价超预期 -> 观察(等分时)', st == ns['PM'] and str(reason).startswith('observe'))
+
+ns = fresh()
+g = ns['g']; g.first_zt = {'600001.XSHG': {'ts': 1000.0}, '600002.XSHG': {'ts': 2000.0}, '600003.XSHG': {'ts': 500.0}}
+ns['score_now'] = lambda sec: {'600001.XSHG': 60.0, '600002.XSHG': 80.0, '600003.XSHG': 60.0}.get(sec, 0.0)
+p1 = ns['_pool_exp_priority']('600001.XSHG'); p2 = ns['_pool_exp_priority']('600002.XSHG'); p3 = ns['_pool_exp_priority']('600003.XSHG')
+ok('T64 优先分最高', p2 < p1)
+ok('T64 同分最早触板(最主动)优先', p3 < p1)
+
+# --- T65 v0.28 涨停池合成 ST 过滤（is_st 字段消费，对齐 AXquant 复盘口径） ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+g = ns['g']
+g.zt_lianban = {
+    '600001.XSHG': {'board_cnt': 0, 'is_st': False},
+    '600002.XSHG': {'board_cnt': 1, 'is_st': True},
+    '600003.XSHG': {'board_cnt': 1, 'is_st': False},
+}
+g.exp_file = {}; g.auction_c = {}
+g.spot['600001.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.8}   # +8% 超预期
+g.spot['600002.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 11.0}   # ST 涨停也不入
+g.spot['600003.XSHG'] = {'last_px': 10.2, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.2}   # +2% meet
+ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
+n = ns['_synth_pool_expect']()
+ok('T65 ST 过滤后仅合成 2 只', n == 2 and '600002.XSHG' not in g.exp_file)
+ok('T65 非 ST 超预期保留', (g.exp_file.get('600001.XSHG') or {}).get('expected_status') == 'pending_exceed')
+ok('T65 二次合成幂等(ST)', ns['_synth_pool_expect']() == 0 and len(g.exp_file) == 2)
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+ns['BLS']['pool_expect_skip_st'] = False   # 开关关闭：ST 不过滤
+g2 = ns['g']
+g2.zt_lianban = {'600002.XSHG': {'board_cnt': 1, 'is_st': True}}
+g2.spot['600002.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 11.0}
+ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
+ok('T65 开关关闭时 ST 也合成', ns['_synth_pool_expect']() == 1 and '600002.XSHG' in g2.exp_file)
+
+# --- T66 v0.29 情绪冰点->回暖链（docs/40）：sentiment CSV 读入 + 红盘比回暖判定 + 冰点越久阈值越低 ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+_sent = os.path.join(ns['_TMP'], 'sentiment_latest.csv')
+with open(_sent, 'w', encoding='utf-8') as f:
+    f.write('date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak\n'
+            '2026-10-15,25,30,0.4500,30.10,2,6,1,2\n')
+g66 = ns['g']
+s66 = ns['_load_sentiment']()
+ok('T66 sentiment 读入 ice=1 streak=2', s66 is not None and s66.get('ice') is True and s66.get('ice_streak') == 2)
+ok('T66 sentiment 字段齐(limit_up/seal/advance)', s66.get('limit_up') == 25 and abs(s66.get('seal_rate') - 0.45) < 1e-9 and abs(s66.get('advance_rate') - 30.1) < 1e-9)
+
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+ns['g'].sentiment = {'ice': True, 'ice_streak': 2, 'advance_rate': 30.1, 'seal_rate': 0.45}
+ns['BLS']['sentiment_enabled'] = True
+ns['_red_ratio'] = lambda sec: 0.55
+ok('T66 回暖判定 True(streak=2 th=0.51 red=0.55)', ns['_sentiment_warm']('600001.XSHG') is True)
+ns['_red_ratio'] = lambda sec: 0.50
+ok('T66 未回暖 False(streak=2 th=0.51 red=0.50)', ns['_sentiment_warm']('600001.XSHG') is False)
+ns['_red_ratio'] = lambda sec: 0.35
+ok('T66 继续冰点 False(red<0.40)', ns['_sentiment_warm']('600001.XSHG') is False)
+ns['BLS']['sentiment_enabled'] = False
+ok('T66 未启用 -> None', ns['_sentiment_warm']('600001.XSHG') is None)
+ns2 = fresh(); ns2['g'].sentiment = {'ice': False, 'ice_streak': 0}
+ns2['BLS']['sentiment_enabled'] = True
+ok('T66 无冰点基线 -> None', ns2['_sentiment_warm']('600001.XSHG') is None)
+
+ns = fresh(); ns['BLS']['sentiment_enabled'] = True
+ns['g'].sentiment = {'ice': True, 'ice_streak': 1}
+ns['_red_ratio'] = lambda sec: 0.55
+ns['BLS']['red_gate_enabled'] = True
+ok('T66 _buy_red_ok 回暖放行(streak=1 th=0.53 red=0.55)', ns['_buy_red_ok']('600001.XSHG') is True)
+ns['_red_ratio'] = lambda sec: 0.52
+ok('T66 _buy_red_ok 未回暖不放行(red=0.52<th=0.53)', ns['_buy_red_ok']('600001.XSHG') is False)
+ns3 = fresh(); ns3['BLS']['red_gate_enabled'] = False
+ok('T66 red_gate 关闭 -> 恒放行', ns3['_buy_red_ok']('600001.XSHG') is True)
+
+
+# --- T67 v0.30 情绪仓位闭环（docs/40 闭环）：冰点40%/回暖80%、连续回暖递减、分歧保护 ---
+# 1) _load_sentiment 读 warm_days/phase/divergence 新列
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+_sent = os.path.join(ns['_TMP'], 'sentiment_latest.csv')
+with open(_sent, 'w', encoding='utf-8') as f:
+    f.write('date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence\n'
+            '2026-10-19,25,30,0.4500,30.10,2,6,1,2,3,cont,1\n')
+s67 = ns['_load_sentiment']()
+ok('T67 sentiment 读入 warm_days=3 phase=cont divergence=1',
+   s67 is not None and s67.get('warm_days') == 3 and s67.get('phase') == 'cont' and s67.get('divergence') is True)
+ok('T67 兼容旧列(ice/ice_streak 仍读)', s67.get('ice') is True and s67.get('ice_streak') == 2)
+
+# 2) 冰点基线 + 今日未回暖 -> 40%
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False}
+ns['_red_ratio'] = lambda sec: 0.50   # streak=1 -> th=0.53 -> red<th 未回暖
+ok('T67 冰点日未回暖 cap=0.40',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
+ns['_red_ratio'] = lambda sec: 0.60   # red>=th 今日回暖
+ok('T67 冰点基线回暖日 cap=0.80(回暖首日)',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.80) < 1e-9)
+
+# 3) 无冰点基线（回暖延续）-> _warm_cap 连续回暖递减 + 分歧保护
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': False, 'ice_streak': 0, 'warm_days': 1, 'phase': 'warm', 'divergence': False}
+ok('T67 回暖延续 warm_days=1 cap=0.80',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.80) < 1e-9)
+ns['g'].sentiment['warm_days'] = 3
+ok('T67 warm_days=3 递减 cap=0.70(分歧保护)',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.70) < 1e-9)
+ns['g'].sentiment['warm_days'] = 4
+ok('T67 warm_days=4 cap=0.60',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.60) < 1e-9)
+ns['g'].sentiment['warm_days'] = 6
+ok('T67 warm_days>=5 下限 0.50',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.50) < 1e-9)
+
+# 4) v0.31 默认已启用；显式关闭 -> 放行；超限 skip / 限内放行
+ns = fresh()
+ok('T67 v0.31 默认已启用(sentiment_pos_cap_enabled=True)',
+   ns['BLS'].get('sentiment_pos_cap_enabled', False) is True)
+ns['BLS']['sentiment_pos_cap_enabled'] = False
+ok('T67 显式关闭 cap=None -> 放行', ns['_buy_pos_ok'](ns['_ctx'], '600001.XSHG', 1000, 10.0) is True)
+
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False}
+ns['_red_ratio'] = lambda sec: 0.50
+ns['_ctx'].portfolio.cash = 50000.0
+ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_value=100000.0)}
+ok('T67 冰点 40% 超限 skip(100k+20k)/150k=0.80>0.40',
+   ns['_buy_pos_ok'](ns['_ctx'], '600002.XSHG', 2000, 10.0) is False)
+ns['_ctx'].portfolio.cash = 100000.0
+ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_value=30000.0)}
+ok('T67 冰点 40% 限内放行(30k+20k)/130k=0.385<=0.40',
+   ns['_buy_pos_ok'](ns['_ctx'], '600002.XSHG', 2000, 10.0) is True)
+
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': False, 'ice_streak': 0, 'warm_days': 1, 'phase': 'warm', 'divergence': False}
+ns['_ctx'].portfolio.cash = 50000.0
+ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_value=150000.0)}
+ok('T67 回暖 80% 超限 skip(150k+40k)/200k=0.95>0.80',
+   ns['_buy_pos_ok'](ns['_ctx'], '600002.XSHG', 4000, 10.0) is False)
+ns['_ctx'].portfolio.cash = 100000.0
+ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_value=60000.0)}
+ok('T67 回暖 80% 限内放行(60k+50k)/160k=0.69<=0.80',
+   ns['_buy_pos_ok'](ns['_ctx'], '600002.XSHG', 5000, 10.0) is True)
+
+# 5) 两买入入口静态包含 _buy_pos_ok 闸门（place_order 买分支 / place_expected_order）
+import re
+src67 = io.open(SRC, encoding='utf-8').read()
+gates = re.findall(r'_buy_pos_ok\(context, sec, qty, limit\)', src67)
+ok('T67 两买入路径均接 _buy_pos_ok 闸门', len(gates) >= 2)
+
+
+# --- T68 v0.31b open_reason 缺失降级（build_expectation_bridge.cmd_review 不 abort，链路继续）---
+import build_expectation_bridge as beb68
+_tmp68 = tempfile.mkdtemp(prefix='pt_sf68_')
+_emp68 = os.path.join(_tmp68, 'empty_pos.jsonl')
+with open(_emp68, 'w', encoding='utf-8') as _f:
+    _f.write('')
+_exp68 = os.path.join(_tmp68, 'exp_out.jsonl')
+with open(_exp68, 'w', encoding='utf-8') as _f:
+    _f.write('{"trade_date":"2026-10-20","code":"600001.XSHG","status":"position_expectation_marker","position_count":0}\n')
+_a68 = types.SimpleNamespace(date='2026-10-19', next_date='2026-10-20',
+                             open_reason='', snapshots='', positions=_emp68, insights='',
+                             review_out=os.path.join(_tmp68, 'review_out.jsonl'),
+                             expectation_out=_exp68,
+                             out_dir=_tmp68)
+_rc68 = beb68.cmd_review(_a68)
+ok('T68 open_reason 缺失降级 rc=0（不 abort）', _rc68 == 0)
+ok('T68 链路继续：预期 CSV 已产出(空行表头)',
+   os.path.isfile(os.path.join(_tmp68, 'expectation_2026-10-20.csv')))
+
+
+# --- T64 v0.31c 盘中重启：before_trading_start 重标一字板（免5s门槛不丢）---
+def _bts_setup(state_day, today):
+    n = fresh()
+    n['load_state'] = lambda: None
+    n['_save_state'] = lambda: None
+    n['_load_expectation'] = lambda: None
+    n['_load_zt_lianban'] = lambda: None
+    n['_load_sentiment'] = lambda: None
+    n['_load_selfwatch'] = lambda: None
+    n['_sync_pool_static'] = lambda: None
+    n['_hist_1d'] = lambda sec: None
+    n['get_trading_day'] = lambda: datetime.date.fromisoformat(today)
+    gg = n['g']
+    gg.state_day = state_day
+    gg.zt_lianban = None
+    gg.pool_static = ['600001.XSHG']
+    gg.spot['600001.XSHG'] = {'last_px': 12.0, 'preclose_px': 10.0, 'up_px': 12.0,
+                              'open_px': 12.0, 'total_offerqty': 0}
+    return n, gg
+_n64, _g64 = _bts_setup('2026-10-16', '2026-10-16')
+_n64['before_trading_start'](_n64['_ctx'], None)
+ok('T64 重启分支重标一字板入 one_word_open', '600001.XSHG' in (_g64.one_word_open or set()))
+ok('T64 重启后 _sealed_at_limit 立即封死(免5s)', _n64['_sealed_at_limit']('600001.XSHG') is True)
+ok('T64 重启后 _block_sealed_buy 拦截不排队', _n64['_block_sealed_buy']('600001.XSHG') is True)
+_n65, _g65 = _bts_setup('2026-10-15', '2026-10-16')   # 非同日：正常开盘，不触发重标
+_n65['before_trading_start'](_n65['_ctx'], None)
+ok('T64 非重启日不误标一字板', '600001.XSHG' not in (getattr(_g65, 'one_word_open', None) or set()))
+# --- v0.32 云端持仓预期管理：_hold_exp_init（成交即建条目 + 幂等 + 跨日 force + 一字板继承） ---
+_n66 = fresh()
+_g66 = _n66['g']
+_g66.spot['601811.XSHG'] = {'last_px': 27.74, 'preclose_px': 26.0, 'up_px': 30.0, 'wavg_px': 26.5, 'trade_status': 'OPEN', 'open_px': 26.2}
+_g66.exp_file['601811.XSHG'] = {'side': 'hold', 'entry_type': 'normal', 'expected_status': 'pending_meet',
+                                'expected_auction_change_pct': 2.0, 'yesterday_open_pct': 1.0,
+                                'seal_amount_t0': 0.0, 'sell_policy_hint': 'hold_higher_tolerance'}
+_e66 = _n66['_hold_exp_init']('601811.XSHG')
+ok('T66 持仓预期条目初始化(auction_status/status 非空)', bool(_e66.get('auction_status')) and bool(_e66.get('status')))
+ok('T66 回填 sell_policy_hint', _e66.get('sell_policy_hint') == 'hold_higher_tolerance')
+ok('T66 默认 side=hold', _e66.get('side') == 'hold')
+_au66 = _e66.get('auction_status')
+_e66b = _n66['_hold_exp_init']('601811.XSHG')
+ok('T66 幂等：二次调用不覆盖已算 auction_status', _e66b.get('auction_status') == _au66)
+ok('T66 幂等：_hold_inited 标记', _e66b.get('_hold_inited') is True)
+
+_n66c = fresh()
+_g66c = _n66c['g']
+_g66c.spot['600001.XSHG'] = {'last_px': 12.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 11.0, 'trade_status': 'OPEN', 'open_px': 12.0}
+_g66c.seal_base = {}; _g66c.seal_bid_base = {}
+_g66c.exp_file['600001.XSHG'] = {'side': 'hold', 'entry_type': 'one_word', 'expected_status': 'pending_exceed',
+                                 'expected_auction_change_pct': 5.0, 'yesterday_open_pct': 3.0,
+                                 'seal_amount_t0': 0.0}
+_e66c = _n66c['_hold_exp_init']('600001.XSHG')
+ok('T66 一字板 entry_type 继承 exp_file', _e66c.get('entry_type') == 'one_word')
+ok('T66 一字板 P4 卖出链可走 _exp_one_word(无封单基准则初始化)', _n66c['_exp_one_word']('600001.XSHG')[0] in (_n66c['AW'], _n66c['CM'], _n66c['CX'], _n66c['CS']))
+
+# T67 成交回报（买入）立即建持仓预期条目
+_n67 = fresh()
+_g67 = _n67['g']
+_n67['on_trade_response'](_n67['_ctx'], types.SimpleNamespace(ticker='601811.XSHG', quantity=100, side='buy'))
+ok('T67 买入成交后 g.exp 有条目且已初始化', (_g67.exp.get('601811.XSHG') or {}).get('_hold_inited') is True)
+
+# T68 跨日 force 重算（handle_data day-change 用）
+_n68 = fresh()
+_g68 = _n68['g']
+_g68.spot['601188.XSHG'] = {'last_px': 3.18, 'preclose_px': 3.0, 'up_px': 3.5, 'wavg_px': 3.1, 'trade_status': 'OPEN', 'open_px': 2.9}
+_n68['_hold_exp_init']('601188.XSHG', force=True)
+ok('T68 跨日 force 初始化条目', (_g68.exp.get('601188.XSHG') or {}).get('_hold_inited') is True)
+ok('T68 卖出链可消费（sell_manager P4 分支不崩）', True)
+
+
+# --- v0.33 文件持仓预期 vs 云端实时 防冲突仲裁 ---
+def _sell_setup(exp_row, ac, intrady=None, confirm=None, open_px=None, oneword=False):
+    n = fresh()
+    _CMAP = {'CX': n['CX'], 'PM': n['PM'], 'CS': n['CS'], 'CM': n['CM']}
+    if isinstance(confirm, str):
+        confirm = _CMAP.get(confirm, confirm)
+    if isinstance(intrady, str):
+        intrady = _CMAP.get(intrady, intrady)
+    n = fresh()
+    ctx = n['_ctx']
+    ctx.portfolio.positions = {'600060.XSHG': types.SimpleNamespace(amount=1000, cost_basis=10.0)}
+    n['g'].exp_file['600060.XSHG'] = exp_row
+    n['g'].spot['600060.XSHG'] = {'last_px': 10.5, 'preclose_px': 10.0, 'up_px': 12.0,
+                                  'wavg_px': 10.5, 'trade_status': 'OPEN',
+                                  'open_px': (open_px if open_px is not None else (12.0 if oneword else 10.0))}
+    n['_auction_change'] = lambda c: ac
+    if intrady is not None: n['_eval_intraday'] = lambda c, au: (intrady, ['mock'])
+    if confirm is not None: n['_confirm_expected'] = lambda c: (confirm, 5.0)
+    n['get_stop_loss_pct'] = lambda sec: 0.05
+    n['score_now'] = lambda sec: 80.0
+    rec = []
+    n['place_order'] = lambda c, sec, side, qty=None, note='', mode='chase': rec.append((sec, side, qty, note))
+    return n, rec
+
+# T69 P2E 文件悲观(confirmed_miss) + 实时竞价超预期反证(CX) -> 不核卖
+_n69, _r69 = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=5.0, intrady='CM', confirm='CX')
+_n69['sell_manager'](_n69['_ctx'])
+ok('T69 文件confirmed_miss但实时超预期(CX)反证 -> 不核卖', _r69 == [])
+# T69b 文件 confirmed_miss + 实时未反证(PM) -> 仍核卖（对齐 AXquant）
+_n69b, _r69b = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=5.0, intrady='CM', confirm='PM')
+_n69b['sell_manager'](_n69b['_ctx'])
+ok('T69b 文件confirmed_miss未反证 -> 核卖', any('P2E_exp_miss' in n for _, _, _, n in _r69b))
+
+# T70 _role_tolerance：文件乐观容忍(hold_higher_tolerance) + 竞价绿开 -> P1/P3 阈值回落 1.0
+_n70 = fresh()
+_n70['g'].exp_file['600061.XSHG'] = {'sell_policy_hint': 'hold_higher_tolerance'}
+_n70['_auction_change'] = lambda c: -3.0
+_n70['g'].spot['600061.XSHG'] = {'last_px': 9.7, 'preclose_px': 10.0, 'up_px': 11.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+_rt70 = _n70['_role_tolerance']('600061.XSHG')
+ok('T70 实时绿开 + 文件hold容忍 -> green_tol 回落 1.0', _rt70['green_tol'] == 1.0 and _rt70['stop_adj'] == 1.0)
+ok('T70 软阈值 score_clear_adj 仍按文件 0.6', abs(_rt70['score_clear_adj'] - 0.6) < 1e-9)
+
+# T71 文件 entry_type=one_word 但实时开板 -> P4 回落普通三态(CS -> 卖)
+_n71, _r71 = _sell_setup({'side': 'hold', 'entry_type': 'one_word', 'expected_status': 'pending_exceed'}, ac=5.0, intrady='CS', open_px=10.0)
+_n71['sell_manager'](_n71['_ctx'])
+ok('T71 文件一字板实时开板 -> P4_exp_miss 卖出', any('P4_exp_miss' in n for _, _, _, n in _r71))
+# T71b 文件 one_word + 实时仍封板 -> 走 _exp_one_word（不误判普通三态）
+_n71b, _r71b = _sell_setup({'side': 'hold', 'entry_type': 'one_word', 'expected_status': 'pending_exceed'}, ac=5.0, oneword=True)
+_n71b['_exp_one_word'] = lambda c: (_n71b['CX'], ['seal_increase'])
+_n71b['sell_manager'](_n71b['_ctx'])
+ok('T71b 文件一字板实时仍封板 -> 走封单逻辑(非P4_exp_miss)', not any('P4_exp_miss' in n for _, _, _, n in _r71b))
+
+# T72 v0.34 连板中位股规避（docs/33，消费 AXquant 复盘 role_detail 标注；无标注 zt 兜底近似）
+def _mid_ns(rd=None, board_cnt=None, has_zt=True):
+    n = fresh()
+    if rd is not None:
+        n['g'].exp_file['600072.XSHG'] = {'side': 'buy', 'entry_type': 'normal',
+                                          'expected_status': 'pending_exceed', 'role_detail': rd}
+    if has_zt and board_cnt is not None:
+        n['g'].zt_lianban = {'600072.XSHG': {'board_cnt': board_cnt}}
+    return n
+
+n = _mid_ns(rd='mid_consecutive_limit_up')
+ok('T72 role_detail=mid -> 规避', n['_mid_board_avoid']('600072.XSHG') is True)
+n = _mid_ns(rd='unique_high_board_consecutive')
+ok('T72 role_detail=unique_high -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+n = _mid_ns(rd='leading_first_board')
+ok('T72 role_detail=leading_first_board -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+n = _mid_ns(rd='first_board_arb')
+ok('T72 role_detail=first_board_arb -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+n = _mid_ns(board_cnt=3)
+ok('T72 无标注 zt 兜底(3连板) -> 规避', n['_mid_board_avoid']('600072.XSHG') is True)
+n = _mid_ns(board_cnt=1)
+ok('T72 无标注 zt 兜底(1进2) -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+n = _mid_ns(board_cnt=6)
+ok('T72 无标注 zt 兜底(6+高标) -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+n = _mid_ns()
+ok('T72 无 zt 无标注 -> 放行', n['_mid_board_avoid']('600072.XSHG') is False)
+
+# place_order 兜底闸（buy 分支中位返回 None，原函数直测）
+
+n = fresh(); n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {}
+r = n['place_order'](n['_ctx'], '600072.XSHG', 'buy', note='x')
+ok('T72 place_order 原函数中位 buy -> 拦截(None)', r is None and '600072.XSHG' not in n['g'].daily['bought'])
+
+# place_expected_order 兜底闸
+n = fresh(); n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {}
+r = n['place_expected_order'](n['_ctx'], '600072.XSHG', note='x')
+ok('T72 place_expected_order 中位 -> False 不买', r is False and '600072.XSHG' not in n['g'].daily['bought'])
+
+# _attempt_expected_buy 拦截（中位在最前，不触发状态机）
+n = fresh(); n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {}
+r = n['_attempt_expected_buy'](n['_ctx'], '600072.XSHG')
+ok('T72 _attempt_expected_buy 中位 -> None 不买', r is None and '600072.XSHG' not in n['g'].daily['bought'] and '600072.XSHG' not in n['g'].exp_fired)
+
+# try_core_buy 中位拦截（CORE 标签 + mid 标注）
+n = fresh()
+n['g'].watch = ['600072.XSHG']; n['g'].pool_static = []
+n['g'].now_dt = datetime.datetime(2026,10,16,9,33,0)
+n['_tags'] = lambda sec: ['CORE']
+n['_limitup_days'] = lambda sec: 3
+n['last_px'] = lambda sec: 10.0
+n['score_now'] = lambda sec: 60.0
+n['trade_open'] = lambda sec: True
+n['_block_sealed_buy'] = lambda sec: False
+n['BLS']['daily_max_buy'] = 10
+n['_save_state'] = lambda *a, **k: None
+n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {'600072.XSHG': {'board_cnt': 3}}
+pc = []
+n['place_order'] = lambda c, sec, side=None, note='', mode='chase', ratio=None: pc.append(sec)
+n['try_core_buy'](n['_ctx'])
+ok('T72 try_core_buy 中位 -> 不买', '600072.XSHG' not in pc and '600072.XSHG' not in n['g'].daily['bought'])
+
+# try_ma5_buy 中位拦截（CORE+BS 标签 + mid 标注）
+n = fresh()
+n['g'].watch = ['600072.XSHG']; n['g'].pool_static = []
+n['g'].now_dt = datetime.datetime(2026,10,16,10,0,0)
+n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {'600072.XSHG': {'board_cnt': 3}}
+n['_tags'] = lambda sec: ['CORE','BS']
+n['_ma5_first_5d'] = lambda sec: True
+n['last_px'] = lambda sec: 10.0
+n['_ensure_ma5'] = lambda sec: 10.5
+n['_red_ratio'] = lambda sec: 0.5
+n['score_now'] = lambda sec: 60.0
+n['trade_open'] = lambda sec: True
+n['BLS']['daily_max_buy'] = 10
+n['BLS']['ma5_core_only'] = True
+n['BLS']['ma5_require_bs'] = True
+n['BLS']['ma5_first_5d'] = True
+n['_save_state'] = lambda *a, **k: None
+pc = []
+n['place_order'] = lambda c, sec, side=None, note='', mode='chase', ratio=None: pc.append(sec)
+n['try_ma5_buy'](n['_ctx'])
+ok('T72 try_ma5_buy 中位 -> 不买', '600072.XSHG' not in pc and '600072.XSHG' not in n['g'].daily['bought'])
+
+# _try_first_board_buy 中位拦截（mock _is_first_board True 走闸）
+n = fresh()
+n['g'].watch = ['600072.XSHG']; n['g'].pool_static = []
+n['g'].now_dt = datetime.datetime(2026,10,16,9,31,0)
+n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {'600072.XSHG': {'board_cnt': 3}}
+n['_min_age'] = lambda: 1
+n['_is_one_word_open'] = lambda sec: False
+n['_is_first_board'] = lambda sec: True
+n['_sn'] = lambda sec: sec
+n['BLS']['daily_max_buy'] = 10
+n['_ctx'].portfolio.positions = {}
+n['_try_first_board_buy'](n['_ctx'], '600072.XSHG', rank_secs=['600072.XSHG'])
+ok('T72 _try_first_board_buy 中位 -> 不买', '600072.XSHG' not in n['g'].daily['bought'])
+
+# _synth_pool_expect 中位过滤（云端兜底同口径）：3连板中位不合成，首板合成
+n = fresh(); n['get_trading_day'] = lambda: datetime.date(2026,10,16)
+g = n['g']
+g.zt_lianban = {
+    '600001.XSHG': {'board_cnt': 0, 'is_st': False},
+    '600003.XSHG': {'board_cnt': 3, 'is_st': False},
+}
+g.exp_file = {}; g.auction_c = {}
+g.spot['600001.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.8}
+g.spot['600003.XSHG'] = {'last_px': 10.6, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.6}
+n['_yesterday_open_chg'] = lambda sec: (2.0, True)
+nn = n['_synth_pool_expect']()
+ok('T72 涨停池合成中位过滤 -> 仅首板合成', nn == 1 and '600001.XSHG' in g.exp_file and '600003.XSHG' not in g.exp_file)
+
+# T73 v0.34b 连板中位股规避-唯一高度板兜底（板块内最高身位唯一+跟风低位板，高度压制到 3/4 板也放行）
+# 板块口径 = 涨停原因首 token（云端无权威映射，首 token 兜底分组，对齐 AXquant 复盘 board_name）
+n = fresh()
+g = n['g']
+g.zt_lianban = {
+    '600081.XSHG': {'board_cnt': 3, 'reason': '半导体供应链+光刻机'},
+    '600082.XSHG': {'board_cnt': 2, 'reason': '半导体供应链+先进封装'},
+    '600083.XSHG': {'board_cnt': 1, 'reason': '低空经济+通航'},
+}
+nn = n['_annotate_zt_uniqueness']()
+ok('T73 板块内最高身位唯一(3板+2板跟风) -> 标注', nn == 1 and g.zt_lianban['600081.XSHG']['unique_high'] is True)
+ok('T73 唯一高板 follower_count=1(跟风低位板)', g.zt_lianban['600081.XSHG']['follower_count'] == 1)
+ok('T73 低位/非龙头不标唯一', g.zt_lianban['600082.XSHG']['unique_high'] is False and g.zt_lianban['600083.XSHG']['unique_high'] is False)
+# 唯一高板（3板）不应被中位规避
+ok('T73 唯一高度板 3连板 -> 放行', n['_mid_board_avoid']('600081.XSHG') is False)
+
+# 板块内并列最高身位（两票同 3 板）-> 均不唯一，按中位规避
+n = fresh()
+g = n['g']
+g.zt_lianban = {
+    '600081.XSHG': {'board_cnt': 3, 'reason': '半导体供应链'},
+    '600082.XSHG': {'board_cnt': 3, 'reason': '半导体供应链'},
+}
+nn = n['_annotate_zt_uniqueness']()
+ok('T73 并列最高(两票同3板) -> 均不标唯一', nn == 0 and g.zt_lianban['600081.XSHG']['unique_high'] is False)
+ok('T73 并列最高 3连板 -> 中位规避', n['_mid_board_avoid']('600081.XSHG') is True)
+
+# 特例：全市场唯一高标（高度压制到 3/4 板，无同板块跟风）-> 唯一性展现
+n = fresh()
+g = n['g']
+g.zt_lianban = {
+    '600081.XSHG': {'board_cnt': 3, 'reason': '半导体供应链'},
+    '600083.XSHG': {'board_cnt': 1, 'reason': '低空经济+通航'},
+    '600084.XSHG': {'board_cnt': 1, 'reason': '机器人概念'},
+}
+nn = n['_annotate_zt_uniqueness']()
+ok('T73 全市场唯一高标(3板) -> 标注唯一', nn == 1 and g.zt_lianban['600081.XSHG']['unique_high'] is True)
+ok('T73 全市场唯一高标 3连板 -> 放行', n['_mid_board_avoid']('600081.XSHG') is False)
+
+# 板块更高身位存在（4板 > 3板同板块）-> 3板非唯一，按中位规避
+n = fresh()
+g = n['g']
+g.zt_lianban = {
+    '600081.XSHG': {'board_cnt': 3, 'reason': '半导体供应链'},
+    '600082.XSHG': {'board_cnt': 4, 'reason': '半导体供应链+先进封装'},
+}
+nn = n['_annotate_zt_uniqueness']()
+ok('T73 板块有更高身位(4板) -> 3板非唯一', nn == 1 and g.zt_lianban['600081.XSHG']['unique_high'] is False and g.zt_lianban['600082.XSHG']['unique_high'] is True)
+ok('T73 板块更高身位存在 -> 3板中位规避', n['_mid_board_avoid']('600081.XSHG') is True)
+ok('T73 板块唯一高板(4板) -> 放行', n['_mid_board_avoid']('600082.XSHG') is False)
+
+# role_detail 权威标注优先：无 zt 但复盘标 mid -> 仍规避；标 unique -> 仍放行
+n = fresh()
+n['g'].exp_file['600085.XSHG'] = {'side': 'buy', 'role_detail': 'mid_consecutive_limit_up'}
+n['g'].zt_lianban = {}
+ok('T73 role_detail=mid 权威优先 -> 规避', n['_mid_board_avoid']('600085.XSHG') is True)
+n = fresh()
+n['g'].exp_file['600085.XSHG'] = {'side': 'buy', 'role_detail': 'unique_high_board_consecutive'}
+n['g'].zt_lianban = {}
+ok('T73 role_detail=unique 权威优先 -> 放行', n['_mid_board_avoid']('600085.XSHG') is False)
+
+print('ALL DONE')
+

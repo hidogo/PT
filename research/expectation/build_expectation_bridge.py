@@ -42,7 +42,7 @@ import bridge  # noqa: E402
 CSV_HEADER = [
     "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
     "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
-    "sell_policy_hint",
+    "sell_policy_hint", "role_detail",
 ]
 
 
@@ -415,10 +415,12 @@ def cmd_review(args):
             if os.path.isfile(ax):
                 ore_path = ax
     if not ore_path or not os.path.isfile(ore_path):
-        print("[review] 找不到 open_reason JSONL", file=sys.stderr)
-        return 2
-    open_reasons = [r for r in _read_jsonl(ore_path)
-                    if str(r.get("status") or "").lower() in ("filled", "partial")]
+        # v0.31b 降级：无成交日或供方缺失 open_reason 时不阻断收盘链路，仅用持仓/涨停池复盘
+        print("[review] open_reason 缺失（无成交日或供方未产出）—— 降级：仅用持仓/涨停池复盘", file=sys.stderr)
+        open_reasons = []
+    else:
+        open_reasons = [r for r in _read_jsonl(ore_path)
+                        if str(r.get("status") or "").lower() in ("filled", "partial")]
 
     snap_path = args.snapshots or ""
     if not snap_path:

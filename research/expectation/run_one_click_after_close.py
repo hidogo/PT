@@ -97,7 +97,14 @@ def main(argv=None) -> int:
     _src_csv = os.path.join(_out_dir, "expectation_%s.csv" % next_td)   # 内部产出的交易日文件
     _gen_csv = os.path.join(_out_dir, "expectation_%s.csv" % td)        # 生成日期命名（以生成日期为准）
     _latest_csv = os.path.join(_out_dir, "expectation_latest.csv")      # 稳定指针（云端优先读）
+    _nrows = 0
     if os.path.isfile(_src_csv):
+        try:
+            with open(_src_csv, "r", encoding="utf-8") as _f:
+                _nrows = max(sum(1 for _ in _f) - 1, 0)
+        except Exception:
+            _nrows = 0
+    if os.path.isfile(_src_csv) and _nrows > 0:   # 护栏：新产 CSV 无数据行不覆盖既有 dated/latest
         with open(_src_csv, "rb") as _f:
             _cb = _f.read()
         for _fp in tuple(dict.fromkeys((_gen_csv, _latest_csv))):
@@ -107,6 +114,8 @@ def main(argv=None) -> int:
                 print("[oneclick] %s -> %s" % (os.path.basename(_src_csv), os.path.basename(_fp)))
             except OSError as _e:
                 print("[oneclick] 写 %s 失败: %r" % (_fp, _e))
+    elif os.path.isfile(_src_csv):
+        print("[oneclick] 新产预期 CSV 无数据行 -> 跳过 alias 覆盖（保护既有文件）")
 
     # 步骤4: 导出 T-1 涨停/连板名单到同一待上传文件夹（upload_file, 供云端 _load_zt_lianban）
     try:
@@ -115,10 +124,15 @@ def main(argv=None) -> int:
                            alias="")
     except Exception as e:
         print("[oneclick] export_lianban 失败(不影响预期): %r" % e)
+    # 步骤4b: 导出情绪冰点/回暖基线（T 日冰点+连续冰点天数，docs/40；供云端 _load_sentiment）
+    try:
+        import export_sentiment
+        export_sentiment.run(a.date or None, a.out_dir or None)
+    except Exception as e:
+        print("[oneclick] export_sentiment 失败(不影响预期/名单): %r" % e)
 
     # 步骤5：产出一致性核对 —— 预期CSV vs 源jsonl, zt名单 vs 涨停池
     print("[oneclick] 步骤5 产出一致性核对 ...")
-    import os
     _out = a.out_dir or bridge.PTRADE_BRIDGE_DIR
     _exp_csv = os.path.join(_out, "expectation_latest.csv")   # 云端实际消费的稳定指针
     _src = a.source or axc.paths(td, next_td)["expectation_source"]

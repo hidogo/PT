@@ -7,7 +7,7 @@
   日切在 initialize/按日切块/盘中拉起多处手动重置。
 - 目标：批量化 + 统一 TTL 缓存注册表 + 失败隔离/降级标记，降帧时间、防接口抖动。
 
-## 2. 设计（class DataHub，挂 g.ds）
+## 2. 设计（class DataHub，模块级单例 _get_ds()）
 - `cached(source, sec, ttl, fetch)`：统一缓存原语。命中(ts,ttl)直接返回；未命中调 fetch() 并缓存（含安全默认值）；
   fetch 抛异常 -> 记 degraded、不缓存、返回 None（下一帧再试）。
 - `snapshot(secs)`：帧首批量快照，get_snapshot(列表) 一次回填 g.spot；批量缺标再逐只兜底（正常 0 次）。
@@ -15,10 +15,10 @@
 - 兼容性：保持现有函数签名（_gear/_elastic_1m_surge 等对外不变），DataHub 作为内部实现逐步替换。
 
 ## 3. 已接入（v0.21 Phase 1）
-- tick_data：帧首 `g.ds.snapshot(_secs)` 一次批量，替代逐只 get_snapshot（tick 帧外部调用显著下降）。
+- tick_data：帧首 `_get_ds().snapshot(_secs)` 一次批量，替代逐只 get_snapshot（tick 帧外部调用显著下降）。
 - `_gear`（L2 十档）：走 `cached('gear', sec, gear_cache_ttl=3s)`。
 - `_elastic_1m_surge`（1m 大阳线）：拆分 `_calc_1m_surge` 计算 + `cached('m1_surge', sec, 15s)`。
-- initialize / 日切重置：`g.ds = DataHub()`。
+- initialize / 日切重置：`_get_ds()` 预热 / 日切 `_get_ds().reset()`；v0.26b 起 DataHub 为模块级单例（不入 g，规避引擎 g 持久化 pickle 报错）。
 
 ## 4. 自测
 - T48 快照批量一次调用 / 回填 g.spot / 批量空逐只兜底
@@ -73,3 +73,23 @@
   - 弹性套利 elastic_arb：窗口由 10 分钟改为 30 分钟 = 09:30-10:00 前（其它类）。
 - 自测：T56 各窗口边界拦截/放行（低吸 10:31 拦 / 10:00 放）；T57 刷新周期 09:33=3s / 10:01=60s；既有 T26d/e、T36 补固定 now_dt 防真实时钟干扰。
 - 全量：219 PASS / 0 FAIL；双编译 py310 + PT37 通过。
+
+## 9. v0.25 帧级拉取预算（Phase 3，2026-10-19）
+
+- **动机**：tick_data 每 3s 一帧，09:30-10:00 消费最重——get_gear_price 逐目标（~15-20）、板块强度
+  每帧每板块 get_industry_stocks+get_snapshot（候选板块多时 20-60 次）、get_stock_blocks 逐候选逐帧
+  （弹性路径无缓存）、get_price(1m) 逐候选（two_1m 无缓存）。最坏 ~150-300 次/帧，有丢帧/限流风险。
+- **帧账本（DataHub）**：`self.frame={'token','used','over'}`，token=int(time.time()/3)，切帧自动清零；
+  `spend(source)` 查 `BLS['frame_<source>_limit']`，超限记 `over` 返回 False；`frame_report()` 输出
+  `[budget] snapshot=1/2 tx=1/1 gear=12/15 board=4/6 ... over:board=2`。
+- **降级语义（cached 增 budget/stale_ok）**：
+  - P0（tx/snapshot/gear）：超限返回空、**不用旧值**、下帧重试（保首触 ≤3s 灵敏度）。
+  - P1（board/blocks/bcode）：超限回退上一帧缓存值（stale_ok=True），首板/弹性门控不整体丢。
+  - P2（m1/hist1d）：超限返回 None（two_1m 判 False、surge 判 0，路径本身保守）。
+- **已挂预算点**：snapshot（2 批次+兜底 cap 5）、tx（1）、gear（15）、m1（20，two_1m 3s 缓存共用）、
+  hist1d（10）、board（6 组）、blocks（10，300s 缓存）、bcode（20，3600s 缓存）。
+- **参数（BLS，盘中可调）**：budget_log_enabled、frame_snapshot_limit/fallback_cap、frame_tx_limit、
+  frame_gear_limit、frame_m1_limit、frame_hist1d_limit、frame_board_limit、frame_blocks_limit、frame_bcode_limit。
+- **自测**：T58 14 项（账本/切帧重置/超限不缓存/下帧重试/stale 回退/无旧值 None/two_1m 缓存去重/report 格式）。
+  全量 233 PASS / 0 FAIL；双编译 py310 + PT37 通过。
+

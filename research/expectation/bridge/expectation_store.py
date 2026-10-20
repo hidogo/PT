@@ -480,7 +480,7 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
     header = [
         "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
         "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
-        "sell_policy_hint",
+        "sell_policy_hint", "role_detail",
     ]
     rows = []
     for r in recs:
@@ -502,6 +502,7 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
             str(r.get("board_name") or ""),
             str(r.get("limit_up_reason") or r.get("reason") or ""),
             str(r.get("sell_policy_hint") or ""),
+            str(r.get("role_detail") or ""),
         ])
     print("[expectation_csv] ->", out_path)
     tmp = out_path + ".tmp"

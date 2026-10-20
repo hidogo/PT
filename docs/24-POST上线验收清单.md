@@ -136,3 +136,128 @@
 ### 9.5 回归
 - [ ] selftest_exp_rt.py 219 PASS / 0 FAIL；PT3.7 + py310 py_compile 通过。
 - [ ] 重传后首启动日志：buysell_core init universe=... DO_ORDER=...（确认 v0.24 生效，无 initialize 异常）。
+
+## 10. v0.25 帧级拉取预算（Phase 3）盘中勾选
+
+- [ ] 帧末 `[budget] ...` 日志每帧出现（snapshot/tx/gear/m1/board/blocks 计数可见）。
+- [ ] 09:30-10:00 高频段：`[budget]` 中 gear/board/m1 不长期顶格（顶格说明预算偏小，调大对应 frame_*_limit）。
+- [ ] 出现 `over:xxx=n` 时核对：P0（tx/snapshot/gear）不应丢关键首触；P1 回退旧板块值不影响首板/弹性门控。
+- [ ] 灵敏度回归：`[firstzt] state=first(src=tx)` 仍在涨停价逐笔成交 ~3s 内触发（预算未拖慢 P0）。
+- [ ] 无丢帧告警（若快速刷新段告警，调大 budget 或恢复 board_rank_cache_ttl=60 对照）。
+- [ ] selftest 233 PASS / 0 FAIL；双编译 py310 + PT37 通过。
+
+## 11. v0.26 tick 级卖出（事件驱动 3s 响应）盘中勾选
+
+- [ ] 炸板卖出：持仓股涨停首触后掉出涨停价 -> `[may-order] ... TICK_break_sell`（现价限价，防过度杀价）；同一标的当日仅一次（break_sold 标记）。
+- [ ] 封单大减卖出：封单<=首封×1/3 或委托笔数衰竭 -> `[may-order] ... TICK_seal_low_sell`；当日仅一次。
+- [ ] 急卖迁移：P1 绿开 / P2E 预期 miss / P3 止损 在 3s 帧末评估（`P1_green_open_tick` / `P2E_exp_miss_tick` / `P3_stop_loss_tick`，核卖限价跌停地板价）。
+- [ ] 去重生效：在途挂单 `_sell_inflight` + sold_log 30s 冷却，不叠单；跨重启 break_sold/seal_sold 持久化，同日重启不重复卖。
+- [ ] 灵敏度对照：同一持仓从 `[firstzt] ... -> BREAK` 到 `TICK_break_sell` 的日志间隔 <=3s（1m 时代最快 60s）。
+- [ ] selftest 239 PASS / 0 FAIL（T59 六项）；双编译 py310 + PT37 通过。
+
+## 12. v0.26b DataHub 模块级单例（修复 g 持久化 pickle 报错）盘中勾选
+
+- [ ] 首启动日志不再出现 `全局对象g持久化对象保存失败，对象名：ds`（DataHub 已移出 g、改模块级单例 `_get_ds()`；引擎仅对 g 内对象做 pickle 持久化，模块级不入列）。
+- [ ] 跨重启拉起后 DataHub 缓存自动重建、`_maybe_reset` 日切逻辑不失效（[budget] 帧账本 / [firstzt] / [seal] 行为与 v0.26 一致）。
+- [ ] 重传后首启动日志：buysell_core init universe=... DO_ORDER=...（无 initialize 异常、无 ERROR 刷屏）。
+- [ ] selftest_exp_rt.py 248 PASS / 0 FAIL；双编译 py310 + PT37 通过。
+
+## 13. v0.26c 预期文件日期对齐 + 一字板 09:25 识别盘中勾选
+
+- [ ] 09:25/09:31 出现 `[seal] <名>(code) 一字板(开=涨停价且无卖盘) -> 买入不排队`（东安动力式一字板应被识别）。
+- [ ] 盘中重启（同日）后 `before_trading_start` 重跑 `_mark_one_word_open` 重标一字板（v0.31c）：重启日志应再次出现 `[seal] ... 一字板 ... -> 买入不排队`，免 5s 门槛不丢。
+- [ ] 一字板 CORE 票不再触发 `[may-order] ... core_buy`（对齐 first_board/elastic 排除）。
+- [ ] 预期文件命中生成日命名：`expectation file loaded <...expectation_<T-1 生成日>.csv> -> N`（昨日复盘文件今日验证；只传生成日命名文件也能读到）。
+- [ ] selftest_exp_rt.py 302 PASS / 0 FAIL（含 T64 盘中重启重标一字板）；双编译 py310 + PT37 通过。
+
+## 14. v0.27 涨停池预期三态（竞价超预期->观察，窗口内分最高/最主动优先）盘中勾选
+
+- [ ] 09:25 日志 `[exp] 涨停池竞价三态合成 -> exceed=N meet=N miss=N`（合计≈涨停池只数）。
+- [ ] 09:25 竞价终态对超预期涨停池标的打 `[exp] <名>(code) 09:25竞价终态初步确认超预期 -> 观察`（与供方推荐同流程）。
+- [ ] 绿开（miss）涨停池标的当日不买入；10:00 前分时确认超预期（两分钟上攻/一分钟冲涨停，不破 VWAP）才买。
+- [ ] 多候选竞争日买上限 1 时：供方推荐（文件顺序）优先，涨停池合成按「分最高、最早触板(最主动)」排序后置。
+- [ ] `[pool]` 的 expect_buy 计数包含涨停池合成条目（pool_static 同步并入）。
+- [ ] selftest_exp_rt.py 271 PASS / 0 FAIL；双编译 py310 + PT37 通过。
+
+## 15. v0.28 涨停池 ST 过滤 + 盘前一键脚本 盘中/盘前勾选
+
+- [ ] 涨停池合成日志带 `st_skip=N`：`[exp] 涨停池竞价三态合成 -> exceed=N meet=N miss=N st_skip=N`（ST 已剔除，对齐 AXquant 复盘口径）。
+- [ ] ST 股不进涨停池观察/买入候选（`pool_expect_skip_st=True` 默认开；关掉可放开）。
+- [ ] 盘前 09:20 前跑 `run_one_click_premarket.cmd`（或 `python research/expectation/run_one_click_premarket.py`）：
+      生成 `expectation_<T>.csv`+latest、`zt_lianban_latest.csv`，打印上传勾选清单；空仓 marker 时提示「今日无预期（正常）」且不覆盖既有文件。
+- [ ] 盘前核对清单输出「结论: 待上传文件已就绪」，且盘中日志 `expectation file loaded` / `[pool] expect_buy=N>0` / `[zt-lianban] loaded` 命中。
+- [ ] selftest T65（ST 过滤：过滤后仅合成非 ST；开关关闭时 ST 也合成）。
+
+## 16. 实盘单测试就绪度 + 账户资金确认（2026-10-20）
+
+### 16.1 账户资金确认（第 1 步完成）
+- **账户性质：实盘（无模拟账户）**，真实资金，规模小 —— 所有门控默认关，只有用户显式确认才开。
+- Web 平台「交易-资金」：**可用资金 = 17,106.78 元**（用户提供，2026-10-20）。
+- 与云端日志交叉验证：10-20 09:33 `core_buy 600178 qty=100 limit=12.41`（ordinary 10%）→
+  budget=1710.7 → 1 手（1241 元）→ qty=100 ✓。推算与实报一致，账户规模 ≈ 1.71 万（非 10 万基准）。
+- 探针脚本 `research/precheck/query_account.py`（客户端 API get_portfolio/get_positions 全字段，
+  落盘 data/positions/query_account_<date>.json）已就绪；桌面客户端登录后可一键重跑确认。
+
+### 16.2 账户规模对参数的影响（关键）
+- 单笔预算 = cash × 比例，且受「1 手 = 100 股」门槛约束：qty = floor(budget/(价×100))×100。
+- 可用 17,106.78 元：
+  - `exp_order_pct=0.10` → 预算 1711 元 → 可下 1 手的价位 ≤ ~17.1 元；价位更高则 qty=0 跳过下单。
+  - `exp_order_pct=0.01`（原建议小额）→ 预算 171 元 → **不足 1 手，无法下单**，勿用。
+  - 目标价 20 元需 pct≥0.117、25 元需 pct≥0.146。EXPECT_ORDER 阶段按预期文件标的价位设 pct（建议 0.10~0.15）。
+- 买入后单只仓位 ≈ 预算/总资产 ≈ 10%（总资产≈1.71万+持仓市值），低于 single_stock_cap=0.30，安全。
+- 卖出通道受 DO_ORDER 门控：DO_ORDER=False 时只记 [may-order]，**买卖闭环需 DO_ORDER=True**。
+
+### 16.3 实盘（真实资金）测试放量三步 —— 风险收紧版
+> 无模拟账户 → 一切以真实资金执行。原则：先只读、再 1 手、再卖出；任何一步异常立即回 EXPECT_ORDER=False。
+1. ① 重传 strategy.py(v0.28)，EXPECT_ORDER=False 至少跑 1 个交易日：`expectation file loaded`、`[exp] 涨停池竞价三态合成 ... st_skip=N`、`[exp-order] (False)` 时序（超预期确认→信号 ≤3s）、无异常 `[exp] miss` 误杀。
+2. ② 你确认信号质量后，EXPECT_ORDER=True + exp_order_pct=0.10（单笔 ≤1 手、约 1.7 千元、占总资产 ≤10%），DO_ORDER 保持 False（卖出仍只读）：
+   - 核对 `[exp-order] ... (True)` + `on_trade_response` 成交、限价符合打板/追高定价（涨停价排队或现价×(1+0.8%) 封顶涨停价）；
+   - `exp order skip(qty<=0)` → 目标股价位超单笔预算，上调 pct（≤0.15，且单笔市值仍 ≤ 总资产 30%）；
+   - 单日买上限 daily_max_buy=1 → 每天最多 1 笔真实买入。
+3. ③ 买入成交且隔日卖出决策日志正确（P1 绿开核卖/炸板/封单大减/评分止损）后再 DO_ORDER=True 放开卖出闭环；
+   卖出限价现价在下跌/封死场景可能不成交留滞持仓（docs/24 §3/§5 留档），实盘需接受或先用核卖跌停地板价保成交。
+4. 实盘止损纪律：连续 2-3 笔亏损、出现未成交/留滞/重复下单/成交回报异常 → 立即回 EXPECT_ORDER=False，复盘后再继续。
+
+### 16.4 剩余前置（第 2/3 步）
+- [ ] 今日收盘跑 `run_one_click_after_close.py --date 2026-10-20` 生成 10-21 预期（非空仓）。
+- [ ] 明早 `run_one_click_premarket.cmd` 生成+校验，09:20 前定时上传 `expectation_2026-10-21.csv`(+latest)+`zt_lianban_latest.csv`。
+- [ ] 重传 strategy.py(v0.28) 到模拟盘，按 16.3 三步放量。
+
+## 17. v0.29 情绪冰点→回暖链（docs/40）盘前/盘中勾选
+- [ ] 盘前：`run_one_click_premarket.cmd` 自动导出 `sentiment_latest.csv`；核对 `[sentiment] loaded -> ice=0/1 streak=N`。
+- [ ] 冰点日（T）：本地 `export_sentiment.py` 判定 `ice=1`（红盘率<40% 或 封板率<45% 或 涨停<30）；`ice_streak` 连续累计。
+- [ ] T+1 盘中（开启时）：`[sentiment] <名>(code) streak=N red=0.xx th=0.xx -> 回暖/未回暖`；`red<0.40` 打「继续冰点，等下一交易日再验证」。
+- [ ] 回暖概率增加：ice_streak=1 → 恢复阈值 0.53；=2 → 0.51（上限 0.55、下限 0.45）。
+- [ ] `_buy_red_ok` 组合门：`red_gate_enabled`+`sentiment_enabled` 都开才生效；默认全关（实盘安全）。
+- [ ] selftest T66（读入/回暖/继续冰点/未启用 None/组合门）通过；281 PASS / 0 FAIL。
+
+## 18. v0.30 情绪仓位闭环（docs/40 §6）盘前/盘中勾选
+- [ ] 盘前：核对 `sentiment_latest.csv` 含新列 `warm_days/phase/divergence`（export_sentiment.py v0.30 输出）。
+- [ ] v0.31 已默认启用（`sentiment_pos_cap_enabled=True`）：盘前日志必须有 `[pos-cap] 已启用：冰点上限=0.40 回暖上限=0.80 ...` 记录；无此记录说明 strategy.py 未重传到 v0.31。
+- [ ] 盘中：冰点日未回暖 `[pos-cap]` 上限 40%；回暖/延续日上限 80%（连续回暖 ≥3 天递减 0.10，下限 50%）；每次买入判定打 `[pos-cap] <名>(code) 情绪仓位上限 cap=0.xx (ice=.. warm_days=.. phase=..)`。
+- [ ] 买入超限拦截：`[pos-cap] <名>(code) qty=N add=... pos_ratio=0.xx > cap=0.xx -> skip`（place_order 买分支 + place_expected_order 两路径）。
+- [ ] selftest T67（读新列/冰点40%/回暖80%/递减/_buy_pos_ok 超限 skip/两路径闸门/v0.31 默认启用）通过；296 PASS / 0 FAIL。
+
+## 19. v0.32 云端持仓预期管理（2026-10-20，docs/33）
+> 本地拉持仓不可行 → 持仓预期管理全部由云端算法完成（_hold_exp_init），不依赖本地文件。
+- [ ] 重传 strategy.py（v0.32）后盘中观察 [hold] <名称>(code) 持仓预期管理初始化 entry_type=.. auction_status=.. status=.. sell_policy=..（09:25/09:31/日切 及 每笔成交触发一次）。
+- [ ] 盘中新买入持仓：成交回报后当日持仓立即有 [hold] 初始化日志（原缺口：仅 09:25/09:31 初始化）。
+- [ ] P4 卖出链对盘中新买入持仓生效：普通持仓走 _eval_intraday（两分钟上攻/破VWAP），一字板持仓走 _exp_one_word 封单实时化（L2 封单超预期 CX/衰竭 CS）。
+- [ ] 重启/日切后持仓预期条目自动重建（_hold_exp_init 幂等；handle_data 日切 force 重算）。
+- [ ] selftest T66-T68 通过；全量 312 PASS / 0 FAIL；双编译通过。
+
+## 20. v0.33 文件持仓预期 vs 云端实时 防冲突仲裁（docs/33）
+- [ ] 重传 strategy.py（v0.33）后，上传复盘文件含 side=hold/sell 行时盘中核对：
+  - [ ] 文件乐观容忍（hold_higher_tolerance）+ 实时绿开/破VWAP → [arb] <名>(code) 文件 sell_policy=.. vs 云端实时走弱 -> P1/P3 阈值回落基础（P1 绿开/P3 止损不再被文件宽容压住）。
+  - [ ] 文件悲观（confirmed_miss/degraded）+ 实时竞价超预期 → [arb] .. 不核卖（P2E 不误杀转强股）；未反证仍 P2E_exp_miss 核卖。
+  - [ ] 文件 ntry_type=one_word + 实时已开板 → [arb] .. 回落普通分时三态（走 P4_exp_miss）；实时仍封板 → 走 P4_exp_one_word 封单。
+- [ ] selftest T69/T69b/T70/T71/T71b 通过；全量 318 PASS / 0 FAIL；双编译通过。
+
+## 21. v0.34 连板中位股规避（docs/33）盘前/盘中勾选
+- [ ] 盘前：确认 bridge CSV（expectation_<T+1>.csv）表头含 `role_detail` 列，且持仓/苗子行带 mid_consecutive_limit_up / unique_high_board_consecutive / leading_first_board / first_board_arb 标注（AXquant 复盘 publish.py derive_role_detail 已产出）。
+- [ ] 重传 strategy.py（v0.34）后盘中核对：预期三态买入/核心/低吸/首板/弹性入口对中位标注股打 `[mid-avoid] <名称>(code) 连板中位股规避(<入口>)`，不进入买入候选；涨停池合成日志含 `mid_skip=N`。
+- [ ] 低位/高位放行：role_detail=leading_first_board / first_board_arb / unique_high_board_consecutive 的标的正常进入对应买入场景（不被中位闸误杀）。
+- [ ] 无标注兜底：盘前 zt_lianban_latest.csv 已传（T-1 涨停/连板名单，需含 `reason` 列），加载日志 `[zt-lianban] loaded .. -> N unique_high=M`；无 role_detail 时按 T-1 连板数 2-5 近似中位规避、<2 首板/一进二放行、>=6 高标放行。
+- [ ] 唯一性兜底（v0.34b）：高度压制到 3/4 板但为板块内唯一高度板+跟风低位板（或全市场唯一高标）→ 放行不规避（`unique_high=True`）；并列最高/板块内有更高身位 → 按中位规避。
+- [ ] 卖出链不受影响：持仓股（含中位连板）卖出照常走 P1/P2E/P3/P4，无 [mid-avoid] 日志。
+- [ ] selftest T72 系列通过；全量 333 PASS / 0 FAIL；双编译通过。
