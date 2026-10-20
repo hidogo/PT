@@ -47,6 +47,7 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default="", help="待上传 CSV 根目录（默认 PTRADE_BRIDGE_DIR）")
     p.add_argument("--logs", default="", help="当日交易日志 .txt -> 解析 [seal]/[l2]/[may-order]")
     p.add_argument("--selfwatch", action="store_true", help="步骤0 同步自选股")
+    p.add_argument("--no-selfwatch", action="store_true", help="关闭自选股同步（默认每个交易日收盘自动从客户端刷新）")
     p.add_argument("--skip-sync", action="store_true", help="跳过持仓同步（仅复盘+构建）")
     p.add_argument("--require-provider", action="store_true", help="missing provider input -> abort")
     p.add_argument("--api-dir", default="", help="PTradeQuantApi.py 所在目录")
@@ -61,6 +62,9 @@ def main(argv=None) -> int:
     # 步骤0：数据提供方（AXquant）就绪校验 —— 前置显性化，避免读到陈旧/缺失输入
     print("[oneclick] 步骤0 提供方(AXquant)就绪校验 复盘日=%s 预期日=%s" % (td, next_td))
     axc.probe_report(td, next_td)
+    _mw = axc.marker_warns(td, next_td)
+    if _mw:
+        print("[WARN] 预期链路断链（空 marker）: %s —— 预期 CSV 将缺失/为空，云端 expect_buy=0。请检查本地持仓桥接(QMT position_data.json)与 AXquant 复盘任务是否真正产出。" % "; ".join(_mw))
     _miss = axc.missing(td, next_td)
     if _miss:
         print("[oneclick] 提供方缺失输入: %s" % ", ".join(_miss))
@@ -117,6 +121,14 @@ def main(argv=None) -> int:
     elif os.path.isfile(_src_csv):
         print("[oneclick] 新产预期 CSV 无数据行 -> 跳过 alias 覆盖（保护既有文件）")
 
+    # 步骤4a: 自选股同步（默认执行；客户端未登录/无 XML 时保留既有文件并提示）
+    if not a.no_selfwatch:
+        try:
+            import sync_selfwatch as ss
+            ss.sync()
+        except Exception as e:
+            print("[oneclick] sync_selfwatch 失败(不影响预期/名单): %r" % e)
+
     # 步骤4: 导出 T-1 涨停/连板名单到同一待上传文件夹（upload_file, 供云端 _load_zt_lianban）
     try:
         import export_lianban
@@ -135,7 +147,9 @@ def main(argv=None) -> int:
     print("[oneclick] 步骤5 产出一致性核对 ...")
     _out = a.out_dir or bridge.PTRADE_BRIDGE_DIR
     _exp_csv = os.path.join(_out, "expectation_latest.csv")   # 云端实际消费的稳定指针
-    _src = a.source or axc.paths(td, next_td)["expectation_source"]
+    # 一致性核对源：本地重建预期 JSONL 优先（本次链路=review 重建），其次显式 source / AXquant 侧预期
+    _local_exp = bridge.expectation_store.default_expectation_path(next_td)
+    _src = a.source or (_local_exp if os.path.isfile(_local_exp) else axc.paths(td, next_td)["expectation_source"])
     _fe = axc.check_expectation_consistency(_exp_csv, _src)
     print("  [预期] CSV=%s src=%s ok=%s %s" % (_fe["csv_codes"], _fe["src_codes"], _fe["ok"], _fe["note"]))
     _zt_csv = os.path.join(_out, "zt_lianban_latest.csv")

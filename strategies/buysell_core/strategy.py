@@ -133,7 +133,7 @@ BLS = {
     'sealed_offerqty_enabled': True, # 用 total_offerqty==0 判封死（快照总委卖量；缺失回退 ask_grp 空判）
     # 打分引擎（AXquant 默认）
     'score_base': 40, 'score_max': 92, 'score_min': 0,
-    'vwap_penalty_per_min': 1.0, 'vwap_daily_limit': 12,
+    'vwap_penalty_per_30s': 1.0, 'vwap_daily_limit': 12,
     # 预期角色容忍度（AXquant sell_policy_hint 迁移，docs/17）：绿开/止损/评分阈值缩放系数
     'sell_policy': {
         'hold_higher_tolerance': {'green_tol': 2.5, 'stop_adj': 1.3, 'score_clear_adj': 0.6, 'score_half_adj': 0.8},
@@ -341,6 +341,8 @@ def initialize(context):
     g.m1_surge_cache = {} # sec -> (ts, 1m大阳线%)        弹性窗口缓存
     g.now_dt = None     # 当前 bar 时间（context.blotter.current_dt，回测/交易均可用）
     g.bar_counter = 0
+    g.vwap_below_since = {}  # sec -> 连续低于VWAP计时起点(_sec_age值)；高于VWAP即移除(恢复归零)
+
     g.pool_all = []     # 全市场 A 股代码（按交易日刷新）
     g.pool_day = None
     g.watch = []        # 入池候选（动态，买入/打分迭代目标）
@@ -583,15 +585,22 @@ def _attack_bonus(sec):
 
 
 def _vwap_penalty(sec):
-    # 低于 VWAP 每 1 分钟扣 1 分，日上限 12（用快照 wavg_px 近似 VWAP）
+    # 低于 VWAP 每 30 秒扣 1 分，日上限 12（用快照 wavg_px 近似 VWAP）。
+    # 时钟=「连续低于 VWAP」时长：高于 VWAP 立即恢复（归零移除），下次再破重新计时。
     px = last_px(sec); s = g.spot.get(sec)
     vwap = float(s.get('wavg_px') or 0.0) if s else 0.0
     if not px or not vwap:
         return 0.0
     if px >= vwap:
+        getattr(g, 'vwap_below_since', {}).pop(sec, None)   # 高于 VWAP -> 恢复归零
         return 0.0
-    mins = _min_age()
-    return min(BLS['vwap_daily_limit'], mins * BLS['vwap_penalty_per_min'])
+    now = _sec_age()
+    below = getattr(g, 'vwap_below_since', {})
+    start = below.get(sec)
+    if start is None:
+        start = now
+        below[sec] = start
+    return min(BLS['vwap_daily_limit'], max(0, (now - start) // 30) * BLS['vwap_penalty_per_30s'])
 
 
 def _external_internal(sec):
@@ -1335,6 +1344,18 @@ def _min_age():
     return max(0, (h1 * 60 + m1) - (9 * 60 + 30))
 
 
+def _sec_age():
+    # 距 09:30 已过秒数（30 秒粒度 VWAP 扣分；now_dt 缺失回退 分钟*60）
+    nd = getattr(g, 'now_dt', None)
+    if nd is not None:
+        try:
+            secs = (nd.hour * 3600 + nd.minute * 60 + nd.second) - (9 * 3600 + 30 * 60)
+            return max(0, secs)
+        except Exception:
+            pass
+    return _min_age() * 60
+
+
 def dump_scores(context):
     # 观察输出：把入池/持仓各标的本 bar 评分明细打出来，便于回测/交易核对打分触发
     if not BLS.get('debug_score'):
@@ -1771,6 +1792,59 @@ def _synth_pool_expect():
     log.info('[exp] 涨停池竞价三态合成 -> exceed=%d meet=%d miss=%d st_skip=%d mid_skip=%d' % (n_ex, n_mt, n_ms, n_st, n_mid))
     return n_ex + n_mt + n_ms
 
+def _synth_selfwatch_expect():
+    # v0.35e 自选股预期三态：对自选股（未在供方/涨停池条目中）在竞价后做三态初步确认，
+    # 复用涨停池合成口径——竞价涨幅>昨日开盘涨幅=竞价超预期(观察)、绿开=miss(放弃)、其余=meet(等盘中)。
+    # 数据（T 日开盘涨幅 _auction_change / 昨日开盘基准 _yesterday_open_chg）全部云端算法供给，
+    # 与持仓股 _hold_exp_init 同源，不依赖供方文件；供方/涨停池条目优先不覆盖。
+    if not BLS.get('pool_expect_enabled', True):
+        return 0
+    sw = [c for c in (getattr(g, 'selfwatch', []) or []) if c not in g.exp_file]
+    n_mid = sum(1 for c in sw if _mid_board_avoid(c))
+    sw = [c for c in sw if not _mid_board_avoid(c)]
+    if not sw:
+        log.info('[exp] 自选股竞价三态合成 -> exceed=0 meet=0 miss=0 mid_skip=%d' % n_mid)
+        return 0
+    day = str(get_trading_day())
+    try:
+        sn = _get_snapshot_many(sw, 200)
+        for c, d in sn.items():
+            if d and c not in g.spot:
+                g.spot[c] = d
+    except Exception:
+        sn = {}
+    n_ex = n_mt = n_ms = 0
+    for code in sw:
+        try:
+            s = g.spot.get(code) or {}
+            pre = float(s.get('preclose_px') or 0.0)
+            op = float(s.get('open_px') or 0.0)
+            chg = (op / pre - 1.0) * 100.0 if (pre > 0 and op > 0) else None
+            if chg is None:
+                chg = _auction_change(code)
+            else:
+                g.auction_c[code] = (day, chg)
+            chg = round(float(chg or 0.0), 2)
+            yopen, has = _yesterday_open_chg(code)
+            if chg < 0:
+                st = 'pending_miss'; n_ms += 1
+            elif has and chg > yopen:
+                st = 'pending_exceed'; n_ex += 1
+            else:
+                st = 'pending_meet'; n_mt += 1
+            g.exp_file[code] = {
+                'side': 'buy', 'entry_type': 'normal', 'expected_status': st,
+                'yesterday_open_pct': yopen, 'has_yesterday_open': has,
+                'expected_auction_change_pct': yopen if has else 0.0,
+                'has_expected_auction': has, 'seal_amount_t0': 0.0, 'sell_policy_hint': '',
+                '_src': 'selfwatch',
+            }
+        except Exception:
+            continue
+    log.info('[exp] 自选股竞价三态合成 -> exceed=%d meet=%d miss=%d mid_skip=%d' % (n_ex, n_mt, n_ms, n_mid))
+    return n_ex + n_mt + n_ms
+
+
 def _confirm_expected(code):
     # 用真实竞价(get_trend_data)确认预期命中：exceed/meet/miss
     en = g.exp_file.get(code) or {}
@@ -1877,7 +1951,7 @@ def _try_expected_buys(context):
     for code, en in g.exp_file.items():
         if str(en.get("side") or "") != "buy":
             continue
-        (pool if str(en.get("_src") or "") == "zt_pool" else provider).append(code)
+        (pool if str(en.get("_src") or "") in ("zt_pool", "selfwatch") else provider).append(code)
     pool.sort(key=_pool_exp_priority)   # v0.27 涨停池合成：分最高/最主动优先
     for code in provider + pool:
         _attempt_expected_buy(context, code)
@@ -2854,6 +2928,7 @@ def auction_pre_confirm(context):
     _synth_pool_expect()         # v0.27：涨停池竞价三态初步确认（超预期->观察）
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
+    _synth_selfwatch_expect()    # v0.35e：自选股竞价三态（超预期->观察）
     _sync_pool_static()
     _mark_one_word_open()
     for code in list(get_positions()):
@@ -2884,6 +2959,7 @@ def after_open_probe(context):
     _synth_pool_expect()         # v0.27：涨停池三态（09:31 兜底重合成，覆盖重读清空）
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
+    _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _sync_pool_static()
     g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set()
     _mark_one_word_open()

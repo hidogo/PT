@@ -261,3 +261,37 @@
 - [ ] 唯一性兜底（v0.34b）：高度压制到 3/4 板但为板块内唯一高度板+跟风低位板（或全市场唯一高标）→ 放行不规避（`unique_high=True`）；并列最高/板块内有更高身位 → 按中位规避。
 - [ ] 卖出链不受影响：持仓股（含中位连板）卖出照常走 P1/P2E/P3/P4，无 [mid-avoid] 日志。
 - [ ] selftest T72 系列通过；全量 333 PASS / 0 FAIL；双编译通过。
+
+
+## 22. 运行节奏固化：交易日 16:30 收盘一键 / 09:00 盘前验证补跑（2026-10-20，用户确认）
+- [ ] **交易日 16:30**：`research/expectation/run_one_click_after_close.cmd`（需 PTrade 客户端已登录）→ 生成 T+1 供给：
+      预期 CSV（expectation_<T+1>.csv + latest）、涨停名单（zt_lianban_latest.csv，T 日数据）、
+      情绪基线（sentiment_<T>.csv + latest，红盘比优先取 position_review 全市场值，docs/40）。
+- [ ] **交易日 09:00**：`research/expectation/run_one_click_premarket.cmd` → 「步骤2c 盘前供给核对」逐项 OK：
+      预期（date=T+1，文件名口径，rows>0）、名单（date=T，rows>0）、情绪（date=T，rows>0）、自选股（可选）。
+- [ ] **补跑修正**：若 16:30 收盘一键时 AXquant 复盘未完成（情绪 WARN 回退天梯样本），09:00 盘前会自动补跑修正：
+      红盘比改取 position_review 全市场值，日志出现 `[sentiment] 红盘比来源: .. red_ratio_pct=..（全市场，优先）` 即已修正；
+      核对行显示「情绪红盘比=..% 与天梯样本不同 -> 口径=position_review 全市场（优先，正确）」。
+- [ ] 步骤3 一致性核对：`[预期] CSV==src ok=True`、`[名单] zt==boards ok=True`，结论「待上传文件已就绪」。
+- [ ] 自选股默认自动同步（v0.35d）：收盘一键步骤4a、盘前一键步骤2d 默认从客户端「我的自选」刷新 `data\ptrade_bridge\selfwatch.csv`（`--no-selfwatch`/`--skip-selfwatch` 关闭）；客户端改自选 → 上传 → 云端 8 bar 内生效，盘中核对 `[pool] selfwatch loaded <路径> -> N`。
+- [ ] **09:20 前**完成定时上传（客户端绑定 data\ptrade_bridge 按文件夹上传，含 sentiment_latest.csv），盘中核对关键字命中
+      （expectation file loaded / [pool] expect_buy=N>0 / [zt-lianban] loaded / [sentiment] loaded）。
+- [ ] selftest T74（日期守卫）/ T75（红盘比优先）/ T77（自选股三态合成）通过；全量 363 PASS / 0 FAIL；双编译通过。
+
+
+## 23. 自选股预期三态合成（v0.35e，2026-10-20）：自选股补齐竞价三态消费数据，无需供方文件
+- [ ] **方案**：自选股未在供方/涨停池条目中时，云端算法在竞价后做三态初步确认（与持仓 `_hold_exp_init`、涨停池 `_synth_pool_expect` 同口径）：
+      竞价涨幅 `_auction_change`（get_trend_data 真口径，回退 open/preclose）+ 昨日开盘基准 `_yesterday_open_chg`（供方优先 + 云端 1d 历史折算兜底）。
+- [ ] 三态判定：`竞价涨幅 > 昨日开盘涨幅` = 竞价超预期（pending_exceed → observe 观察，等分时确认）；绿开 = pending_miss（放弃）；其余 = pending_meet（等盘中）。供方/涨停池条目优先，不覆盖。
+- [ ] 消费链路：合成后自选股进入 `g.exp_file`（side=buy，_src=selfwatch）→ 09:25/09:31 两阶段（竞价超预期→observe → 分时两分钟上攻/一分钟冲涨停且不破VWAP → `place_expected_order`，EXPECT_ORDER 门控）。
+- [ ] 连板中位股规避同口径生效（`_src='selfwatch'`，2-5 板中位过滤、唯一高度板放行）；自选池不过滤 ST（与自选语义无关）。
+- [ ] **盘前勾选**：09:25/09:31 日志出现 `[exp] 自选股竞价三态合成 -> exceed=N meet=M miss=K`；自选股超预期 → 日志 `[exp] <名称> 09:25竞价终态初步确认超预期 -> 观察(等分时确认)`；分时确认后走买入（DO_ORDER/EXPECT_ORDER 门控下核对 may-order/expect-order）。
+- [ ] 数据自给验证（可选）：自选股 T 日开盘涨幅无需供方文件（云端算法），与持仓股一致；如需供方先行标注，`_src='provider'` 条目优先不覆盖。
+- [ ] selftest T77 系列通过（exceed/miss/meet、mid_skip、供方优先、幂等、竞价缓存）；全量 363 PASS / 0 FAIL；双编译通过。
+
+
+## 24. 打分引擎：VWAP 扣分 30 秒粒度（v0.35f，2026-10-20）
+- [ ] `_vwap_penalty(sec)`：低于 VWAP 每 30 秒扣 1 分，日上限 12（快照 `wavg_px` 近似 VWAP，`px>=vwap` 不扣分、缺 wavg_px 不扣分）。时钟=「连续低于 VWAP」时长（`g.vwap_below_since` 记录起点）：高于 VWAP 立即恢复归零（移除计时），下次再破重新计时，避免盘中瞬时破位吃满总时长惩罚。
+- [ ] 粒度来源：新增 `_sec_age()`（距 09:30 已过秒数，`g.now_dt` 精确到秒；缺失回退 `_min_age()*60`）；`_min_age()` 语义不变（仍供窗口判断复用）；`initialize` 新增 `g.vwap_below_since={}`（跨重启持久化安全，picklable）。
+- [ ] 配置：`BLS['vwap_penalty_per_30s']=1.0`（原 `vwap_penalty_per_min` 更名）、`BLS['vwap_daily_limit']=12` 不变；约 09:36 即达日上限（原 09:42）。
+- [ ] selftest T78 系列通过（首次破=0 计时起点 / 30s→1 / 60s→2 / 5min→10 / 日上限 12 封顶 / 高于 VWAP=0 恢复归零 / 再破重新计时 30s→1、60s→2 / 缺 wavg_px=0）；全量 374 PASS / 0 FAIL；双编译通过。

@@ -70,14 +70,53 @@ def probe(review_date: str, next_date: str = "") -> list:
         if key == "bridge_dir":
             continue
         ex = os.path.isfile(p)
-        item = {"key": key, "path": p, "exists": ex, "size": 0, "mtime": "", "age_hours": None}
+        item = {"key": key, "path": p, "exists": ex, "size": 0, "mtime": "", "age_hours": None,
+                "marker": False, "marker_reason": ""}
         if ex:
             item["size"] = os.path.getsize(p)
             mt = os.path.getmtime(p)
             item["mtime"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(mt))
             item["age_hours"] = round((time.time() - mt) / 3600.0, 2)
+            if key in ("position_review", "expectation_source"):
+                _m, _r = _marker_detect(p)
+                item["marker"] = _m
+                item["marker_reason"] = _r
         out.append(item)
     return out
+
+
+def _marker_detect(path):
+    # 识别空 marker 复盘/预期文件（record_type=*_marker / position_status=空仓|无法判定 / 无数据行）。
+    # 文件存在但内容为空壳 = 本地持仓桥接或复盘任务未真正产出（10-19/10-20 实测 position_ok=false 场景），
+    # 预期链路会空转——这是断链的显性信号。
+    # 仅当 ALL 行都是 marker 才判空 marker；首行 marker + 后随真实复盘行 = 正常（write_position_review 补记后追加真实记录）。
+    try:
+        n_data = 0
+        marker_rows = 0
+        first_reason = ""
+        with io.open(path, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                n_data += 1
+                try:
+                    rec = json.loads(ln)
+                except Exception:
+                    continue
+                rt = str(rec.get("record_type") or "")
+                ps = str(rec.get("position_status") or "")
+                if "marker" in rt or ps in ("空仓", "无法判定"):
+                    marker_rows += 1
+                    if not first_reason:
+                        first_reason = (("record_type=" + rt) if rt else ("position_status=" + ps))
+        if n_data == 0:
+            return True, "no_data_rows"
+        if marker_rows == n_data:
+            return True, first_reason
+        return False, ""
+    except Exception:
+        return False, ""
 
 
 def missing(review_date: str, next_date: str = "") -> list:
@@ -199,7 +238,21 @@ def check_expectation_consistency(csv_path: str, source_jsonl: str) -> dict:
 
 def probe_report(review_date: str, next_date: str = "") -> None:
     print("[provider] AXquant root = %s" % axquant_root())
+    warns = []
     for it in probe(review_date, next_date):
-        st = "OK " if it["exists"] else "MISS"
-        print("  [%s] %-22s %s size=%s mtime=%s age_h=%s" % (
-            st, it["key"], it["path"], it["size"], it["mtime"], it["age_hours"]))
+        if it["exists"] and it["marker"]:
+            st = "MARK"
+            warns.append("%s=%s" % (it["key"], it["marker_reason"]))
+        else:
+            st = "OK " if it["exists"] else "MISS"
+        print("  [%s] %-22s %s size=%s mtime=%s age_h=%s%s" % (
+            st, it["key"], it["path"], it["size"], it["mtime"], it["age_hours"],
+            ("  <- 空 marker(%s)" % it["marker_reason"]) if it.get("marker") else ""))
+    if warns:
+        print("  [WARN] 检测到空 marker（文件存在但无真实复盘/预期内容，预期链路可能空转）: %s" % "; ".join(warns))
+
+
+def marker_warns(review_date: str, next_date: str = "") -> list:
+    """返回空 marker 断链告警列表（供一键脚本在步骤0 显性提示）。"""
+    return ["%s(%s)" % (it["key"], it["marker_reason"])
+            for it in probe(review_date, next_date) if it["exists"] and it["marker"]]

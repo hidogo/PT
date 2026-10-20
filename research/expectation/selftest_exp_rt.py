@@ -1915,5 +1915,167 @@ n['g'].exp_file['600085.XSHG'] = {'side': 'buy', 'role_detail': 'unique_high_boa
 n['g'].zt_lianban = {}
 ok('T73 role_detail=unique 权威优先 -> 放行', n['_mid_board_avoid']('600085.XSHG') is False)
 
+
+# --- T74 v0.35 export_sentiment 日期守卫：同日重复运行不虚增 ice_streak / warm_days ---
+import json, csv
+import export_sentiment as es74
+
+def _es_lub(out, d, pool_total, adv):
+    with open(os.path.join(out, "limit_up_boards_%s.json" % d), "w", encoding="utf-8") as _f:
+        json.dump({"summary": {"pool_total": pool_total, "break_total": 10,
+                               "advance_rate_pct": adv, "max_board": 2, "lianban_count": 4}, "pool": {}}, _f)
+
+def _es_seed(out, d, ice, streak, warm, phase):
+    with open(os.path.join(out, "sentiment_latest.csv"), "w", encoding="utf-8") as _f:
+        _f.write("date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence\n")
+        _f.write("%s,40,10,0.8000,50.00,2,4,%d,%d,%d,%s,0\n" % (d, int(ice), streak, warm, phase))
+
+def _es_row(out):
+    with open(os.path.join(out, "sentiment_latest.csv"), "r", encoding="utf-8") as _f:
+        rows = list(csv.reader(_f))
+    return rows[1]
+
+_t74 = tempfile.mkdtemp(prefix="pt_sf74_")
+
+# 1) 同日冰点重复运行：streak 不虚增（10-19 ice=1 -> 10-20 ice=2 -> 再跑仍 2）
+_es_seed(_t74, "2026-10-19", True, 1, 0, "ice"); _es_lub(_t74, "2026-10-20", 25, 30.0)
+es74.run("2026-10-20", _t74, _t74)
+es74.run("2026-10-20", _t74, _t74)   # 同日重复
+_r1 = _es_row(_t74)
+ok("T74 同日冰点重复运行 streak 不虚增(2->2)", _r1[7] == "1" and _r1[8] == "2" and _r1[9] == "0")
+
+# 2) 跨日冰点 -> streak+1
+_es_seed(_t74, "2026-10-20", True, 2, 0, "ice"); _es_lub(_t74, "2026-10-21", 25, 30.0)
+es74.run("2026-10-21", _t74, _t74)
+_r2 = _es_row(_t74)
+ok("T74 跨日冰点 streak+1(2->3)", _r2[7] == "1" and _r2[8] == "3")
+
+# 3) 前日冰点+今日回暖 -> streak 归 0，phase=warm warm_days=1
+_es_seed(_t74, "2026-10-20", True, 2, 0, "ice"); _es_lub(_t74, "2026-10-21", 40, 55.0)
+es74.run("2026-10-21", _t74, _t74)
+_r3 = _es_row(_t74)
+ok("T74 回暖日 streak 归 0 + phase=warm warm_days=1", _r3[7] == "0" and _r3[8] == "0" and _r3[9] == "1" and _r3[10] == "warm")
+
+# 4) 同日非冰点重复运行：warm_days 不虚增（cont 2->3 -> 再跑仍 3）
+_es_seed(_t74, "2026-10-20", False, 0, 2, "cont"); _es_lub(_t74, "2026-10-21", 40, 55.0)
+es74.run("2026-10-21", _t74, _t74)
+es74.run("2026-10-21", _t74, _t74)   # 同日重复
+_r4 = _es_row(_t74)
+ok("T74 同日回暖延续重复运行 warm_days 不虚增(3->3)", _r4[7] == "0" and _r4[8] == "0" and _r4[9] == "3" and _r4[10] == "cont")
+
+# 5) latest 日期晚于当前（回补历史）-> 视为无前置，不污染
+_es_seed(_t74, "2026-10-21", True, 5, 0, "ice"); _es_lub(_t74, "2026-10-20", 25, 30.0)
+es74.run("2026-10-20", _t74, _t74)
+_r5 = _es_row(_t74)
+ok("T74 未来/更晚 latest 视为无前置(重新累计 streak=1)", _r5[7] == "1" and _r5[8] == "1")
+
+
+# --- T75 v0.35b export_sentiment 红盘比来源：优先 position_review emotion_temperature.red_ratio_pct（全市场），
+#     缺失回退 summary.advance_rate_pct（天梯有限样本）并 WARN ---
+import export_sentiment as es75
+
+def _es75_lub(out, pool_total=54, adv=37.36):
+    with open(os.path.join(out, "limit_up_boards_2026-10-20.json"), "w", encoding="utf-8") as _f:
+        json.dump({"summary": {"pool_total": pool_total, "break_total": 29, "advance_rate_pct": adv,
+                               "advance_sample": 348, "max_board": 4, "lianban_count": 14}, "pool": {}}, _f)
+
+def _es75_seed(out):
+    with open(os.path.join(out, "sentiment_latest.csv"), "w", encoding="utf-8") as _f:
+        _f.write("date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence\n")
+        _f.write("2026-10-19,49,20,0.7101,37.46,3,11,1,1,0,ice,0\n")
+
+def _es75_row(out):
+    with open(os.path.join(out, "sentiment_latest.csv"), "r", encoding="utf-8") as _f:
+        return list(csv.reader(_f))[1]
+
+# 1) 有 position_review 全市场红盘比 67.72 -> 用 67.72；10-19 冰点后 10-20 判回暖(warm/warm_days=1/streak=0)
+_t75 = tempfile.mkdtemp(prefix="pt_sf75_")
+_es75_lub(_t75); _es75_seed(_t75)
+with open(os.path.join(_t75, "position_review_2026-10-20.jsonl"), "w", encoding="utf-8") as _f:
+    _f.write('{"trade_date":"2026-10-20","record_type":"position_review_marker","position_count":0,'
+             '"extra":{"emotion_temperature":{"conclusion":"\u56de\u6696\uff08\u51b0\u70b9\u540e\u4fee\u590d\u521d\u671f\uff09","red_ratio_pct":67.72,'
+             '"advance_rate_pct":54.55}}}\n')
+es75.run("2026-10-20", _t75, _t75, _t75)
+_r75 = _es75_row(_t75)
+ok("T75 红盘比优先: advance=67.72 非 37.36", abs(float(_r75[4]) - 67.72) < 1e-9)
+ok("T75 红盘比优先: 10-20 判回暖(ice=0 streak=0 warm_days=1 phase=warm)",
+   _r75[7] == "0" and _r75[8] == "0" and _r75[9] == "1" and _r75[10] == "warm")
+
+# 2) 无 position_review（回退天梯样本 37.36 < 40）-> 判冰点 ice=1 streak=2
+_t75b = tempfile.mkdtemp(prefix="pt_sf75b_")
+_es75_lub(_t75b); _es75_seed(_t75b)
+es75.run("2026-10-20", _t75b, _t75b, _t75b)
+_r75b = _es75_row(_t75b)
+ok("T75 无红盘比回退天梯样本 -> 判冰点(adv=37.36 ice=1 streak=2)",
+   abs(float(_r75b[4]) - 37.36) < 1e-9 and _r75b[7] == "1" and _r75b[8] == "2")
+
+
+# --- T76 v0.35c sentiment 根目录瘦身：更早 sentiment_<date>.csv 移入 archive/（keep_days 对齐 zt=3） ---
+import export_sentiment as es76
+_t76 = tempfile.mkdtemp(prefix="pt_sf76_")
+for _d in ("2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-20"):
+    with open(os.path.join(_t76, "sentiment_%s.csv" % _d), "w", encoding="utf-8") as _f:
+        _f.write("date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence\n")
+        _f.write("%s,40,10,0.8000,50.00,2,4,0,0,1,cont,0\n" % _d)
+n76 = es76._prune_old(_t76, 3)
+_kept = sorted(x for x in os.listdir(_t76) if x.startswith("sentiment_") and x.endswith(".csv"))
+_arc = sorted(x for x in os.listdir(os.path.join(_t76, "archive")) if x.endswith(".csv"))
+ok("T76 根目录仅留最近3个日期(移走2个)", n76 == 2 and
+   _kept == ["sentiment_2026-10-16.csv", "sentiment_2026-10-17.csv", "sentiment_2026-10-20.csv"])
+ok("T76 更早文件移入 archive 保留审计", _arc == ["sentiment_2026-10-14.csv", "sentiment_2026-10-15.csv"])
+# --- T77 v0.35e 自选股预期三态合成（竞价超预期->观察，复用涨停池口径，云端算法供给） ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 20)
+g = ns['g']
+g.selfwatch = ['600001.XSHG', '600002.XSHG', '600003.XSHG', '600009.XSHG']
+g.zt_lianban = {'600009.XSHG': {'board_cnt': 3}}   # 连板中位(2-5) -> 兜底过滤
+g.exp_file = {'600004.XSHG': {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'pending_meet', '_src': 'provider'}}
+g.selfwatch.append('600004.XSHG')   # 供方条目优先不覆盖
+g.auction_c = {}
+g.spot['600001.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.8}   # +8% 超预期
+g.spot['600002.XSHG'] = {'last_px': 9.6, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 9.6}     # -4% 绿开 miss
+g.spot['600003.XSHG'] = {'last_px': 10.2, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.2}   # +2% 未超昨日 meet
+ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
+n = ns['_synth_selfwatch_expect']()
+en1 = g.exp_file.get('600001.XSHG') or {}
+en2 = g.exp_file.get('600002.XSHG') or {}
+en3 = g.exp_file.get('600003.XSHG') or {}
+en4 = g.exp_file.get('600004.XSHG') or {}
+ok('T77 自选股超预期 -> exceed/观察(_src=selfwatch)', n == 3 and en1.get('expected_status') == 'pending_exceed' and en1.get('_src') == 'selfwatch' and en1.get('side') == 'buy')
+ok('T77 自选股绿开 -> miss', en2.get('expected_status') == 'pending_miss')
+ok('T77 自选股未超昨日 -> meet', en3.get('expected_status') == 'pending_meet')
+ok('T77 连板中位股过滤(mid_skip)', '600009.XSHG' not in g.exp_file)
+ok('T77 供方条目优先不覆盖', en4.get('_src') == 'provider' and en4.get('expected_status') == 'pending_meet')
+ok('T77 二次合成幂等', ns['_synth_selfwatch_expect']() == 0 and len(g.exp_file) == 4)
+ok('T77 预置竞价涨幅缓存(开盘口径)', abs(g.auction_c.get('600001.XSHG', (0, 0))[1] - 8.0) < 1e-9)
+# --- T78 v0.35f VWAP 扣分 30 秒粒度：低于 VWAP 每 30 秒扣 1 分，日上限 12（快照 wavg_px 近似 VWAP）；高于 VWAP 恢复归零、再破重新计时 ---
+ns = fresh()
+g = ns['g']
+g.spot['600001.XSHG'] = {'last_px': 9.7, 'preclose_px': 10.0, 'up_px': 11.0, 'wavg_px': 10.0}
+g.vwap_below_since = {}
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 31, 0)
+ok('T78 首次破VWAP -> 0分(计时起点)', ns['_vwap_penalty']('600001.XSHG') == 0.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 31, 30)
+ok('T78 低于VWAP 30秒 -> 1分', ns['_vwap_penalty']('600001.XSHG') == 1.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 32, 0)
+ok('T78 低于VWAP 60秒 -> 2分(每30秒1分)', ns['_vwap_penalty']('600001.XSHG') == 2.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 36, 0)
+ok('T78 低于VWAP 5分钟 -> 10分', ns['_vwap_penalty']('600001.XSHG') == 10.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 37, 0)
+ok('T78 低于VWAP 6分钟 -> 12分(日上限)', ns['_vwap_penalty']('600001.XSHG') == 12.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 42, 0)
+ok('T78 日上限12封顶', ns['_vwap_penalty']('600001.XSHG') == 12.0)
+g.spot['600001.XSHG']['last_px'] = 10.1
+ok('T78 高于VWAP -> 0分(恢复归零)', ns['_vwap_penalty']('600001.XSHG') == 0.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 42, 30)
+g.spot['600001.XSHG']['last_px'] = 9.7
+ok('T78 再破VWAP -> 0分(重新计时)', ns['_vwap_penalty']('600001.XSHG') == 0.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 43, 0)
+ok('T78 再破30秒 -> 1分(非总时长累计)', ns['_vwap_penalty']('600001.XSHG') == 1.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 43, 30)
+ok('T78 再破60秒 -> 2分', ns['_vwap_penalty']('600001.XSHG') == 2.0)
+g.spot['600001.XSHG'] = {'last_px': 9.7, 'preclose_px': 10.0, 'up_px': 11.0}
+ok('T78 缺wavg_px -> 0分', ns['_vwap_penalty']('600001.XSHG') == 0.0)
+
+
 print('ALL DONE')
 

@@ -3,7 +3,9 @@
 """盘前一键：生成今日待上传文件 + 校验 + 上传勾选清单（无需登录，不重跑收盘复盘）。
 
 T-1 收盘已跑过 run_one_click_after_close 生成 position_expectation_<T>.jsonl 的前提下，
-T 日 09:20 前运行本脚本把今日供给就位并打印上传勾选：
+T 日 09:00 验证/补跑、 09:20 前完成上传：（收盘一键固化为交易日 16:30 执行）
+步骤2c “盘前供给核对”：预期(日期=T)、名单(日期=T-1)、情绪(日期=T-1，红盘比优先 position_review 全市场)逐项确认；
+若 16:30 时 AXquant 复盘未完成（情绪 WARN 回退天梯样本），09:00 补跑自动修正。
   步骤0  提供方(AXquant)就绪探活            axc.probe_report / missing
   步骤1  生成预期 CSV                        expectation_<T>.csv + latest（复用 run_expectation_build）
   步骤2  生成涨停/连板名单                    zt_lianban_latest.csv（T-1 数据，复用 export_lianban）
@@ -105,6 +107,7 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default="", help="待上传 CSV 根目录（默认 PTRADE_BRIDGE_DIR）")
     p.add_argument("--require-provider", action="store_true", help="提供方缺失输入 -> 中止(rc=2)")
     p.add_argument("--skip-lianban", action="store_true", help="跳过涨停名单导出(步骤2)")
+    p.add_argument("--skip-selfwatch", action="store_true", help="跳过自选股同步（默认每个交易日盘前自动从客户端刷新）")
     a = p.parse_args(argv)
 
     td, nt = _resolve_defaults(a.date, a.next_date)
@@ -115,6 +118,9 @@ def main(argv=None) -> int:
     # 步骤0：提供方就绪探活
     print("[premarket] 步骤0 提供方(AXquant)就绪校验 复盘日=%s 预期日=%s" % (td, nt))
     axc.probe_report(td, nt)
+    _mw = axc.marker_warns(td, nt)
+    if _mw:
+        print("[WARN] 预期链路断链（空 marker）: %s —— 预期 CSV 将缺失/为空，云端 expect_buy=0。请检查本地持仓桥接(QMT position_data.json)与 AXquant 复盘任务是否真正产出。" % "; ".join(_mw))
     _miss = axc.missing(td, nt)
     if _miss:
         print("[premarket] 提供方缺失输入: %s" % ", ".join(_miss))
@@ -130,7 +136,8 @@ def main(argv=None) -> int:
     _gen_csv = os.path.join(out, "expectation_%s.csv" % td)   # 生成日命名兜底
     _latest_csv = os.path.join(out, "expectation_latest.csv") # 稳定指针（云端优先读）
     _nrows = _rows_of(_src_csv)
-    _src = a.source or axc.paths(td, nt)["expectation_source"]
+    _local_exp = bridge.expectation_store.default_expectation_path(nt)
+    _src = a.source or (_local_exp if os.path.isfile(_local_exp) else axc.paths(td, nt)["expectation_source"])
     if _rc == 0 and _nrows > 0:
         _copy_alias(_src_csv, _gen_csv, _latest_csv)
     elif _source_is_empty_marker(_src):
@@ -162,6 +169,76 @@ def main(argv=None) -> int:
         except Exception as e:
             print("[premarket] export_sentiment 失败(不影响预期/名单): %r" % e)
 
+    # 步骤2c：盘前供给核对（9:00 验证/补跑）：预期/名单/情绪/自选 就绪性 + 日期 + 口径
+    print("[premarket] 步骤2c 盘前供给核对（9:00 验证/补跑） ...")
+    import csv as _csv75
+    def _head_row(fp):
+        try:
+            with open(fp, "r", encoding="utf-8") as _f:
+                rows = list(_csv75.reader(_f))
+            if len(rows) < 2:
+                return None
+            hdr = [x.strip().lower() for x in rows[0]]
+            return dict(zip(hdr, rows[1][:len(hdr)]))
+        except Exception:
+            return None
+    def _supply(label, fp, expect_date):
+        rec = _head_row(fp)
+        if rec is None:
+            print("  [供给] %-20s 缺失 -> 需补跑/上传" % label)
+            return 1
+        dt = str(rec.get("date") or "")
+        rows = _rows_of(fp)
+        ok = (rows > 0) and (not expect_date or dt == expect_date)
+        print("  [供给] %-20s date=%s rows=%d -> %s" % (label, dt or "(无date列)", rows, "OK" if ok else "日期不符/空行"))
+        return 0 if ok else 1
+    _miss2 = 0
+    _exp_latest = os.path.join(out, "expectation_latest.csv")
+    _exp_nt = os.path.join(out, "expectation_%s.csv" % nt)
+    _exp_ok = (os.path.isfile(_exp_latest) and _rows_of(_exp_latest) > 0 and
+               os.path.isfile(_exp_nt) and _rows_of(_exp_nt) > 0)
+    print("  [供给] %-20s date=%s rows=%d -> %s" % ("预期 CSV(latest)", nt, _rows_of(_exp_latest), "OK" if _exp_ok else "缺失/空行"))
+    _miss2 += 0 if _exp_ok else 1
+    _miss2 += _supply("涨停名单(latest)", os.path.join(out, "zt_lianban_latest.csv"), td)
+    _miss2 += _supply("情绪基线(latest)", os.path.join(out, "sentiment_latest.csv"), td)
+    _sent = _head_row(os.path.join(out, "sentiment_latest.csv"))
+    if _sent:
+        _adv = _sent.get("advance_rate") or ""
+        _sadv = None
+        try:
+            import export_lianban as _el75
+            _lub = _el75.default_lub_path(td)
+            if os.path.isfile(_lub):
+                _sadv = json.load(open(_lub, encoding="utf-8")).get("summary", {}).get("advance_rate_pct")
+        except Exception:
+            pass
+        try:
+            _advf, _sadvf = float(_adv), float(_sadv)
+        except Exception:
+            _advf = _sadvf = None
+        if _sadvf is not None and _advf is not None and abs(_advf - _sadvf) < 0.01:
+            print("  [供给] 情绪红盘比=%.2f%% 与涨停池天梯样本一致 -> 口径=天梯回退（建议收盘一键在 AXquant 复盘完成后重跑）" % _advf)
+        elif _advf is not None:
+            print("  [供给] 情绪红盘比=%.2f%% 与天梯样本不同 -> 口径=position_review 全市场（优先，正确）" % _advf)
+    _self = os.path.join(out, "selfwatch.csv")
+    if os.path.isfile(_self):
+        print("  [供给] %-20s rows=%d -> OK（可选）" % ("自选股", _rows_of(_self)))
+    else:
+        print("  [供给] %-20s 缺失（可选，有自选需求再上传）" % "自选股")
+    if _miss2:
+        rc = rc or 5
+        print("  [供给] 存在缺项/date 不符 (rc=%d) -> 按上方提示补跑（收盘一键 / AXquant 复盘后重跑）" % rc)
+    else:
+        print("  [供给] 盘前供给全部就绪 -> 等 09:20 前定时上传")
+
+    # 步骤2d: 自选股同步（默认执行；客户端未登录/无 XML 时保留既有文件并提示）
+    if not a.skip_selfwatch:
+        try:
+            import sync_selfwatch as ss
+            ss.sync()
+        except Exception as e:
+            print("[premarket] sync_selfwatch 失败(不影响预期/名单): %r" % e)
+
     # 步骤3：产出一致性核对
     print("[premarket] 步骤3 产出一致性核对 ...")
     _exp_csv = os.path.join(out, "expectation_latest.csv")
@@ -188,6 +265,7 @@ def main(argv=None) -> int:
         ("预期 CSV(生成日命名)", _gen_csv),
         ("预期 CSV(latest 稳定指针)", _latest_csv),
         ("涨停/连板名单(latest)", _zt_csv),
+        ("情绪基线(latest)", os.path.join(out, "sentiment_latest.csv")),
         ("自选股(可选)", os.path.join(out, "selfwatch.csv")),
     ]
     for label, fp in files:
