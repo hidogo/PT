@@ -478,7 +478,7 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
     if not recs:
         return 0
     header = [
-        "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
+        "code", "name", "side", "entry_type", "expected_status", "yesterday_open_pct",
         "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
         "sell_policy_hint", "role_detail",
     ]
@@ -493,7 +493,7 @@ def export_expectation_csv(trade_date=None, out_path=None, src_path=None):
             # 缺显式 side 时按状态端末回落（miss->sell，否则 hold）；显式 buy 用于「核心苗子前瞻建仓」
             side = "sell" if status.lower().endswith("miss") else "hold"
         rows.append([
-            code, side,
+            code, str(r.get("name") or ""), side,
             str(r.get("entry_type") or "normal"),
             status,
             _fmt_empty(r.get("yesterday_open_pct")),

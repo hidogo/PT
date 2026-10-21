@@ -5,7 +5,7 @@
 本模块集中定义：
 - AXquant 项目根发现（env AXQUANT_PROJECT_DIR 优先，否则同级 D:/PROJ/AXquant）
 - 各输入子目录布局：data/review、data/buys、data/special_snapshots、docs/review、
-  data/position_expectation_<date>.jsonl
+  ShareData/position_expectation_<date>.jsonl（T 日 16:00 复盘任务直接产出的盘前预期源）
 - 路径解析 probe / missing
 - 一致性校验：预期 CSV vs 源 jsonl，zt 名单 vs limit_up_boards
 
@@ -25,6 +25,7 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))          # .../research/expectation/bridge
 _PROJ = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))   # D:/PROJ/PT
 _DATA = os.path.join(_PROJ, "data")
+_SHARE = os.path.abspath(os.path.join(_PROJ, "..", "ShareData"))
 
 
 def axquant_root() -> str:
@@ -57,7 +58,7 @@ def paths(review_date: str, next_date: str) -> dict:
         "open_reason":           _ax(*(SUB["buys"] + ("open_reason_%s.jsonl" % r,))),
         "special_snapshot":      _ax(*(SUB["snapshots"] + ("%s.json" % r,))),
         "limit_up_boards":       _ax(*(SUB["lub"] + ("limit_up_boards_%s.json" % r,))),
-        "expectation_source":    _ax("data", "position_expectation_%s.jsonl" % (n or r)),
+        "expectation_source":    os.path.join(_SHARE, "position_expectation_%s.jsonl" % (n or r)),
         "pt_review":             os.path.join(_DATA, "review", "position_review_%s.jsonl" % r),
         "bridge_dir":            os.environ.get("PTRADE_BRIDGE_OUT_DIR", "").strip() or os.path.join(_DATA, "ptrade_bridge"),
     }

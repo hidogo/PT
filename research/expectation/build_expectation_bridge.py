@@ -40,7 +40,7 @@ import bridge  # noqa: E402
 
 
 CSV_HEADER = [
-    "code", "side", "entry_type", "expected_status", "yesterday_open_pct",
+    "code", "name", "side", "entry_type", "expected_status", "yesterday_open_pct",
     "expected_auction_change_pct", "seal_amount_t0", "board_name", "reason",
     "sell_policy_hint", "role_detail",
 ]
@@ -364,6 +364,7 @@ def _init_expectation_from_review(rev, trade_date, review_date):
     return {
         "trade_date": trade_date,
         "code": rev.get("code"),
+        "name": rev.get("name") or "",
         "review_date": review_date,
         "role": rev.get("role") or "",
         "role_detail": rev.get("role_detail") or "",
