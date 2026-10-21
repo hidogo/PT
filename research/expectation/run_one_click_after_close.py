@@ -156,6 +156,14 @@ def main(argv=None) -> int:
     _fz = axc.check_zt_consistency(_zt_csv, td)
     print("  [名单] zt=%s boards=%s date=%s ok=%s %s" % (_fz["zt_rows"], _fz["board_rows"], _fz["zt_date"], _fz["ok"], _fz["note"]))
 
+    # 步骤6：待上传目录瘦身/归档（定时上传有数据限制：dated 只留最新 N 个，更早移入 archive/（非递归上传），archive 超期清理）
+    try:
+        import maintain_bridge_dir as _mbd
+        _margv = ["--root", _out_dir] if a.out_dir else []
+        _mbd.main(_margv)
+    except Exception as _e:
+        print("[oneclick] maintain_bridge_dir 失败(不影响预期/上传): %r" % _e)
+
     return rc
 
 

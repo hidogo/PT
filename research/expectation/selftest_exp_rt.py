@@ -2076,6 +2076,285 @@ ok('T78 再破60秒 -> 2分', ns['_vwap_penalty']('600001.XSHG') == 2.0)
 g.spot['600001.XSHG'] = {'last_px': 9.7, 'preclose_px': 10.0, 'up_px': 11.0}
 ok('T78 缺wavg_px -> 0分', ns['_vwap_penalty']('600001.XSHG') == 0.0)
 
+# --- T79 v0.36 帧预算快速期放大 + m1 高优先级独立配额 + board_rank single 归一 ---
+ns = fresh()
+g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 40, 0)   # 快速期(min_age=10)
+ok('T79 快速期 board 限额 24(v0.36e)', ns['_source_limit']('board', 0) == 24.0)
+ok('T79 快速期 m1 限额 30', ns['_source_limit']('m1', 0) == 30.0)
+ok('T79 m1 高优先级独立配额 15', ns['_source_limit']('m1', 1) == 15.0)
+g.now_dt = datetime.datetime(2026, 10, 20, 10, 5, 0)   # 平时(min_age=35)
+ok('T79 平时 board 限额 6', ns['_source_limit']('board', 0) == 6.0)
+ok('T79 平时 m1 限额 20', ns['_source_limit']('m1', 0) == 20.0)
+# gear 快速期动态：min(len(_tick_targets), 25)；get_positions={} + universe 3
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 40, 0)
+g.watch = []; g.pool_static = []; g.selfwatch = []
+g.tick_targets_cache = None
+ns['get_positions'] = lambda: {}
+ok('T79 gear 快速期动态=min(len(tick_targets),25)', ns['_source_limit']('gear', 0) == float(min(3, 25)))
+# prio 独立记账：spend('m1', prio=1) 20 次 -> 15 记账 + 5 over，普通 m1 不受影响
+ns2 = fresh()
+dh2 = ns2['_get_ds']()
+for _i in range(20):
+    dh2.spend('m1', prio=1)
+ok('T79 prio 独立配额 15 超限记账', dh2.frame['used'].get('m1_p') == 15 and dh2.frame['over'].get('m1_p') == 5)
+ok('T79 prio 不占普通 m1 配额', 'm1' not in dh2.frame['used'])
+# single 归一：board_rank 同源只留最新一条
+ns3 = fresh()
+dh3 = ns3['_get_ds']()
+dh3.cached(('board_rank', 'A|B'), '_', 60.0, lambda: {'A'}, single=True)
+dh3.cached(('board_rank', 'C|D'), '_', 60.0, lambda: {'C'}, single=True)
+n3 = len([k for k in dh3.cache if isinstance(k[0], tuple) and k[0][0] == 'board_rank'])
+ok('T79 single 同源只留最新一条', n3 == 1 and dh3.cache.get((('board_rank', 'C|D'), '_')) is not None)
 
+# --- T80 v0.36 auction_c 覆盖兜底：09:25/09:31 快照 open 口径覆盖早盘污染 ---
+ns = fresh()
+g = ns['g']
+g.spot['600001.XSHG'] = {'preclose_px': 10.0, 'open_px': 10.8}
+g.auction_c['600001.XSHG'] = ('2026-10-20', 0.0)   # 早盘 get_trend_data 未开盘值污染
+ns['_overwrite_auction_c'](['600001.XSHG'])
+ok('T80 覆盖为快照 open 口径(+8%)', abs(g.auction_c['600001.XSHG'][1] - 8.0) < 1e-9)
+# 缺失 open_px -> 不覆盖（保留污染前原值）
+ns0 = fresh()
+ns0['g'].spot['600001.XSHG'] = {'preclose_px': 10.0, 'open_px': 0.0}
+ns0['g'].auction_c['600001.XSHG'] = ('2026-10-20', 0.0)
+ns0['_overwrite_auction_c'](['600001.XSHG'])
+ok('T80 缺失 open 不覆盖(保留原值)', ns0['g'].auction_c['600001.XSHG'][1] == 0.0)
+
+# --- T82 v0.36b 新最强板块弹性套利：新爆发因子(开盘涨幅>5日均值)+持续跟踪+买入去重 ---
+ns = fresh()
+g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g.watch = ['600001.XSHG']; g.pool_static = []; g.selfwatch = []
+ns['_boards_of'] = lambda sec: ['B_A']
+ns['_board_strength_by_code'] = lambda b: 5.0 if b == 'B_A' else 1.0
+ns['_board_refresh_ttl'] = lambda: 3.0
+ns['BLS']['elastic_top_stable_frames'] = 1   # 聚焦触发逻辑，稳定窗口单独 T82j 测
+ns['_board_open_gain'] = lambda b: 5.0          # 开盘板块涨幅 5%
+ns['_board_5d_strength'] = lambda b: 1.0        # 5日均强度 1% -> 5>=1+2 触发
+ns['get_industry_stocks'] = lambda b: ['300001.SZ', '300002.SZ', '600001.XSHG'] if b == 'B_A' else []
+ns['_elastic_1m_surge'] = lambda sec: {'300001.XSHE': 3.5, '300002.XSHE': 3.0}.get(sec, 0.0)
+ns['_is_one_word_open'] = lambda sec: False
+ns['_block_sealed_buy'] = lambda sec: False
+ns['_mid_board_avoid'] = lambda sec: False
+ns['_save_state'] = lambda: None
+g.spot['300001.XSHE'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 12.0, 'open_px': 10.5, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+g.spot['300002.XSHE'] = {'last_px': 11.1, 'preclose_px': 10.0, 'up_px': 12.0, 'open_px': 10.2, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+top1 = ns['_new_top_board_scan']()
+ok('T82 新最强板块触发', top1 == 'B_A')
+ok('T82 同板块持续跟踪', ns['_new_top_board_scan']() == 'B_A')
+cands = ns['_elastic_top_candidates']('B_A')
+ok('T82 最主动优先且过滤已过10%', cands == ['300001.XSHE'])
+# 换榜：B_B 变强 -> 触发新最强（当日第2次触发）
+ns['_boards_of'] = lambda sec: ['B_B']
+ns['_board_strength_by_code'] = lambda b: 6.0 if b == 'B_B' else 1.0
+ok('T82 换榜新最强触发', ns['_new_top_board_scan']() == 'B_B')
+# T82g 新爆发因子门控：强度第一但 开盘涨幅未显著强于5日均值 -> 不触发（常态强势）
+ns3 = fresh()
+g3 = ns3['g']
+g3.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g3.watch = ['600001.XSHG']; g3.pool_static = []; g3.selfwatch = []
+ns3['_boards_of'] = lambda sec: ['B_A']
+ns3['_board_strength_by_code'] = lambda b: 5.0
+ns3['_board_refresh_ttl'] = lambda: 3.0
+ns3['BLS']['elastic_top_stable_frames'] = 1
+ns3['_board_open_gain'] = lambda b: 2.5
+ns3['_board_5d_strength'] = lambda b: 3.0        # 2.5 < 3+2 -> 非新爆发
+ok('T82g 开盘未显著强于5日均值不触发', ns3['_new_top_board_scan']() is None)
+# T82h 5日均值样本未够 -> 不误触发
+ns3['_board_5d_strength'] = lambda b: None
+ok('T82h 5日样本未够不触发', ns3['_new_top_board_scan']() is None)
+# T82i 当日触发上限 2 -> 不再触发
+ns4 = fresh()
+g4 = ns4['g']
+g4.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g4.watch = ['600001.XSHG']; g4.pool_static = []; g4.selfwatch = []
+ns4['_boards_of'] = lambda sec: ['B_A']
+ns4['_board_strength_by_code'] = lambda b: 5.0
+ns4['_board_refresh_ttl'] = lambda: 3.0
+ns4['BLS']['elastic_top_stable_frames'] = 1
+ns4['_board_open_gain'] = lambda b: 5.0
+ns4['_board_5d_strength'] = lambda b: 1.0
+g4.elastic_top = {'day': '2026-10-16', 'top': 'B_X', 'ts': 0.0, 'tracked': {'B_X', 'B_Y'}, 'trig': 2, 'done': False}
+ok('T82i 当日触发达上限不触发', ns4['_new_top_board_scan']() is None)
+# 完整下单路径：触发 + 最主动 20cm 10% 前买入；买入后本轮跟踪结束
+ns2 = fresh()
+ns2['BLS']['DO_ORDER'] = True     # 捕获 place_order 真实下单路径
+g2 = ns2['g']
+g2.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g2.watch = ['600001.XSHG']; g2.pool_static = []; g2.selfwatch = []
+ns2['_boards_of'] = lambda sec: ['B_A']
+ns2['_board_strength_by_code'] = lambda b: 5.0
+ns2['_board_refresh_ttl'] = lambda: 3.0
+ns2['BLS']['elastic_top_stable_frames'] = 1
+ns2['_board_open_gain'] = lambda b: 5.0
+ns2['_board_5d_strength'] = lambda b: 1.0
+ns2['get_industry_stocks'] = lambda b: ['300001.SZ']
+ns2['_elastic_1m_surge'] = lambda sec: 3.5
+ns2['_is_one_word_open'] = lambda sec: False
+ns2['_block_sealed_buy'] = lambda sec: False
+ns2['_mid_board_avoid'] = lambda sec: False
+ns2['_order_limit'] = lambda sec, side, mode: 11.0
+ns2['_save_state'] = lambda: None
+g2.spot['300001.XSHE'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 12.0, 'open_px': 10.5, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+g2.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+ns2['_try_elastic_top_buy'](ns2['_ctx'])
+_calls = ns2['_RECC']['calls']
+ok('T82 10%前买入最主动20cm', len(_calls) == 1 and _calls[0]['sec'] == '300001.XSHE' and (_calls[0].get('limit_price') or 0) > 0 and '300001.XSHE' in ns2['g'].daily['bought'])
+# 第二帧：抬高每日上限排除 daily_max_buy 掩盖，验证 买入后本轮跟踪结束（done）不重买
+ns2['BLS']['daily_max_buy'] = 5
+ns2['_try_elastic_top_buy'](ns2['_ctx'])
+ok('T82 买入后本轮跟踪结束不重买', len(ns2['_RECC']['calls']) == 1)
+
+
+# T82j 稳定窗口：默认 3 帧连续第一才触发；易主需连续 3 帧（防单帧抖动打断）
+ns6 = fresh()
+g6 = ns6['g']
+g6.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g6.watch = ['600001.XSHG']; g6.pool_static = []; g6.selfwatch = []
+ns6['_boards_of'] = lambda sec: ['B_A']
+ns6['_board_strength_by_code'] = lambda b: 5.0 if b == 'B_A' else 1.0
+ns6['_board_refresh_ttl'] = lambda: 3.0
+ns6['_board_open_gain'] = lambda b: 5.0
+ns6['_board_5d_strength'] = lambda b: 1.0
+ok('T82j 稳定窗口第1帧不触发', ns6['_new_top_board_scan']() is None)
+ok('T82j 稳定窗口第2帧不触发', ns6['_new_top_board_scan']() is None)
+ok('T82j 稳定窗口第3帧触发', ns6['_new_top_board_scan']() == 'B_A')
+# 易主：单帧 B_B 抖动不打断旧板块跟踪
+ns6['_boards_of'] = lambda sec: ['B_B']
+ns6['_board_strength_by_code'] = lambda b: 6.0 if b == 'B_B' else 1.0
+ok('T82j 易主第1帧仍跟踪旧板块', ns6['_new_top_board_scan']() == 'B_A')
+ok('T82j 易主第2帧仍跟踪旧板块', ns6['_new_top_board_scan']() == 'B_A')
+ok('T82j 易主第3帧确认', ns6['_new_top_board_scan']() == 'B_B')
+# T82k 领先幅度：top1-top2 < 0.5 不确认最强
+ns7 = fresh()
+g7 = ns7['g']
+g7.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g7.watch = ['600001.XSHG']; g7.pool_static = []; g7.selfwatch = []
+ns7['_boards_of'] = lambda sec: ['B_A', 'B_B']
+ns7['_board_strength_by_code'] = lambda b: 5.0 if b == 'B_A' else 4.6   # 领先 0.4 < 0.5
+ns7['_board_refresh_ttl'] = lambda: 3.0
+ns7['_board_open_gain'] = lambda b: 5.0
+ns7['_board_5d_strength'] = lambda b: 1.0
+ok('T82k 领先不足不触发', ns7['_new_top_board_scan']() is None)
+ns7['_boards_of'] = lambda sec: ['B_A', 'B_C']
+ns7['_board_strength_by_code'] = lambda b: 5.0 if b == 'B_A' else 4.4   # 领先 0.6 >= 0.5
+ok('T82k 领先0.5以上第1帧不触发', ns7['_new_top_board_scan']() is None)
+ok('T82k 领先0.5以上第2帧不触发', ns7['_new_top_board_scan']() is None)
+ok('T82k 领先0.5以上第3帧触发', ns7['_new_top_board_scan']() == 'B_A')
+# T82l 板块口径探针：打印全类别 + HY/GN 返回成员数（验证概念板块能否被行业接口消费）
+ns8 = fresh()
+g8 = ns8['g']
+g8.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+ns8['get_stock_blocks'] = lambda sec: {'HY': [['710200.XBHS', '计算机应用']], 'GN': [['003800.XBHS', '人工智能']], 'DY': [['DY1172.XBHS', '浙江板块']]}
+ns8['get_industry_stocks'] = lambda code: ['600001.XSHG', '600002.XSHG'] if str(code).startswith('710') else []
+pr = ns8['_board_probe']()
+ok('T82l 探针每日一次', ns8['_board_probe']() is pr)
+ok('T82l 探针HY返回成员>0', pr and pr.get('600570.XSHG', {}).get('members', {}).get('HY:710200.XBHS', -1) == 2)
+ok('T82l 探针GN返回0', pr and pr.get('600570.XSHG', {}).get('members', {}).get('GN:003800.XBHS', -1) == 0)
+
+
+# T83 v0.36d 板块映射文件加载（Step1：生成->上传->云端 [boards] loaded 链路）
+ns9 = fresh()
+g9 = ns9['g']
+g9.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+with io.open(os.path.join(ns9['_TMP'], 'boards_latest.csv'), 'wt', encoding='utf-8') as f:
+    f.write('board_name,board_type,member_code\n人工智能,concept,600001.XSHG\n人工智能,concept,600002.XSHG\n计算机应用,industry,600003.XSHG\n')
+n9 = ns9['_load_boards']()
+ok('T83 板块文件加载', n9 == 2 and g9.boards.get('人工智能') == ['600001.XSHG', '600002.XSHG'])
+ok('T83 board_type 记录', g9.board_type.get('人工智能') == 'concept')
+ok('T83 stock_boards 反索引', g9.stock_boards.get('600001.XSHG') == ['人工智能'])
+ns10 = fresh()
+ok('T83 缺文件返回0不崩', ns10['_load_boards']() == 0 and ns10['g'].boards == {})
+
+
+# --- T84 v0.36e 概念板块口径：文件加载后只消费 concept + 合并快照强度 ---
+ns = fresh()
+g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g.boards = {'人工智能': ['600001.XSHG', '600002.XSHG'], '计算机应用': ['600003.XSHG']}
+g.board_type = {'人工智能': 'concept', '计算机应用': 'industry'}
+g.stock_boards = {'600001.XSHG': ['人工智能', '计算机应用'],
+                  '600002.XSHG': ['人工智能'], '600003.XSHG': ['计算机应用']}
+ok('T84 概念过滤只返concept', ns['_concept_boards_of']('600001.XSHG') == ['人工智能'])
+ok('T84 成员走文件', ns['_board_members_file']('人工智能', 10) == ['600001.XSHG', '600002.XSHG'])
+ok('T84 文件已加载无该板块返空', ns['_board_members_file']('B_API', 10) == [])
+ns['get_snapshot'] = lambda secs: {c: {'preclose_px': 10.0, 'last_px': 10.2} for c in secs}
+ok('T84 概念强度读合并快照', abs(ns['_concept_board_strength']('人工智能') - 2.0) < 1e-6)
+_t84r = ns['_concept_board_rank_top1'](['600001.XSHG'])
+ok('T84 排名入口概念口径', _t84r[0] == '人工智能' and abs(_t84r[1] - 2.0) < 1e-6)
+
+# --- T85 v0.36e 合并快照：一帧内多板块强度仅 1 次批量快照 spend ---
+ns5 = fresh()
+g5 = ns5['g']
+g5.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+g5.boards = {'概念A': ['600001.XSHG', '600002.XSHG'], '概念B': ['600003.XSHG', '600004.XSHG']}
+g5.board_type = {'概念A': 'concept', '概念B': 'concept'}
+g5.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A'],
+                   '600003.XSHG': ['概念B'], '600004.XSHG': ['概念B']}
+def _sn5(secs):
+    out = {}
+    for c in secs:
+        num = int(str(c).split('.')[0][3:])
+        out[c] = {'preclose_px': 10.0, 'last_px': 10.0 + num * 0.1}
+    return out
+ns5['get_snapshot'] = lambda secs: _sn5(secs)
+r1 = ns5['_compute_concept_board_top1_lead'](['概念A', '概念B'])
+ok('T85 概念top1判定', r1[0] == '概念B' and abs(r1[1] - 2.0) < 1e-6)
+r2 = ns5['_compute_concept_board_top1_lead'](['概念A', '概念B'])
+ok('T85 同帧复用同结果', r2[0] == '概念B' and abs(r2[1] - 2.0) < 1e-6)
+ok('T85 一帧多板块仅1次批量快照spend', ns5['_get_ds']().frame['used'].get('board') == 1)
+
+# --- T86 v0.36e 两段式候选：快照粗排后只对前 elastic_top_surge_top_n 算 1m surge ---
+ns6 = fresh()
+g6 = ns6['g']
+g6.boards = {'概念A': ['300001.XSHE', '300002.XSHE', '300003.XSHE', '300004.XSHE',
+                             '300005.XSHE', '300006.XSHE', '300007.XSHE']}
+g6.board_type = {'概念A': 'concept'}
+g6.stock_boards = dict((c, ['概念A']) for c in g6.boards['概念A'])
+def _sn6(secs):
+    out = {}
+    for i, c in enumerate(secs):
+        out[c] = {'preclose_px': 10.0, 'last_px': 10.0 + (i + 1) * 0.1}
+    return out
+ns6['get_snapshot'] = lambda secs: _sn6(secs)
+_surge_calls = []
+ns6['_elastic_1m_surge'] = lambda sec: _surge_calls.append(sec) or 5.0
+ns6['BLS']['elastic_top_surge_top_n'] = 5
+cands = ns6['_calc_elastic_top_candidates']('概念A')
+ok('T86 surge只算5次', len(_surge_calls) == 5)
+ok('T86 surge取涨幅前5', set(_surge_calls) == {'300007.XSHE', '300006.XSHE', '300005.XSHE', '300004.XSHE', '300003.XSHE'})
+ok('T86 排序按surge降序', cands == ['300007.XSHE', '300006.XSHE', '300005.XSHE', '300004.XSHE', '300003.XSHE'])
+
+# --- T87 v0.36e 文件未加载回退 API：归属/成员/排名/强度全链 ---
+ns7 = fresh()
+ns7['_boards_of'] = lambda sec: ['B_A']
+ns7['_board_rank_top1'] = lambda secs: ('B_A', 1.0)
+ns7['_board_strength_by_code'] = lambda b: 5.0
+ns7['get_industry_stocks'] = lambda b: ['300001.SZ'] if b == 'B_API' else []
+ok('T87 未加载归属回退API', ns7['_concept_boards_of']('600001.XSHG') == ['B_A'])
+ok('T87 未加载成员回退API', ns7['_board_members_file']('B_API', 10) == ['300001.XSHE'])
+ok('T87 未加载排名回退API', ns7['_concept_board_rank_top1'](['600001.XSHG']) == ('B_A', 1.0))
+ok('T87 未加载强度回退API', ns7['_concept_board_strength']('B_API') == 5.0)
+
+
+# T88 v0.36f 兜底加固：actual=0.0 且 open 未回填(竞价数据缺失) -> 不误弃，保持等待；open 已回填平开(0.0%) 才是真未达标
+ns = fresh(); expbuyns(ns, '600074.XSHG')
+ns['_confirm_expected'] = lambda c: (ns['PM'], 0.0)
+ns['_auction_benchmark'] = lambda c: (5.0, True)
+ns['_two_1m_break'] = lambda c: False
+ns['_below_vwap'] = lambda c: False
+st, reason = ns['_exp_rt_status']('600074.XSHG')
+ok('T88 actual=0 & open missing -> await', st == ns['PM'])
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600074.XSHG')
+ok('T88 missing-open no fire', r is None and '600074.XSHG' not in ns['g'].exp_fired)
+ns2 = fresh(); expbuyns(ns2, '600075.XSHG')
+ns2['g'].spot['600075.XSHG']['open_px'] = 10.0   # 平开真实数据 -> 0.0% 确未达标
+ns2['_confirm_expected'] = lambda c: (ns2['PM'], 0.0)
+ns2['_auction_benchmark'] = lambda c: (5.0, True)
+ns2['_two_1m_break'] = lambda c: False
+ns2['_below_vwap'] = lambda c: False
+st2, reason2 = ns2['_exp_rt_status']('600075.XSHG')
+ok('T88 actual=0 & open present -> CS', st2 == ns2['CS'] and reason2.startswith('auction_not_met'))
 print('ALL DONE')
 

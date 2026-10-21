@@ -258,6 +258,14 @@ def main(argv=None) -> int:
     else:
         print("  [名单] 未找到 %s —— 跑 run_one_click_after_close / AXquant 产出涨停池后重试" % _zt_csv)
 
+    # 步骤3b：待上传目录瘦身/归档（定时上传有数据限制：上传前把日期文件只留最新 N 个，更早移入 archive/ 不上传）
+    try:
+        import maintain_bridge_dir as _mbd
+        _margv = ["--root", out] if a.out_dir else []
+        _mbd.main(_margv)
+    except Exception as _e:
+        print("[premarket] maintain_bridge_dir 失败(不影响预期/上传): %r" % _e)
+
     # 步骤4：上传勾选清单
     print("[premarket] 步骤4 上传勾选清单（T 日 09:20 前完成上传）")
     files = [

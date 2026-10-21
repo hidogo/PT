@@ -174,6 +174,7 @@
 
 - [ ] 09:25 日志 `[exp] 涨停池竞价三态合成 -> exceed=N meet=N miss=N`（合计≈涨停池只数）。
 - [ ] 09:25 竞价终态对超预期涨停池标的打 `[exp] <名>(code) 09:25竞价终态初步确认超预期 -> 观察`（与供方推荐同流程）。
+- [ ] 09:25 竞价数据缺失兜底加固（v0.36f）：逐只 actual=0.0% 且 open 未回填（快照/趋势均缺）不误弃、保持等待分时确认；open 已回填的真实平开(0.0%)才判 auction_not_met 放弃。
 - [ ] 绿开（miss）涨停池标的当日不买入；10:00 前分时确认超预期（两分钟上攻/一分钟冲涨停，不破 VWAP）才买。
 - [ ] 多候选竞争日买上限 1 时：供方推荐（文件顺序）优先，涨停池合成按「分最高、最早触板(最主动)」排序后置。
 - [ ] `[pool]` 的 expect_buy 计数包含涨停池合成条目（pool_static 同步并入）。
@@ -295,3 +296,48 @@
 - [ ] 粒度来源：新增 `_sec_age()`（距 09:30 已过秒数，`g.now_dt` 精确到秒；缺失回退 `_min_age()*60`）；`_min_age()` 语义不变（仍供窗口判断复用）；`initialize` 新增 `g.vwap_below_since={}`（跨重启持久化安全，picklable）。
 - [ ] 配置：`BLS['vwap_penalty_per_30s']=1.0`（原 `vwap_penalty_per_min` 更名）、`BLS['vwap_daily_limit']=12` 不变；约 09:36 即达日上限（原 09:42）。
 - [ ] selftest T78 系列通过（首次破=0 计时起点 / 30s→1 / 60s→2 / 5min→10 / 日上限 12 封顶 / 高于 VWAP=0 恢复归零 / 再破重新计时 30s→1、60s→2 / 缺 wavg_px=0）；全量 374 PASS / 0 FAIL；双编译通过。
+
+
+## 25. 帧节奏协调与弹性套利灵敏度（v0.36，2026-10-20）：预算快速期放大 + 高优先级配额 + 新最强板块跟踪
+- [ ] **帧预算快速期放大**：10:00 前（`_min_age()<=30`，与 `_board_refresh_ttl` 同口径）自动切 `_fast` 档：
+      `frame_board_limit` 6→24（v0.36e 合并快照：每帧一批=1次RPC，12→24 供多板块并集续算）、`frame_m1_limit` 20→30；gear 快速期无 `_fast` 键时动态 `min(len(_tick_targets),25)`（防 watch 池大 L2 封单采集缺）。
+- [ ] **m1 高优先级独立配额**：`_two_1m_break`（预期分时确认）走 `prio=1` → `frame_m1_prio_limit=15` 独立记账，不挤占弹性 surge 的普通 m1 配额（DataHub.spend 加 prio；frame_report 显示 `m1_p=..`）。
+- [ ] **`_tick_targets` 3s 帧缓存**：帧内多消费（snapshot/gear 动态限额）复用，避免重复 `get_positions()`。
+- [ ] **board_rank/board_top1 single 归一**：`cached(..., single=True)` 同前缀只留最新一条，防 token 碎片累积。
+- [ ] **`_auction_change` 覆盖兜底**：09:25/09:31 用批量快照 open 口径统一覆盖 `g.auction_c`（`_overwrite_auction_c`），消除早盘 get_trend_data 未开盘值污染（普通 watch/持仓股也覆盖）。
+- [ ] **新最强板块弹性套利（v0.36c 新爆发确认 + 稳定窗口 + 持续跟踪）**：候选范围=池∪`zt_lianban`（T-1 涨停名单），全板块归属排名（`_board_rank_top1` 用 `_boards_of`，返回 (top1, 领先幅度)）；
+      强度第一 且 连续 `elastic_top_stable_frames(3)` 帧保持第一 且 领先第二>=`elastic_top_lead_min(0.5%)`，且强度>=`elastic_top_min_strength(2%)`，
+      且 T日开盘板块涨幅 明显强于 自身平均5日强度（`open >= avg5 + elastic_top_breakout_min_boost(2%)`、`open >= elastic_top_breakout_min_open(1%)`）-> `[elastic] new_top_board <板> strength=..% open=..% avg5=..% lead=..% -> 启动弹性跟踪`；
+      当日每板块只触发一次（`g.elastic_top.tracked`）+ 当日触发上限 `elastic_top_max_trigger_per_day(2)`；触发后持续跟踪（易主/10:00/买入 三终止，买入置 `et['done']`），买入去重 `daily['bought']`；易主需连续 N 帧确认（防单帧抖动打断）；
+      板块内 20cm 弹性标的按最主动（1m surge 降序，同分按涨幅降序）排序，涨幅 <10%（`elastic_top_buy_before_pct`）买入，10:00 前窗口，只买最主动一只/次。
+- [ ] **板块口径探针**：`_board_probe()`（每日一次）打印 `[probe] <sec> blocks=<全类别> industry_members=<HY/GN 返回量>`——确认 PTrade 板块=恒生聚源 XBHS（HY/GN/DY/ZJHHY），
+      据探针结果定候选类别过滤（`get_industry_stocks` 官方只保证行业编码，概念(GN)支持度盘中验证，docs/06）。
+- [ ] **5日强度数据链路**：`_board_open_gain`（批量快照 open 口径，按日缓存一次）；`_board_5d_strength`（前20成员 1d 日线收盘涨跌均值，帧预算 `frame_day_limit` 8 / 快速期 12，按日缓存+分批续算、样本>=50% 才出值）。
+- [ ] 盘前/盘中核对：日志 `[probe] <sec> blocks=... industry_members=...`（每日一次）、`[elastic] new_top_board <板> strength=..% open=..% avg5=..% lead=..%`、`order sent .. elastic_top board=.. chg=..% 1m=..%`；`[budget]` 显示 `board=24/24`（10:00 前，v0.36e 合并快照每帧一批）/ `m1_p=15/15` / `day=12/12`。
+- [ ] selftest T79（预算/prio/single）/ T80（auction_c 覆盖）/ T82（新爆发触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+新 T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）+ T88（竞价数据缺失兜底加固）通过；全量 429 PASS / 0 FAIL；双编译通过。
+
+## 26. 板块映射文件链路（v0.36d/e，2026-10-21）：本地生成 -> 上传 -> 云端 [boards] loaded -> 概念口径消费
+- [ ] **本地生成器** `research/expectation/export_boards.py`：读 AXquant `data/ths_board_mapping.json`（同花顺行业/概念映射）-> 写
+      `data/ptrade_bridge/boards_latest.csv`（契约列：`board_name,board_type,member_code`，长格式；v0.36e 默认 `--types concept --rank-limit 5`（仅概念、每股前5板块），实际约 17k 行 / 570KB / 280 板块 / 5565 只，稳定指针与 zt_lianban_latest 同约定）。
+      **低频手动文件**：不参与每日收盘/盘前一键，仅板块成分变化时手动重跑；内容未变跳过覆盖（UNCHANGED），避免每日无谓重传。
+- [ ] **云端加载** `_load_boards()`（before_trading_start + 09:25 auction_pre_confirm 重读，幂等）：四层研究根读 `boards_latest.csv` ->
+      `g.boards{板块:[成员]}` + `g.stock_boards{股票:[板块]}` + `g.board_type{板块:类型}`；缺失不崩。
+      Step1 **只加载+日志**（`[boards] loaded <path> -> boards=N stocks=M`），不改消费逻辑（验收：约 280 板块 / 5565 只）。
+- [ ] **Step2（v0.36e）概念口径消费**：新最强板块链路（`_new_top_board_scan`）切 `_concept_board_rank_top1`/`_concept_board_strength`：
+      归属 `_concept_boards_of`（文件 `board_type=concept` 过滤）、成员 `_board_members_file`（文件 THS 名）；文件缺失/未加载自动回退 API（`_boards_of`/`get_industry_stocks`/`_board_strength_by_code`），旧链（打首板/弹性套利 board_rank_top3）不动。
+- [ ] **Step2 灵敏度（v0.36e a/b/d）**：
+      a) 合并快照 `_concept_snap_union`：帧内一次批量 `get_snapshot` 覆盖候选概念板块成员并集（`frame_snap_batch=100`/帧、预算 board，首轮分帧补齐、整轮后滚动刷新旧值顶住），多板块强度从每板块一次RPC -> 每帧一次RPC；
+      b) 候选两段式 `_calc_elastic_top_candidates`：批量快照按涨幅粗排（20cm 且 <10%）-> 只对前 `elastic_top_surge_top_n=5` 算 1m surge；`m1_surge_cache_ttl` 15s->30s；
+      d) 预算：`frame_board_limit_fast` 12->24。
+- [ ] 盘前/盘中核对：日志 `[boards] loaded ... boards=280 stocks=5565`、`[elastic] new_top_board <THS概念名> ...`；`[budget]` 显示 `board=..`（合并快照每帧 1 次批量）/ `m1_p=15/15` / `day=12/12`。
+- [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）通过；全量 429 PASS / 0 FAIL；双编译通过。
+
+## 27. 待上传目录瘦身（v0.36e，2026-10-21）：定时上传有数据限制，上传载荷恒定
+- [ ] **工具** `research/expectation/maintain_bridge_dir.py`：根目录三类 dated（`expectation_/zt_lianban_/sentiment_YYYY-MM-DD.csv`）
+      每类只保留最新 `--keep-dated 3`（默认）个，更早移入 `archive/`；`archive/` 内 dated 按文件名日期超过 `--archive-days 30` 天删除。
+      `--dry-run` 仅预览；永不触碰 `*_latest.csv`/`selfwatch.csv`/`boards_latest.csv` 及非 dated 文件（含 archive 内其它产物）。
+- [ ] **设计依据**：定时上传按文件夹上传且观察为**非递归**（archive/ 子目录不上传）；云端消费为 latest 优先 + 当日/上一交易日 dated 兜底，
+      保留 3 个覆盖全部兜底路径；archive/ 即使被上传，云端 `_research_roots` 也不读该子目录（文件名/路径均不匹配），双保险。
+- [ ] **挂接**：`run_one_click_after_close.py`（步骤6，收盘生成新文件后归档昨日更早）/ `run_one_click_premarket.py`（步骤3b，09:00 上传前再收敛一次）；
+      日志关键字 `[maintain] 完成: 根目录文件 N -> N 个, 体积 B -> B ... (k 个移入 archive/, m 个删除)`；幂等（无清理时 0 移动）。
+- [ ] 独立运行：`python maintain_bridge_dir.py --root <待上传根> --dry-run`（默认根 = PTRADE_BRIDGE_DIR）；功能自测（临时目录：移动/删除/保留/幂等）通过。

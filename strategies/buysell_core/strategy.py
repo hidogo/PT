@@ -103,7 +103,7 @@ BLS = {
     'elastic_arb_max_open_change': 12.0, # 开盘涨幅上限 %（防大幅高开兑现）
     'elastic_arb_cache_ttl': 60.0,     # 板块一字板统计缓存 s（按日重置）
     'gear_cache_ttl': 3.0,           # L2 十档盘口帧级缓存 s（打板/弹性共用，避免同帧多次 get_gear_price）
-    'm1_surge_cache_ttl': 15.0,      # 弹性 1m 大阳线缓存 s（窗口内避免重复拉取）
+    'm1_surge_cache_ttl': 30.0,      # 弹性 1m 大阳线缓存 s（v0.36e 30s： surge 只算前N后窗口内避免重复拉取）
     # v0.20 L2 逐笔首笔成交感知（打板首触灵敏度 <=3s）
     'firsttx_enabled': True,          # L2 逐笔涨停价成交 -> 首触确认 总开关
     'firsttx_near_px': 0.98,          # 现价>=涨停价*该比例 才拉逐笔（控 API 负担，避免全池逐笔轮询）
@@ -125,6 +125,31 @@ BLS = {
     'frame_board_limit': 6,           # 帧内板块强度组（get_industry_stocks+get_snapshot 各 1 次/组）
     'frame_blocks_limit': 10,         # 帧内 get_stock_blocks 总次数（300s 缓存后≈0）
     'frame_bcode_limit': 20,          # 帧内板块归属（3600s 缓存后≈0）
+    # v0.36 帧预算快速期放大 + 高优先级独立配额（docs/24 §25）：10:00 前与 3s 帧同频，防候选多时排名/确认滞后
+    'frame_board_limit_fast': 24,     # 10:00 前板块强度组限额（平时 6；v0.36e 合并快照每帧一批=1次 RPC，放大供多板块并集续算）
+    'frame_m1_limit_fast': 30,        # 10:00 前 1m K线限额（平时 20）
+    'frame_m1_prio_limit': 15,        # 预期分时确认 two_1m 独立配额（高优先级，不挤占弹性 surge）
+    'frame_blocks_limit_fast': 20,    # 10:00 前板块全列表归属预算（_boards_of 新最强板块用）
+    'frame_day_limit': 8,             # 帧内 1d 日线 get_price 次数（板块5日强度续算）
+    'frame_day_limit_fast': 12,       # 10:00 前日线预算放大
+    # v0.36 弹性套利：当日新最强板块第一时间跟踪（最主动弹性标的，10% 前买入）
+    'elastic_top_enabled': True,
+    'elastic_top_window_minute': 30,  # 新最强板块弹性跟踪窗口：10:00 前
+    'elastic_top_min_strength': 2.0,  # 新最强板块强度阈值 %（候选池内第一，>=2%）
+    'elastic_top_min_1m_surge': 2.0,  # 最主动弹性标的 1m 大阳线下限 %
+    'elastic_top_buy_before_pct': 10.0,  # 10% 涨幅前买入
+    'elastic_top_cache_ttl': 30.0,    # 板块内弹性候选排序缓存 s
+    'elastic_top_surge_top_n': 5,     # v0.36e 弹性候选 surge 只算前 N（批量快照按涨幅粗排后）
+    'elastic_top_member_cap': 20,     # v0.36e 概念板块强度/开盘涨幅成员样本上限（对齐旧 [:20]）
+    'frame_snap_batch': 100,          # v0.36e 帧内合并快照成员批上限（概念板块并集分帧续算）
+    # v0.36b 新爆发板块确认因子：T日开盘板块涨幅 明显强于 自身平均5日强度（docs/36 §9）
+    'elastic_top_breakout_min_open': 1.0,   # 开盘板块涨幅自身下限 %
+    'elastic_top_breakout_min_boost': 2.0,  # 开盘涨幅 - 5日均强度 的最小增强 %
+    'elastic_top_max_trigger_per_day': 2,   # 当日「新最强板块」触发（易主）上限
+    # v0.36c 稳定性：连续 N 帧保持第一才触发/易主；top1-top2 领先幅度门槛（防并列/紧咬）
+    'elastic_top_stable_frames': 3,     # top1 需连续 N 帧保持第一（3s 帧 ≈9s）
+    'elastic_top_lead_min': 0.5,        # top1 强度 - top2 强度 最小领先 %（防并列/紧咬误判）
+    'board_probe_enabled': True,        # 盘中探针：get_stock_blocks 全类别 + get_industry_stocks HY/GN 返回量
     # v0.26 tick 级卖出（事件驱动：3s 帧末响应炸板/封单大减/急卖；docs/33）
     'tick_sell_enabled': True,       # tick 级卖出总开关
     'break_sell_enabled': True,      # 炸板卖出：first_zt.break 首触发 -> 卖
@@ -204,38 +229,50 @@ class DataHub(object):
             self.frame['used'] = {}
             self.frame['over'] = {}
 
-    def spend(self, source, n=1):
-        # 帧预算记账：超限返回 False（不阻塞，调用方按优先级降级）；配额内返回 True
+    def spend(self, source, n=1, prio=0):
+        # 帧预算记账：超限返回 False（不阻塞，调用方按优先级降级）；配额内返回 True。
+        # prio=1 走独立高优先级配额（frame_<source>_prio_limit），高优先级消费不挤占普通配额
         self._maybe_reset()
-        limit = float(BLS.get('frame_%s_limit' % source, 1e9))
-        used = self.frame['used'].get(source, 0) + n
+        key = '%s_p' % source if prio else source
+        limit = _source_limit(source, prio)
+        used = self.frame['used'].get(key, 0) + n
         if used > limit:
-            self.frame['over'][source] = self.frame['over'].get(source, 0) + 1
+            self.frame['over'][key] = self.frame['over'].get(key, 0) + 1
             return False
-        self.frame['used'][source] = used
+        self.frame['used'][key] = used
         return True
 
     def frame_report(self):
         # 帧末统计：[budget] snapshot=1/2 tx=1/1 ... over:xxx=n
         parts = []
         for src, used in sorted(self.frame['used'].items()):
-            lim = BLS.get('frame_%s_limit' % src, 'inf')
+            base = src[:-2] if src.endswith('_p') else src
+            if src.endswith('_p'):
+                lim = BLS.get('frame_%s_prio_limit' % base, BLS.get('frame_%s_limit' % base, 'inf'))
+            else:
+                lim = BLS.get('frame_%s_limit' % base, 'inf')
             parts.append('%s=%d/%s' % (src, used, lim))
         over = self.frame.get('over') or {}
         if over:
             parts.append('over:%s' % ','.join('%s=%d' % (k, v) for k, v in sorted(over.items())))
         return ' '.join(parts)
 
-    def cached(self, source, sec, ttl, fetch, budget=None, stale_ok=False):
+    def cached(self, source, sec, ttl, fetch, budget=None, stale_ok=False, prio=0, single=False):
         # 统一缓存原语：命中直接返回；未命中调 fetch() 并缓存（含安全默认值）；
         # fetch 抛异常 -> 记 degraded、不缓存、返回 None（下一帧再试）；budget 超限按优先级降级：
-        #   stale_ok=True（P1）回退旧值；P0 不缓存下帧重试
+        #   stale_ok=True（P1）回退旧值；P0 不缓存下帧重试。
+        # prio=1 走高优先级独立配额；single=True 同源只保留最新一条（防 token 碎片累积）
         self._maybe_reset()
+        if single and isinstance(source, tuple):
+            prefix = source[0]
+            for k in [k for k in self.cache
+                      if isinstance(k[0], tuple) and k[0][0] == prefix and k != (source, sec)]:
+                del self.cache[k]
         key = (source, sec)
         hit = self.cache.get(key)
         if hit is not None and (time.time() - hit[0]) < ttl:
             return hit[1]
-        if budget and not self.spend(budget):
+        if budget and not self.spend(budget, prio=prio):
             if stale_ok and hit is not None:
                 return hit[1]
             return None
@@ -316,6 +353,30 @@ class DataHub(object):
         return g.spot
 
 
+def _source_limit(source, prio=0):
+    # 帧预算限额解析（v0.36）：10:00 前走 _fast 档（对齐 _board_refresh_ttl 快速期）；prio=1 走独立高优先级配额。
+    # gear 快速期无 _fast 键时动态按 tick 目标集数量（min(len(_tick_targets), 25)），防 watch 池大时 L2 封单采集缺。
+    if prio:
+        return float(BLS.get('frame_%s_prio_limit' % source,
+                             BLS.get('frame_%s_limit' % source, 1e9)))
+    fast = False
+    try:
+        if _min_age() <= int(BLS.get('board_rank_fast_until_minute', 30)):
+            fast = True
+    except Exception:
+        pass
+    if fast:
+        k = 'frame_%s_limit_fast' % source
+        if k in BLS and BLS[k]:
+            return float(BLS[k])
+        if source == 'gear':
+            try:
+                return float(min(len(_tick_targets()), 25))
+            except Exception:
+                pass
+    return float(BLS.get('frame_%s_limit' % source, 1e9))
+
+
 _DS = None  # DataHub module-level singleton (not stored in g; avoids engine g-pickle save errors)
 
 def _get_ds():
@@ -337,6 +398,7 @@ def initialize(context):
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
     g.first_board_fired = set()  # 首板打板当日去重（tick 首触 / 1m 兜底共用）
     g.elastic_cache = {'day': '', 'ts': 0.0, 'strong': {}}   # 弹性套利：板块一字板统计缓存（60s，按日重置）
+    g.elastic_top = {'day': '', 'top': '', 'ts': 0.0, 'tracked': set()}  # v0.36 新最强板块弹性跟踪状态
     g.gear_cache = {}     # sec -> (ts, get_gear_price)  L2 十档帧级缓存
     g.m1_surge_cache = {} # sec -> (ts, 1m大阳线%)        弹性窗口缓存
     g.now_dt = None     # 当前 bar 时间（context.blotter.current_dt，回测/交易均可用）
@@ -388,6 +450,10 @@ def before_trading_start(context, data):
     _load_expectation()
     _load_zt_lianban()
     _load_sentiment()
+    try:
+        _load_boards()   # v0.36d 板块映射文件（Step1 仅加载验证, docs/24 §26）
+    except Exception:
+        pass
     if BLS.get('sentiment_pos_cap_enabled', False):
         _s = getattr(g, 'sentiment', None)
         _sm = '无'
@@ -400,6 +466,10 @@ def before_trading_start(context, data):
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
     _sync_pool_static()
+    try:
+        _board_probe()   # v0.36c 板块口径探针（每日一次，验证 HY/GN 被 get_industry_stocks 消费）
+    except Exception:
+        pass
     if _restart_same_day:
         try:
             _mark_one_word_open()   # v0.31c 盘中重启：重标一字板（免5s门槛不丢）
@@ -441,6 +511,10 @@ def handle_data(context, data):
     try_core_buy(context)
     _try_first_board_buy_1m(context)
     _try_elastic_arb_buy(context)
+    try:
+        _try_elastic_top_buy(context)   # v0.36 新最强板块弹性套利（1m 兜底）
+    except Exception as e:
+        log.warn('elastic_top buy fail: %r' % e)
 
 
 # ================= 行情/工具 =================
@@ -707,6 +781,21 @@ def _volume_ratio(sec):
 AW="awaiting_auction"; PX="pending_exceed"; PM="pending_meet"; PS="pending_miss"
 CX="confirmed_exceed"; CM="confirmed_meet"; CS="confirmed_miss"
 
+def _overwrite_auction_c(secs):
+    # v0.36 竞价终态覆盖兜底：09:25/09:31 用批量快照 open 口径统一覆盖 auction_c，
+    # 消除早盘 get_trend_data 未开盘值污染（涨停池/自选合成已覆盖，普通 watch/持仓补上）
+    day = str(get_trading_day())
+    for code in secs:
+        try:
+            s = g.spot.get(code) or {}
+            pre = float(s.get('preclose_px') or 0.0)
+            op = float(s.get('open_px') or 0.0)
+            if pre > 0 and op > 0:
+                g.auction_c[code] = (day, (op / pre - 1.0) * 100.0)
+        except Exception:
+            continue
+
+
 def _auction_change(sec):
     # 竞价涨幅%（真口径）：get_trend_data 的 hq_px/昨收；失败回退 开盘_昨收（按交易日缓存）
     day = str(get_trading_day())
@@ -923,7 +1012,7 @@ def _two_1m_break(sec):
     # 两根 1m 站上 open*(1+fast_up_ratio)，且当前根仍站上（v0.25：3s 缓存 + 帧预算 m1）
     try:
         dh = _get_ds()
-        v = dh.cached('m1_break', sec, 3.0, lambda: _calc_two_1m_break(sec), budget='m1')
+        v = dh.cached('m1_break', sec, 3.0, lambda: _calc_two_1m_break(sec), budget='m1', prio=1)   # v0.36 高优先级独立配额
         return bool(v)
     except Exception:
         return False
@@ -1180,10 +1269,49 @@ def _board_rank_top3_set(secs):
         dh = _get_ds()
         token = '|'.join(boards)
         v = dh.cached(('board_rank', token), '_', _board_refresh_ttl(),
-                      lambda: _compute_board_rank(boards))
+                      lambda: _compute_board_rank(boards), single=True)   # v0.36 同源只留最新一条
         return v if v is not None else set()
     except Exception:
         return set()
+
+
+def _compute_board_top1_lead(boards):
+    # 候选板块中强度第一 及 对第二的领先幅度%（v0.36c：防并列/紧咬误判）
+    best = None; best_st = None; second_st = None
+    for b in boards:
+        try:
+            st = _board_strength_by_code(b)
+        except Exception:
+            continue
+        if best is None or st > best_st:
+            second_st = best_st
+            best, best_st = b, st
+        elif second_st is None or st > second_st:
+            second_st = st
+    if best_st is None:
+        return (None, 0.0)
+    return (best, best_st - (second_st if second_st is not None else 0.0))
+
+
+def _board_rank_top1(secs):
+    # 候选所属板块集合 -> (强度第一板块代码, 对第二的领先幅度%)；single 缓存防 token 碎片
+    # v0.36b：归属扩为全板块列表（_boards_of，300s 缓存）；v0.36c：返回领先幅度
+    secs = [s for s in (secs or []) if s]
+    if not secs:
+        return (None, 0.0)
+    boards = sorted({b for s in secs for b in _boards_of(s) if b})
+    if not boards:
+        return (None, 0.0)
+    try:
+        dh = _get_ds()
+        token = '|'.join(boards)
+        v = dh.cached(('board_top1', token), '_', _board_refresh_ttl(),
+                      lambda: _compute_board_top1_lead(boards), single=True)
+        if isinstance(v, tuple) and len(v) == 2:
+            return v
+        return (v, 0.0)
+    except Exception:
+        return (None, 0.0)
 
 
 def _board_rank_top3(sec, secs):
@@ -1694,6 +1822,49 @@ def _sentiment_paths():
     return cands
 
 
+def _board_file_paths():
+    # 板块映射文件（本地生成, THS 口径, docs/24 §26）：稳定指针 boards_latest.csv 优先, 四层研究根
+    return [r + "boards_latest.csv" for r in _research_roots()]
+
+
+def _load_boards():
+    # v0.36d 板块映射文件加载（Step1：仅加载+日志 [boards] loaded，不改消费逻辑）。
+    # 契约：board_name,board_type,member_code（长格式）-> g.boards{板块:[成员]} +
+    # g.stock_boards{股票:[板块]} + g.board_type{板块:类型}；缺失不崩。
+    g.boards = {}
+    g.stock_boards = {}
+    g.board_type = {}
+    for cand in _board_file_paths():
+        try:
+            with open(cand, 'rt', encoding='utf-8') as f:
+                rows = list(csv.reader(f))
+        except Exception:
+            continue
+        if len(rows) < 2:
+            continue
+        hdr = [x.strip().lower() for x in rows[0]]
+        try:
+            ni, nt, nc = hdr.index('board_name'), hdr.index('board_type'), hdr.index('member_code')
+        except ValueError:
+            continue
+        for r in rows[1:]:
+            if len(r) <= max(ni, nt, nc):
+                continue
+            nm = r[ni].strip(); typ = r[nt].strip(); code = (r[nc] or '').strip()
+            if not nm or not code:
+                continue
+            g.boards.setdefault(nm, []).append(code)
+            g.board_type[nm] = typ
+            g.stock_boards.setdefault(code, []).append(nm)
+        for nm in g.boards:
+            g.boards[nm] = list(dict.fromkeys(g.boards[nm]))
+        for code in g.stock_boards:
+            g.stock_boards[code] = list(dict.fromkeys(g.stock_boards[code]))
+        log.info('[boards] loaded %s -> boards=%d stocks=%d' % (cand, len(g.boards), len(g.stock_boards)))
+        return len(g.boards)
+    return 0
+
+
 def _load_sentiment():
     # 读 T 日情绪冰点基线（docs/40 契约）：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak
     g.sentiment = None
@@ -1882,9 +2053,11 @@ def _exp_rt_status(code):
         # 用户确认逻辑（T+1）：先竞价终态「初判」——竞价超预期才观察；未超预期则放弃（兜底，不再放任盘中买入）
         acon, actual = _confirm_expected(code)
         if acon != CX:
-            # 兜底：基准缺失(has_bm False) 或 真竞价缺失(actual~-100) 均不误弃，保持等待；确未达标 -> 放弃
+            # 兜底：基准缺失 / 真竞价缺失(actual~-100) / 竞价数据未就绪(actual=0且open未回填) 均不误弃，保持等待；确未达标 -> 放弃
             _bm, _has_bm = _auction_benchmark(code)
-            if not _has_bm or actual < -90.0:
+            _s0 = g.spot.get(code) or {}
+            _op0 = float(_s0.get('open_px') or 0.0)
+            if not _has_bm or actual < -90.0 or (actual == 0.0 and _op0 <= 0):
                 return PM, "await_intraday_confirm"
             return CS, "auction_not_met(%.1f%%)" % actual    # 竞价初判未超预期 -> 放弃
         if (_two_1m_break(code) or _limit_up_within_1m(code)) and not _below_vwap(code):
@@ -2380,6 +2553,460 @@ def _try_elastic_arb_buy(context):
         _save_state()
 
 
+def _board_probe():
+    # 板块口径探针（v0.36c，每日一次）：打印 get_stock_blocks 全类别样本，
+    # 并对 HY/GN 代码各调 get_industry_stocks 打印返回成员数（验证概念板块能否被行业接口消费）。
+    try:
+        if not BLS.get('board_probe_enabled', True):
+            return None
+        day = str(get_trading_day())
+        if getattr(g, 'board_probe_day', None) == day:
+            return getattr(g, 'board_probe', None)
+        g.board_probe_day = day
+        samp = [x for x in (_norm_sec(c) for c in (list(get_positions()) + BLS['universe'] + _pool())) if x][:2]
+        if not samp:
+            samp = ['600570.XSHG']
+        out = {}
+        for sec in samp:
+            try:
+                blocks = get_stock_blocks(sec) or {}
+            except Exception:
+                blocks = {}
+            rows = {}
+            for cat, lst in (blocks or {}).items():
+                rows[str(cat)] = [str(r[0]) if isinstance(r, list) and r else '' for r in (lst or [])[:3]]
+            codes = []
+            for cat in ('HY', 'GN', 'ZJHHY', 'DY'):
+                for r in (blocks or {}).get(cat, []) or []:
+                    if isinstance(r, list) and r and str(r[0]).strip():
+                        codes.append((cat, str(r[0]).strip()))
+                        break
+            counts = {}
+            for cat, code in codes[:2]:
+                try:
+                    counts['%s:%s' % (cat, code)] = len(get_industry_stocks(code) or [])
+                except Exception:
+                    counts['%s:%s' % (cat, code)] = -1
+            out[sec] = {'cats': rows, 'members': counts}
+            log.info('[probe] %s blocks=%s industry_members=%s' % (_sn(sec), rows, counts))
+        g.board_probe = out
+        return out
+    except Exception as e:
+        log.warn('board probe fail: %r' % e)
+        return None
+
+
+def _elastic_top_cand_src():
+    # 新最强板块候选范围：动态 watch ∪ 固定池 ∪ T-1 涨停名单（覆盖不在池内的新爆发板块）
+    out = list(_pool()) + list((getattr(g, 'zt_lianban', {}) or {}).keys())
+    return [x for x in (_norm_sec(c) for c in out) if x]
+
+
+def _board_open_gain(board_code):
+    # 板块成员开盘涨幅均值%（9:25 竞价终态后 open 固定 -> 按日缓存一次，预算 board）
+    try:
+        dh = _get_ds()
+        v = dh.cached('board_open', str(board_code), 86400.0,
+                      lambda: _fetch_board_open_gain(board_code), budget='board', stale_ok=True)
+        return float(v) if v is not None else 0.0
+    except Exception:
+        return 0.0
+
+
+def _fetch_board_open_gain(board_code):
+    # 板块代码/名称 -> 成员批量快照开盘涨幅均值%（最多20只；v0.36e 成员走 _board_members_file，文件 THS 概念口径，未加载回退 API）
+    gains = []
+    try:
+        mem = [x for x in (_norm_sec(m) for m in _board_members_file(board_code, 20)) if x]
+        sn = _get_snapshot_many(mem, len(mem)) or {}
+        for m in mem:
+            try:
+                d = sn.get(m) or {}
+                pre = float(d.get('preclose_px') or 0.0)
+                op = float(d.get('open_px') or 0.0)
+                if pre > 0 and op > 0:
+                    gains.append(op / pre - 1.0)
+            except Exception:
+                continue
+    except Exception:
+        gains = []
+    return (sum(gains) / len(gains)) * 100.0 if gains else 0.0
+
+
+# ================= v0.36e 概念板块口径（仅弹性套利链路：文件 THS 概念 -> 未加载回退 API） =================
+def _concept_boards_of(sec):
+    # 概念板块归属（v0.36e）：优先文件 g.stock_boards（board_type=concept，THS 概念口径）；
+    # 文件未加载回退 API _boards_of（best-effort）
+    try:
+        sb = getattr(g, 'stock_boards', None)
+        if sb:
+            bts = getattr(g, 'board_type', None) or {}
+            return [nm for nm in (sb.get(sec) or []) if str(bts.get(nm) or '') == 'concept']
+        return _boards_of(sec)
+    except Exception:
+        return _boards_of(sec)
+
+
+def _board_members_file(board, cap):
+    # 板块成员（v0.36e）：优先文件 g.boards（THS 板块名 -> 成员列表）；
+    # 文件未加载回退 API get_industry_stocks（best-effort）
+    try:
+        gb = getattr(g, 'boards', None)
+        if gb:
+            mem = gb.get(str(board)) or []
+            return [x for x in (_norm_sec(m) for m in mem[:cap]) if x]
+        return [x for x in (_norm_sec(m) for m in (get_industry_stocks(str(board)) or [])[:cap]) if x]
+    except Exception:
+        try:
+            return [x for x in (_norm_sec(m) for m in (get_industry_stocks(str(board)) or [])[:cap]) if x]
+        except Exception:
+            return []
+
+
+def _concept_snap_union(boards):
+    # 合并快照（v0.36e）：候选概念板块成员并集分帧批量拉取（frame_snap_batch 上限/帧，预算 board，
+    # 每帧一批=1 次批量 get_snapshot）；续算账本 g.csnap_led 按日+候选集 key 保留进度（同 _calc_board_5d 模式）：
+    # 首轮分帧补齐（覆盖率<0.5 前不判 top1），整轮完成后滚动刷新（不清空：旧值顶住逐批更新）。
+    # 返回 (snap, covered_ratio)；整轮完成后 ratio 始终=1.0（旧值顶住）。
+    dh = _get_ds()
+    try:
+        day = str(get_trading_day())
+    except Exception:
+        day = ''
+    key = '|'.join(sorted(str(b) for b in boards))
+    led = getattr(g, 'csnap_led', None)
+    if not led or led.get('day') != day or led.get('key') != key:
+        led = {'day': day, 'key': key, 'members': [], 'idx': 0, 'snap': {}, 'ts': 0.0, 'complete': False}
+        g.csnap_led = led
+    now = time.time()
+    if now - float(led.get('ts') or 0.0) < float(BLS.get('board_rank_ttl_fast', 3.0)):
+        return led['snap'], (1.0 if led.get('complete') else float(led.get('ratio') or 0.0))
+    if not led['members']:
+        seen = set()
+        for b in boards:
+            for m in _board_members_file(b, int(BLS.get('elastic_top_member_cap', 20))):
+                if m not in seen:
+                    seen.add(m); led['members'].append(m)
+    total = len(led['members'])
+    idx = int(led.get('idx') or 0)
+    if idx >= total:
+        idx = 0; led['idx'] = 0          # 整轮完成 -> 滚动刷新（不清空：旧值顶住，逐批更新）
+        led['complete'] = True
+    if dh.spend('board'):
+        cap = int(BLS.get('frame_snap_batch', 100))
+        batch = led['members'][idx:idx + cap]
+        try:
+            sn = _get_snapshot_many(batch, len(batch))
+            if isinstance(sn, dict):
+                led['snap'].update(sn)
+                led['idx'] = idx + len(batch)
+        except Exception:
+            pass
+        led['ts'] = now
+    ratio = (int(led.get('idx') or 0) / total) if total else 1.0
+    if led.get('complete'):
+        ratio = 1.0
+    led['ratio'] = ratio
+    return led['snap'], ratio
+
+
+def _concept_board_strength(board, snap=None):
+    # 概念板块强度（v0.36e）：文件已加载 -> 成员=_board_members_file、快照=同帧合并 snap/单板批量；
+    # 文件未加载 -> 回退 API _board_strength_by_code（预算/缓存同旧链）
+    try:
+        if not getattr(g, 'boards', None):
+            return _board_strength_by_code(board)
+    except Exception:
+        return _board_strength_by_code(board)
+    mem = _board_members_file(board, int(BLS.get('elastic_top_member_cap', 20)))
+    if not mem:
+        return 0.0
+    if not snap:
+        led = getattr(g, 'csnap_led', None)
+        if led and (time.time() - float(led.get('ts') or 0.0)) < float(BLS.get('board_rank_ttl_fast', 3.0)):
+            snap = led.get('snap') or {}
+        else:
+            snap = _get_snapshot_many(mem, len(mem)) or {}
+    chgs = []
+    for m in mem:
+        try:
+            d = snap.get(m) or {}
+            pre = float(d.get('preclose_px') or 0.0)
+            px = float(d.get('last_px') or 0.0)
+            if pre > 0 and px > 0:
+                chgs.append(px / pre - 1.0)
+        except Exception:
+            continue
+    return (sum(chgs) / len(chgs)) * 100.0 if chgs else 0.0
+
+
+def _compute_concept_board_top1_lead(boards):
+    # 概念板块（强度第一+领先幅度）：合并快照一次批量覆盖全候选；覆盖率>=0.5 才出 top1
+    if not boards:
+        return (None, 0.0)
+    snap, ratio = _concept_snap_union(boards)
+    if ratio < 0.5:
+        return (None, 0.0)
+    best = None; best_st = None; second_st = None
+    for b in boards:
+        try:
+            st = _concept_board_strength(b, snap=snap)
+        except Exception:
+            continue
+        if best is None or st > best_st:
+            second_st = best_st
+            best, best_st = b, st
+        elif second_st is None or st > second_st:
+            second_st = st
+    if best_st is None:
+        return (None, 0.0)
+    return (best, best_st - (second_st if second_st is not None else 0.0))
+
+
+def _concept_board_rank_top1(secs):
+    # 概念板块（强度第一+领先幅度）入口（v0.36e）：文件已加载 -> 概念口径合并快照；
+    # 未加载 -> 回退 API _board_rank_top1（兼容旧链/无文件环境）
+    try:
+        if not getattr(g, 'boards', None):
+            return _board_rank_top1(secs)
+    except Exception:
+        return _board_rank_top1(secs)
+    secs = [s for s in (secs or []) if s]
+    if not secs:
+        return (None, 0.0)
+    boards = sorted({b for s in secs for b in _concept_boards_of(s) if b})
+    if not boards:
+        return (None, 0.0)
+    try:
+        dh = _get_ds()
+        token = '|'.join(boards)
+        v = dh.cached(('concept_top1', token), '_', _board_refresh_ttl(),
+                      lambda: _compute_concept_board_top1_lead(boards), single=True)
+        if isinstance(v, tuple) and len(v) == 2:
+            return v
+        return (v, 0.0)
+    except Exception:
+        return (None, 0.0)
+
+
+def _board_5d_cache():
+    # 板块5日强度续算账本（按交易日重置；plain dict，可随 g 持久化）
+    if not getattr(g, 'board_5d', None):
+        g.board_5d = {'day': '', 'data': {}}
+    c = g.board_5d
+    day = str(get_trading_day())
+    if c.get('day') != day:
+        c['day'] = day
+        c['data'] = {}
+    return c
+
+
+def _calc_board_5d(board_code, rec):
+    # 续算板块成员近5日收盘涨跌均值：每只成员 1 次 1d get_price（帧预算 day 内，耗尽即停；
+    # rec 保留进度下帧续算；样本>=50% 才可信；v0.36e 成员走 _board_members_file）
+    dh = _get_ds()
+    try:
+        mem = [x for x in (_norm_sec(m) for m in _board_members_file(board_code, 20)) if x]
+    except Exception:
+        mem = []
+    rec = dict(rec or {})
+    total = len(mem)
+    rec['total'] = total
+    idx = int(rec.get('idx') or 0)
+    ssum = float(rec.get('sum') or 0.0)
+    cnt = int(rec.get('cnt') or 0)
+    for i in range(idx, total):
+        if not dh.spend('day'):
+            break
+        try:
+            df = get_price(mem[i], start_date=None, end_date=None, count=6, frequency='1d')
+            if df is not None and len(df) >= 6:
+                closes = [float(df['close'].iloc[j]) for j in range(len(df))]
+                chgs = [closes[j] / closes[j - 1] - 1.0 for j in range(1, 6) if closes[j - 1] > 0]
+                if chgs:
+                    ssum += sum(chgs) / len(chgs)
+                    cnt += 1
+        except Exception:
+            pass
+        idx = i + 1
+    rec['idx'] = idx
+    rec['sum'] = ssum
+    rec['cnt'] = cnt
+    rec['ratio'] = (cnt / total) if total else 1.0
+    rec['avg'] = (ssum / cnt) * 100.0 if cnt else 0.0
+    rec['finished'] = (total == 0) or (idx >= total)
+    return rec
+
+
+def _board_5d_strength(board_code):
+    # 板块成员近5日收盘涨跌均值%；样本>=50% 才出值（否则下帧续算返回 None 不误判）
+    try:
+        c = _board_5d_cache()
+        rec = c['data'].get(board_code)
+        if rec is None or not (rec.get('finished') or rec.get('ratio', 0.0) >= 0.5):
+            rec = _calc_board_5d(board_code, rec or {})
+            c['data'][board_code] = rec
+        if rec.get('finished') or rec.get('ratio', 0.0) >= 0.5:
+            return rec.get('avg')
+        return None
+    except Exception:
+        return None
+
+
+def _new_top_board_scan():
+    # v0.36c 当日「新最强板块」检测：候选范围（池+zt_lianban）所属板块中强度第一，
+    # 需连续 elastic_top_stable_frames 帧保持第一 且 领先第二 >= elastic_top_lead_min，
+    # 再通过「新爆发」因子（强度>=min_strength、T日开盘板块涨幅 显著强于 自身5日均值）。
+    # 触发后持续跟踪（易主/10:00/买入 为止）；易主同样需连续 N 帧确认（防单帧抖动打断）。
+    if not BLS.get('elastic_top_enabled', True):
+        return None
+    if _min_age() > int(BLS.get('elastic_top_window_minute', 30)):
+        return None
+    et = getattr(g, 'elastic_top', None) or {'day': '', 'top': '', 'ts': 0.0, 'tracked': set(), 'trig': 0, 'done': False}
+    g.elastic_top = et
+    day = str(get_trading_day())
+    if et.get('day') != day:
+        et.update(day=day, top='', ts=0.0, tracked=set(), trig=0, done=False)
+        et.pop('stab', None)
+    top, lead = _concept_board_rank_top1(_elastic_top_cand_src())   # v0.36e 概念口径（文件未加载回退 API）
+    if not top:
+        return None
+    n_need = int(BLS.get('elastic_top_stable_frames', 3))
+    lead_min = float(BLS.get('elastic_top_lead_min', 0.5))
+    if top == et.get('top'):
+        return None if et.get('done') else top          # 持续跟踪（买入后结束）
+    stab = et.setdefault('stab', {'code': '', 'n': 0})
+    if lead < lead_min:
+        stab.update(code='', n=0)                       # 无明确最强 -> 稳定性计数清零
+    elif stab.get('code') != top:
+        stab.update(code=top, n=1)
+    else:
+        stab['n'] = stab.get('n', 0) + 1
+    if stab['n'] < n_need:
+        if et.get('top') and not et.get('done'):
+            return et['top']                            # 易主未确认：旧板块跟踪不中断
+        return None
+    st = _concept_board_strength(top)   # v0.36e 概念板块强度（合并快照）
+    if st < float(BLS.get('elastic_top_min_strength', 2.0)):
+        return None
+    open_g = _board_open_gain(top)
+    avg5 = _board_5d_strength(top)
+    if avg5 is None:
+        return None                                     # 5日样本未够，下帧续算
+    if open_g < float(BLS.get('elastic_top_breakout_min_open', 1.0)):
+        return None                                     # 开盘板块涨幅自身下限
+    if open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
+        return None                                     # 未显著强于自身5日 -> 非新爆发
+    if et.get('trig', 0) >= int(BLS.get('elastic_top_max_trigger_per_day', 2)):
+        return None
+    et['top'] = top; et['ts'] = time.time(); et['done'] = False
+    if top in (et.get('tracked') or set()):
+        return None
+    et['tracked'].add(top); et['trig'] = et.get('trig', 0) + 1
+    log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%.1f%% lead=%.1f%% -> 启动弹性跟踪(最主动20cm,10%%前买)' % (
+        top, st, open_g, avg5, lead))
+    return top
+
+
+def _calc_elastic_top_candidates(top):
+    # 最强板块内 20cm 弹性标的（v0.36e 两段）：批量快照按涨幅粗排（过滤非20cm/已过 10%/不涨），
+    # 只对前 elastic_top_surge_top_n 只算 1m surge（砍掉全成员串行拉取），按最主动（surge 降序）排序
+    out = []
+    try:
+        mem = [x for x in (_norm_sec(m) for m in _board_members_file(top, 30)) if x]
+        sn = _get_snapshot_many(mem, len(mem)) or {}
+        pre_rank = []
+        for m in mem:
+            if not _is_elastic_20cm(m):
+                continue
+            d = sn.get(m) or g.spot.get(m) or {}
+            pre = float(d.get('preclose_px') or 0.0)
+            px = float(d.get('last_px') or 0.0)
+            if pre <= 0 or px <= 0:
+                continue
+            chg = (px / pre - 1.0) * 100.0
+            if chg <= 0 or chg >= float(BLS.get('elastic_top_buy_before_pct', 10.0)):
+                continue
+            pre_rank.append((chg, m))
+        pre_rank.sort(key=lambda t: -t[0])
+        for chg, m in pre_rank[:int(BLS.get('elastic_top_surge_top_n', 5))]:
+            surge = _elastic_1m_surge(m)
+            out.append((surge, chg, m))
+    except Exception:
+        return []
+    out.sort(key=lambda t: (-t[0], -t[1]))
+    return [m for _, _, m in out]
+
+
+def _elastic_top_candidates(top):
+    # 最强板块弹性候选排序缓存（elastic_top_cache_ttl=30s）
+    try:
+        dh = _get_ds()
+        v = dh.cached(('elastic_top', str(top)), '_', float(BLS.get('elastic_top_cache_ttl', 30.0)),
+                      lambda: _calc_elastic_top_candidates(top))
+        return list(v) if v else []
+    except Exception:
+        return []
+
+
+def _try_elastic_top_buy(context):
+    # v0.36 新最强板块弹性套利：第一时间跟踪最主动弹性标的，10% 涨幅前买入
+    if not BLS.get('elastic_top_enabled', True):
+        return
+    if _min_age() > int(BLS.get('elastic_top_window_minute', 30)):
+        return                       # 10:00 前
+    if len(g.daily['bought']) >= BLS['daily_max_buy']:
+        return
+    top = _new_top_board_scan()
+    if not top:
+        return
+    positions = context.portfolio.positions
+    for sec in _elastic_top_candidates(top):
+        if sec in positions:
+            continue
+        if sec in g.daily['bought']:
+            continue                 # 当日已买（含其它策略）不再评估
+        if len(g.daily['bought']) >= BLS['daily_max_buy']:
+            return
+        if not trade_open(sec):
+            continue
+        if _is_one_word_open(sec):
+            continue                 # 不追一字
+        if _block_sealed_buy(sec):
+            continue                 # 封死不排队
+        if _mid_board_avoid(sec):
+            continue
+        s = g.spot.get(sec) or {}
+        pre = float(s.get('preclose_px') or 0.0)
+        if pre <= 0:
+            continue
+        px = last_px(sec)
+        if not px or px <= 0:
+            continue
+        chg = (px / pre - 1.0) * 100.0
+        if chg <= 0 or chg >= float(BLS.get('elastic_top_buy_before_pct', 10.0)):
+            continue                 # 10% 前买入
+        op = float(s.get('open_px') or 0.0)
+        open_chg = ((op / pre - 1.0) * 100.0) if op > 0 else _auction_change(sec)
+        if open_chg > float(BLS.get('elastic_arb_max_open_change', 12.0)):
+            continue                 # 防大幅高开兑现
+        surge = _elastic_1m_surge(sec)
+        if surge < float(BLS.get('elastic_top_min_1m_surge', 2.0)):
+            continue                 # 最主动要求
+        now = time.time()
+        if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
+            continue
+        limit = _order_limit(sec, 'buy', 'chase')
+        place_order(context, sec, 'buy', note='elastic_top board=%s px=%.2f limit=%.2f chg=%.1f%% 1m=%.1f%%' % (
+            top, px, limit or px, chg, surge), mode='chase')
+        g.daily['bought'].append(sec); g.buy_log[sec] = now
+        et = getattr(g, 'elastic_top', None)
+        if et:
+            et['done'] = True        # 本轮跟踪结束（易主/10:00/买入 三终止条件）
+        _save_state()
+        return                       # 只买最主动一只（一次一单）
+
+
 def _realtime_weak(sec):
     # 云端实时走弱（廉价版，v0.33）：竞价绿开(auction_change<0) 或 破 VWAP。
     # 不调用 _eval_intraday/_two_1m_break（避免 tick 3s 帧吃 1m get_price 帧预算）；P4 仍用完整分时三态。
@@ -2732,12 +3359,22 @@ def _l2_probe(context):
 
 def _tick_targets():
     # tick 采集目标：持仓 + universe 恒有 + watch 前 N（控 3s 帧负担，避免丢帧）
+    # v0.36 帧缓存：同一 3s 帧内多消费（snapshot/gear 限额动态化）复用，避免重复 get_positions
+    tok = int(time.time() / 3.0)
+    _c = getattr(g, 'tick_targets_cache', None) or {}
+    if _c.get('tok') == tok:
+        return _c['secs']
     pos = list(get_positions())
     uni = [x for x in BLS['universe'] if x not in pos]
     static = [x for x in (g.pool_static or []) if x not in pos and x not in uni]
     cap = int(BLS.get('tick_watch_cap', 15))
     watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static][:cap]
-    return pos + uni + static + watch
+    out = pos + uni + static + watch
+    try:
+        g.tick_targets_cache = {'tok': tok, 'secs': out}
+    except Exception:
+        pass
+    return out
 
 
 def _snap_vol(s):
@@ -2908,6 +3545,11 @@ def tick_data(context, data):
         _try_elastic_arb_buy(context)
     except Exception as e:
         log.warn('elastic_arb buy fail: %r' % e)
+    # v0.36 新最强板块弹性套利：第一时间跟踪（最主动弹性标的，10% 前买入）
+    try:
+        _try_elastic_top_buy(context)
+    except Exception as e:
+        log.warn('elastic_top buy fail: %r' % e)
     # v0.25 Phase 3：帧末拉取预算统计
     if BLS.get('budget_log_enabled', True):
         try:
@@ -2925,10 +3567,12 @@ def auction_pre_confirm(context):
         g.exp_day = day
     _load_expectation()          # 幂等重读：命中 9:20 上传的当日文件
     _load_zt_lianban()
+    _load_boards()               # v0.36d 板块映射文件 09:25 重读（命中 9:20 上传）
     _synth_pool_expect()         # v0.27：涨停池竞价三态初步确认（超预期->观察）
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
     _synth_selfwatch_expect()    # v0.35e：自选股竞价三态（超预期->观察）
+    _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
     _mark_one_word_open()
     for code in list(get_positions()):
@@ -2960,6 +3604,7 @@ def after_open_probe(context):
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
+    _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
     g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set()
     _mark_one_word_open()

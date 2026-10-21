@@ -120,3 +120,25 @@
 - 与弹性/打板共用数据不冲突：逐笔为新增消费源（get_individual_transaction），
   近涨停(>=0.98*涨停)且未触发才拉取，帧负担可控；盘口仍走 `_gear` 帧级缓存。
 - 详见 docs/30 第 6 节。
+
+
+## 9. v0.36 新最强板块弹性套利（当日轮动第一时间跟踪）
+
+- **触发（v0.36c 新爆发确认 + 稳定窗口 + 持续跟踪）**：候选范围 = 池(自选/预期/watch) ∪ `zt_lianban`（T-1 涨停名单），
+  全板块归属排名（v0.36e：文件已加载 -> `_concept_board_rank_top1` 概念口径（`board_type=concept` 过滤）+ 合并快照；未加载 -> 回退 `_board_rank_top1`/`_boards_of` API；返回 (top1, 对第二领先幅度%)，10:00 前 3s 刷新）；
+  **连续 `elastic_top_stable_frames(3)` 帧保持第一 且 领先第二 >= `elastic_top_lead_min(0.5%)`**，
+  且强度 >= `elastic_top_min_strength(2%)`，**且 T日开盘板块涨幅 明显强于 自身平均5日强度**（`open >= avg5 + elastic_top_breakout_min_boost(2%)` 且 `open >= elastic_top_breakout_min_open(1%)`）-> 触发
+  `[elastic] new_top_board <板块> strength=..% open=..% avg5=..% lead=..% -> 启动弹性跟踪(最主动20cm,10%前买)`。
+  `g.elastic_top.tracked` 当日去重（每板块只触发一次）+ 当日触发（易主）上限 `elastic_top_max_trigger_per_day(2)`；
+  触发后持续跟踪（易主/10:00/买入 三终止条件，买入标记 `et['done']`）；**易主同样需连续 N 帧确认（防单帧抖动打断，未确认期间旧板块跟踪不中断）**。
+- **候选**：`_elastic_top_candidates(board)` = 板块内 20cm（300/301/688/689）标的（v0.36e 两段式：批量快照按涨幅粗排过滤 20cm/<10%，只对前 `elastic_top_surge_top_n(5)` 算 1m surge，砍掉全成员串行拉取），按最主动排序（1m surge 降序、同分按涨幅降序），
+  过滤已过 10% 的（`elastic_top_buy_before_pct`）；30s 缓存（`elastic_top_cache_ttl`）。
+- **买入**：`_try_elastic_top_buy`（tick 3s 帧末 + 1m 兜底，10:00 前窗口）：非一字/非封死/非中位、open 涨幅<=12%、1m surge>=`elastic_top_min_1m_surge(2%)`、
+  当前涨幅 <10% 且 >0 -> 追高 `_order_limit(sec,'buy','chase')`（弹性 10% 上限 `_max_elastic_buy_price`）下单，一次一单只买最主动一只。
+- **节奏联动**：10:00 前板块排名/强度 3s 同频（预算快速期 `frame_board_limit=24`，v0.36e 合并快照每帧一批=1次RPC）、m1 高优先级独立配额（`frame_m1_prio_limit=15`）保证分时确认不挤占；
+  与「板块一字>=2 情绪爆发」（`_elastic_yizi_scan`）并存——一字爆发抓强板块普涨，新最强板块抓轮动首动，互为补充。
+- **数据源（v0.36b/36e）**：成员 = `_board_members_file`（文件 THS 概念名，未加载回退 API）；T日开盘板块涨幅 = 前20成员批量快照 `open/preclose` 均值（9:25 竞价终态后 open 固定 -> 按日缓存一次）；
+  平均5日强度 = 前20成员近5日 `1d` 日线收盘涨跌均值（`frame_day_limit` 8 / 快速期 12，按日缓存 + 帧内分批续算，样本>=50% 才出值，`[budget]` 显示 `day=..`）。
+- **板块口径探针（v0.36c）**：`_board_probe()`（每日一次，before_trading_start）打印 `[probe] <sec> blocks=<get_stock_blocks 全类别> industry_members=<HY/GN get_industry_stocks 返回量>`；
+  PTrade 板块为恒生聚源 XBHS（HY 行业 / GN 概念 / DY 地域 / ZJHHY 证监会 / HGT 港通），`get_industry_stocks` 官方只保证行业编码——探针用于确认概念(GN)代码能否被消费，据此定候选类别过滤（docs/06）。
+- 自测 T82（触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+ T79（预算/prio/single）+ T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）通过；全量 426 PASS / 0 FAIL。
