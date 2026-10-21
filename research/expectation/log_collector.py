@@ -12,6 +12,7 @@
 产出:
   data/logs/log_<date>.json       结构化日志（l2/seal/may_order/score/expect/errors）
   data/logs/log_<date>.seal.csv   [seal] 行汇总（供 threshold 回归）
+  data/logs/log_<date>.signal.csv [signal] 行汇总（买卖信号->回报对账）
 """
 from __future__ import annotations
 
@@ -51,6 +52,8 @@ def _classify(body):
         return "firstzt"
     if b.startswith("[seal] "):
         return "seal"
+    if b.startswith("[signal] "):
+        return "signal"
     if b.startswith("[may-order] "):
         return "may_order"
     if b.startswith("[exp-order] ") or b.startswith("[exp] "):
@@ -83,7 +86,7 @@ def parse_text(text):
 
 def _agg(entries):
     dates = {}
-    keys = ["l2", "pool", "firstzt", "seal", "may_order", "exp_order", "score", "market_scan", "expect", "error", "init"]
+    keys = ["l2", "pool", "firstzt", "seal", "signal", "may_order", "exp_order", "score", "market_scan", "expect", "error", "init"]
     for e in entries:
         d = e["time"][:10]
         if d not in dates:
@@ -113,6 +116,14 @@ def ingest(file, date):
             w.writerow(["time", "sec", "seal", "base", "ratio", "bids", "bid_fail", "state"])
             for s in seals:
                 w.writerow([s["time"]] + _parse_seal(s["body"]))
+    sigs = agg.get(day, {}).get("signal", [])
+    if sigs:
+        sfp = os.path.join(LOGS_DIR, "log_%s.signal.csv" % day)
+        with open(sfp, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["time", "sec", "side", "qty", "limit", "mode", "note", "score", "ent", "status"])
+            for s in sigs:
+                w.writerow([s["time"]] + _parse_signal(s["body"]))
     return fp
 
 
@@ -128,6 +139,15 @@ def _parse_seal(body):
     if " -> " in body:
         state = body.split("->")[-1].strip().split()[0]
     return [code, f("seal"), f("base"), f("ratio"), f("bids"), f("bid_fail"), state]
+
+
+def _parse_signal(body):
+    m = re.search(r"(\S+\.(?:XSHG|XSHE|XBJ))", body)
+    code = m.group(1) if m else ""
+    def gs(key):
+        mm = re.search(key + r"=([^ ]+)", body)
+        return mm.group(1) if mm else ""
+    return [code, gs("side"), gs("qty"), gs("limit"), gs("mode"), gs("note"), gs("score"), gs("ent"), gs("status")]
 
 
 def summary(date):

@@ -2382,5 +2382,48 @@ e3 = g.exp_file.get('600003.XSHG') or {}
 ok('T89 盘中重启重建涨停池三态', e1.get('_src') == 'zt_pool' and e1.get('expected_status') == 'pending_exceed' and e2.get('expected_status') == 'pending_miss')
 ok('T89 盘中重启重建自选三态', e3.get('_src') == 'selfwatch' and e3.get('expected_status') == 'pending_meet')
 ok('T89 重启保留当日已买', g.daily['bought'] == ['600001.XSHG'])
+
+# --- T90 v0.36i 统一买卖信号结构化 [signal] 行 ---
+import re as _re
+ns = fresh(); ns['score_now'] = lambda sec: 66.5
+_logs = []
+class _SigLog:
+    def info(self, *a): _logs.append((str(a[0]) % a[1:]) if len(a) > 1 else str(a[0]))
+    def warn(self, *a): pass
+    def error(self, *a): pass
+ns['log'] = _SigLog()
+ns['_signal']('600001.XSHG', 'BUY', 200, 15.58, 'board', 'exp_rt CX', ent='E1', status='SENT')
+_sl = [x for x in _logs if x.startswith('[signal] ')][0]
+ok('T90 signal 行格式', _re.match(r'^\[signal\] 600001\.XSHG side=BUY qty=200 limit=15\.58 mode=board note=exp_rt CX score=66\.5 ent=E1 status=SENT$', _sl) is not None)
+ns2 = fresh(); ns2['score_now'] = lambda sec: 50.0
+_logs2 = []
+class _SigLog2:
+    def info(self, *a): _logs2.append((str(a[0]) % a[1:]) if len(a) > 1 else str(a[0]))
+    def warn(self, *a): pass
+    def error(self, *a): pass
+ns2['log'] = _SigLog2()
+ns2['g'].spot['600002.XSHG'] = {'last_px':10.0,'preclose_px':10.0,'up_px':11.0,'wavg_px':10.0,'trade_status':'OPEN'}
+ns2['BLS']['DO_ORDER'] = False
+ns2['place_order'](ns2['_CTX'], '600002.XSHG', 'buy', note='ma_pullback', mode='chase')
+ok('T90 place_order 打 signal SIM', any(x.startswith('[signal] ') and 'status=SIM' in x and 'note=ma_pullback' in x for x in _logs2))
+ns3 = fresh(); ns3['score_now'] = lambda sec: 0.0
+_logs3 = []
+class _SigLog3:
+    def info(self, *a): _logs3.append((str(a[0]) % a[1:]) if len(a) > 1 else str(a[0]))
+    def warn(self, *a): pass
+    def error(self, *a): pass
+ns3['log'] = _SigLog3()
+ns3['g'].pending = {'600003.XSHG': {'no':'E9','side':'sell','qty':300,'limit':10.0,'status':'SENT','filled':0}}
+_o = types.SimpleNamespace(entrust_no='E9', order_status='FILLED')
+ns3['on_order_response'](ns3['_CTX'], _o)
+ok('T90 on_order_response 打 signal 终态', any(x.startswith('[signal] ') and 'ent=E9' in x and 'status=FILLED' in x for x in _logs3))
+
+# --- T91 v0.36i 采集器兼容 [signal] ---
+import log_collector as _lc
+_txt = "2026-10-21 09:30:01 - INFO - [signal] 600001.XSHG side=BUY qty=200 limit=15.58 mode=board note=exp_rt CX score=66.5 ent=E1 status=SENT\n"
+_p = _lc.parse_text(_txt)
+ok('T91 采集器识别 signal', any(e['type'] == 'signal' for e in _p['entries']))
+_row = _lc._parse_signal("[signal] 600001.XSHG side=BUY qty=200 limit=15.58 mode=board note=exp_rt CX score=66.5 ent=E1 status=SENT")
+ok('T91 解析 signal 字段', _row[0] == '600001.XSHG' and _row[1] == 'BUY' and _row[2] == '200' and _row[4] == 'board' and _row[8] == 'SENT')
 print('ALL DONE')
 

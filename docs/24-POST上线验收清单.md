@@ -315,7 +315,7 @@
       据探针结果定候选类别过滤（`get_industry_stocks` 官方只保证行业编码，概念(GN)支持度盘中验证，docs/06）。
 - [ ] **5日强度数据链路**：`_board_open_gain`（批量快照 open 口径，按日缓存一次）；`_board_5d_strength`（前20成员 1d 日线收盘涨跌均值，帧预算 `frame_day_limit` 8 / 快速期 12，按日缓存+分批续算、样本>=50% 才出值）。
 - [ ] 盘前/盘中核对：日志 `[probe] <sec> blocks=... industry_members=...`（每日一次）、`[elastic] new_top_board <板> strength=..% open=..% avg5=..% lead=..%`、`order sent .. elastic_top board=.. chg=..% 1m=..%`；`[budget]` 显示 `board=24/24`（10:00 前，v0.36e 合并快照每帧一批）/ `m1_p=15/15` / `day=12/12`。
-- [ ] selftest T79（预算/prio/single）/ T80（auction_c 覆盖）/ T82（新爆发触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+新 T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）+ T88（竞价数据缺失兜底加固）+ T89（盘中重启重建涨停池/自选三态）通过；全量 432 PASS / 0 FAIL；双编译通过。
+- [ ] selftest T79（预算/prio/single）/ T80（auction_c 覆盖）/ T82（新爆发触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+新 T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）+ T88（竞价数据缺失兜底加固）+ T89（盘中重启重建涨停池/自选三态）+ T90/T91（统一 [signal] 结构化信号/采集器兼容）通过；全量 437 PASS / 0 FAIL；双编译通过。
 
 ## 26. 板块映射文件链路（v0.36d/e，2026-10-21）：本地生成 -> 上传 -> 云端 [boards] loaded -> 概念口径消费
 - [ ] **本地生成器** `research/expectation/export_boards.py`：读 AXquant `data/ths_board_mapping.json`（同花顺行业/概念映射）-> 写
@@ -331,7 +331,17 @@
       b) 候选两段式 `_calc_elastic_top_candidates`：批量快照按涨幅粗排（20cm 且 <10%）-> 只对前 `elastic_top_surge_top_n=5` 算 1m surge；`m1_surge_cache_ttl` 15s->30s；
       d) 预算：`frame_board_limit_fast` 12->24。
 - [ ] 盘前/盘中核对：日志 `[boards] loaded ... boards=280 stocks=5565`、`[elastic] new_top_board <THS概念名> ...`；`[budget]` 显示 `board=..`（合并快照每帧 1 次批量）/ `m1_p=15/15` / `day=12/12`。
-- [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）+ T89（盘中重启重建涨停池/自选三态）通过；全量 432 PASS / 0 FAIL；双编译通过。
+- [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）+ T89（盘中重启重建涨停池/自选三态）+ T90/T91（统一 [signal] 结构化信号/采集器兼容）通过；全量 437 PASS / 0 FAIL；双编译通过。
+
+## 28. 统一买卖信号结构化记录 [signal]（v0.36i，2026-10-21）：信号可分析/可对账
+- [ ] **策略侧 `_signal()` 输出结构化行**：`[signal] <名>(code) side=.. qty=.. limit=.. mode=.. note=.. score=.. ent=.. status=..`
+      四处收敛：`place_order`（买/卖，DO_ORDER=False 时 status=SIM、发单后 status=SENT）、
+      `place_expected_order`（BUY，SIM/SENT）、`on_order_response`（side=ORD + 终态 FILLED/CANCELLED/REJECTED）、
+      `on_trade_response`（mode=fill + 已成交量）；信号行带当时评分 score 与场景 note。
+- [ ] **采集器兼容**：`log_collector.py` 新增 `signal` 分类，输出 `data/logs/log_<date>.signal.csv`
+      （time/sec/side/qty/limit/mode/note/score/ent/status），与现有 JSON 入库、seal.csv 同链；可形成「信号(exp-order/may-order)→回报(FILLED/REJECTED)」对账。
+- [ ] 盘后核对：日志中每笔买卖都有 [signal] 行，`log_collector ingest` 后 `log_<date>.signal.csv` 行数=信号笔数；
+      selftest T90（格式/SIM/回报终态）+ T91（采集器识别/解析字段）通过；全量 437 PASS / 0 FAIL；双编译通过。
 
 ## 27. 待上传目录瘦身（v0.36e，2026-10-21）：定时上传有数据限制，上传载荷恒定
 - [ ] **工具** `research/expectation/maintain_bridge_dir.py`：根目录只保留 `*_latest` 稳定指针（`--keep-dated 0` 默认， dated 一律移入 `archive/`）；

@@ -3730,6 +3730,20 @@ def _calc_buy_qty(context, sec, price, ratio):
     return int(budget / lot) * 100
 
 
+def _signal(sec, side, qty, limit, mode, note='', ent='', status=''):
+    # v0.36i 统一买卖信号结构化行（供 log_collector 按日入库与信号->回报对账）；纯日志，PT 沙盒安全
+    try:
+        sc = 0.0
+        try:
+            sc = float(score_now(sec) or 0.0)
+        except Exception:
+            sc = 0.0
+        log.info('[signal] %s side=%s qty=%s limit=%s mode=%s note=%s score=%.1f ent=%s status=%s' % (
+            _sn(sec), side, qty, limit, mode, note, sc, ent, status))
+    except Exception:
+        pass
+
+
 def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None):
     positions = context.portfolio.positions
     if side == 'buy':
@@ -3753,11 +3767,13 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         log.warn('place_order skip qty<=0 %s' % _sn(sec)); return
     if not BLS['DO_ORDER']:
         log.info('[may-order] %s %s qty=%s limit=%s %s (DO_ORDER=False)' % (_sn(sec), side, qty, limit, note))
+        _signal(sec, side, qty, limit, mode, note, ent='', status='SIM')
         return
     try:
         ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0, 'ts': time.time()}
         log.info('order sent %s %s qty=%s limit=%s ent=%s %s' % (_sn(sec), side, qty, limit, ent, note))
+        _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
     except Exception as e:
         log.error('order fail %s: %r' % (_sn(sec), e))
 
@@ -3791,11 +3807,13 @@ def place_expected_order(context, sec, note=''):
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit}
             log.info('[exp-order] %s buy qty=%s limit=%s ent=%s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, note))
+            _signal(sec, 'BUY', qty, limit, mode, note, ent=ent, status='SENT')
             return True
         except Exception as e:
             log.error('exp order fail %s: %r' % (_sn(sec), e))
             return False
     log.info('[exp-order] %s buy qty=%s limit=%s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, note))
+    _signal(sec, 'BUY', qty, limit, mode, note, ent='', status='SIM')
     return True
 
 
@@ -3804,14 +3822,17 @@ def on_order_response(context, order):
     try:
         ent = getattr(order, 'entrust_no', None) or getattr(order, 'order_id', None)
         st = getattr(order, 'order_status', None) or getattr(order, 'status', None) or 'SENT'
+        _sec_m = None; _p = {}
         if ent is not None:
-            for _sec, _p in (getattr(g, 'pending', None) or {}).items():
-                if str(_p.get('no') or '') == str(ent):
-                    _p['status'] = str(st)
+            for _sec, _pp in (getattr(g, 'pending', None) or {}).items():
+                if str(_pp.get('no') or '') == str(ent):
+                    _sec_m = _sec; _p = _pp
+                    _pp['status'] = str(st)
                     if str(st).upper() in ('FILLED', 'CANCELLED', 'REJECTED'):
-                        _p['filled'] = int(_p.get('qty') or 0)   # 终态不再在途
+                        _pp['filled'] = int(_pp.get('qty') or 0)   # 终态不再在途
                     break
         log.info('on_order_response %s status=%s' % (ent, st))
+        _signal(_sec_m, 'ORD', int(_p.get('qty') or 0), float(_p.get('limit') or 0.0), 'ord', 'order_response', ent=ent, status=str(st))
     except Exception as e:
         log.warn('on_order_response err %r' % e)
 
@@ -3846,6 +3867,7 @@ def on_trade_response(context, trade):
                 daily.append(code)
             _save_state()
         log.info('on_trade_response %s qty=%s side=%s' % (_sn(code), qty, side))
+        _signal(code, side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
     except Exception as e:
         log.warn('on_trade_response err %r' % e)
 
