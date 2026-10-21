@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.43（2026-10-21）（前一版 v0.42 存档 6c42b27）
-# 部署核对：日志首行 `buysell_core init version=v0.43 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.44（2026-10-21）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.44 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -23,6 +23,8 @@
 #                卖1>0 打 [seal] playable(非真一字, 可参与) 日志；1帧内封涨停放行（不扩大拦截）
 #          v0.43 买卖操作理由与灵敏度日志固化（docs/30）：_signal 结构化行补 lag=检测->下单时延 + det=检测源:首触毫秒；
 #                [may-order]/[exp-order]/order sent 同补 lag；after_trading_end 打 [rt-summary] 日结（按 side/mode）
+#          v0.44 合成数据消费审计（docs/40）：_warm_cap 显式消费 sentiment.divergence 分歧标志，
+#                与 warm_days 双保险触发分歧保护 taper，修复生成侧 divergence 列云端未被消费的脱节
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -44,7 +46,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.43"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
+STRATEGY_VERSION = "v0.44"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
 
 
 # ---------- 参数 ----------
@@ -1562,12 +1564,21 @@ def _pos_value(p, sec):
 def _warm_cap(s):
     # 回暖/延续日仓位上限 = warm_pos_pct - 连续回暖天数递减（分歧保护，docs/40 闭环）
     warm_days = int(s.get('warm_days') or 0)
+    divergence = int(s.get('divergence') or 0)   # v0.44 显式消费 CSV 分歧标志（与 warm_days 双保险）
     taper_start = int(BLS.get('warm_taper_start', 3))
     step = float(BLS.get('warm_taper_step', 0.10))
     cap = float(BLS.get('warm_pos_pct', 0.80)) - max(0, warm_days - taper_start + 1) * step
     cap = max(cap, float(BLS.get('warm_taper_min', 0.50)))
     if warm_days >= taper_start:
-        log.info('[pos-cap] 分歧保护：连续回暖 warm_days=%d -> 上限 %.2f（分歧概率上升）' % (warm_days, cap))
+        n_taper = max(0, warm_days - taper_start + 1)
+    elif divergence:
+        n_taper = 1                              # CSV 显式分歧：至少一档递减
+    else:
+        n_taper = 0
+    cap = float(BLS.get('warm_pos_pct', 0.80)) - n_taper * step
+    cap = max(cap, float(BLS.get('warm_taper_min', 0.50)))
+    if n_taper > 0:
+        log.info('[pos-cap] 分歧保护：divergence=%d warm_days=%d -> cap=%.2f' % (divergence, warm_days, cap))
     return cap
 
 

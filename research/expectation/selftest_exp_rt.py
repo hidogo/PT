@@ -2886,5 +2886,14 @@ _rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if
 ns['place_order'](ns['_ctx'], '600003.XSHG', 'buy', note='core_buy px=10.0', mode='chase')
 ok('T96 [may-order] 带 lag', any('[may-order]' in m and 'lag=' in m and 'core_buy' in m for m in _rec))
 
+# T97 v0.44 sentiment.divergence 显式消费：CSV 分歧标志触发分歧保护 taper（与 warm_days 双保险）
+ns = fresh(); g = ns['g']
+g.sentiment = {'ice': 0, 'warm_days': 2, 'divergence': 1, 'phase': 'cont', 'emotion': '', 'emotion_basis': ''}
+ok('T97 divergence=1 warm_days=2 -> taper 0.70', abs(ns['_warm_cap'](g.sentiment) - 0.70) < 1e-9)
+g.sentiment['divergence'] = 0
+ok('T97 divergence=0 warm_days=2 -> 0.80', abs(ns['_warm_cap'](g.sentiment) - 0.80) < 1e-9)
+g.sentiment['warm_days'] = 3; g.sentiment['divergence'] = 1
+ok('T97 warm_days=3+divergence=1 -> 0.70', abs(ns['_warm_cap'](g.sentiment) - 0.70) < 1e-9)
+
 print('ALL DONE')
 
