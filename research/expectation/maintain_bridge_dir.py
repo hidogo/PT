@@ -7,13 +7,13 @@
 + *_latest.csv 稳定指针；dated 逐日累积 -> 上传文件数/体积持续增长，触发上传数据限制。
 
 策略（上传载荷恒定）：
-  - 根目录每类 dated 只保留最新 N 个（默认 3，覆盖云端「latest 优先 + 当日/上一交易日 dated 兜底」消费）；
+  - 根目录只保留 *_latest 稳定指针（dated 一律移入 archive/，keep-dated 默认 0）——定时上传文件数恒定，云端消费 latest 优先；
   - 更早的 dated 移入 archive/（定时上传非递归 -> 从上传载荷移除，本地仍可追溯/重传）；
   - archive/ 内 dated 按文件名日期超过保留天数（默认 30 天）删除，防本地磁盘无界增长；
   - 永不触碰 *_latest.csv / selfwatch.csv / boards_latest.csv 及非 dated 文件（含 archive/ 内其它产物）。
 
 用法（本机 Python3.10）：
-  python maintain_bridge_dir.py [--root <待上传根>] [--keep-dated 3] [--archive-days 30] [--dry-run]
+  python maintain_bridge_dir.py [--root <待上传根>] [--keep-dated 0] [--archive-days 30] [--dry-run]
 
 挂接：run_one_click_after_close（步骤6）/ run_one_click_premarket（步骤3b），默认参数即可。
 """
@@ -58,9 +58,9 @@ def _dated_entries(root: str) -> list:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="maintain_bridge_dir",
-                                 description="待上传目录瘦身：dated 只留最新 N 个，更早移入 archive/；archive 超期清理")
+                                 description="待上传目录瘦身：根目录只留 *_latest， dated 全移 archive/；archive 超期清理")
     ap.add_argument("--root", default="", help="待上传根目录（默认 PTRADE_BRIDGE_DIR）")
-    ap.add_argument("--keep-dated", type=int, default=3, help="根目录每类 dated 保留最新 N 个")
+    ap.add_argument("--keep-dated", type=int, default=0, help="根目录每类 dated 保留最新 N 个(0=只留 *_latest)")
     ap.add_argument("--archive-days", type=int, default=30, help="archive 内 dated 按文件名日期保留天数")
     ap.add_argument("--dry-run", action="store_true", help="仅预览：显示将移动/删除的文件，不执行")
     a = ap.parse_args(argv)
@@ -70,7 +70,7 @@ def main(argv=None) -> int:
         print("[maintain] root 不存在: %s" % root)
         return 0
     arch = os.path.join(root, "archive")
-    keep = max(int(a.keep_dated), 1)
+    keep = max(int(a.keep_dated), 0)   # 0 = 只留 *_latest，dated 全移 archive（上传数量限制）
     arch_days = max(int(a.archive_days), 1)
 
     before_files, before_bytes = 0, 0
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
         for fp in sorted(deletes):
             print("  [del] %s" % os.path.basename(fp))
     if not moves and not deletes:
-        print("[maintain] 无需清理（根目录每类 dated <= %d，archive 无超期）" % keep)
+        print("[maintain] 无需清理（根目录无 dated，archive 无超期）" if keep == 0 else "[maintain] 无需清理（根目录每类 dated <= %d，archive 无超期）" % keep)
 
     if not a.dry_run:
         os.makedirs(arch, exist_ok=True)

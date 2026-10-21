@@ -334,11 +334,12 @@
 - [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）+ T89（盘中重启重建涨停池/自选三态）通过；全量 432 PASS / 0 FAIL；双编译通过。
 
 ## 27. 待上传目录瘦身（v0.36e，2026-10-21）：定时上传有数据限制，上传载荷恒定
-- [ ] **工具** `research/expectation/maintain_bridge_dir.py`：根目录三类 dated（`expectation_/zt_lianban_/sentiment_YYYY-MM-DD.csv`）
-      每类只保留最新 `--keep-dated 3`（默认）个，更早移入 `archive/`；`archive/` 内 dated 按文件名日期超过 `--archive-days 30` 天删除。
+- [ ] **工具** `research/expectation/maintain_bridge_dir.py`：根目录只保留 `*_latest` 稳定指针（`--keep-dated 0` 默认， dated 一律移入 `archive/`）；
+      `archive/` 内 dated 按文件名日期超过 `--archive-days 30` 天删除。
       `--dry-run` 仅预览；永不触碰 `*_latest.csv`/`selfwatch.csv`/`boards_latest.csv` 及非 dated 文件（含 archive 内其它产物）。
-- [ ] **设计依据**：定时上传按文件夹上传且观察为**非递归**（archive/ 子目录不上传）；云端消费为 latest 优先 + 当日/上一交易日 dated 兜底，
-      保留 3 个覆盖全部兜底路径；archive/ 即使被上传，云端 `_research_roots` 也不读该子目录（文件名/路径均不匹配），双保险。
+- [ ] **设计依据（v0.36h 收紧）**：定时上传有文件数量上限 —— 根目录恒定为 5 个（`expectation_latest`/`zt_lianban_latest`/`sentiment_latest`/`boards_latest`/`selfwatch`），
+      dated 全部移入 `archive/`（非递归不上传）；云端消费 latest 优先且日常全部命中， dated 仅作手动重传备份；
+      archive/ 即使被上传，云端 `_research_roots` 也不读该子目录（文件名/路径均不匹配），双保险。
 - [ ] **挂接**：`run_one_click_after_close.py`（步骤6，收盘生成新文件后归档昨日更早）/ `run_one_click_premarket.py`（步骤3b，09:00 上传前再收敛一次）；
       日志关键字 `[maintain] 完成: 根目录文件 N -> N 个, 体积 B -> B ... (k 个移入 archive/, m 个删除)`；幂等（无清理时 0 移动）。
 - [ ] 独立运行：`python maintain_bridge_dir.py --root <待上传根> --dry-run`（默认根 = PTRADE_BRIDGE_DIR）；功能自测（临时目录：移动/删除/保留/幂等）通过。
