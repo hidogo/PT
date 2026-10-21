@@ -98,6 +98,17 @@ BLS = {
     'warm_taper_step': 0.10,          # 每多 1 个连续回暖日递减幅度
     'warm_taper_min': 0.50,           # 递减下限（分歧保护）
     'red_ratio_buy_min': 0.55,         # 红盘比下限（对齐 AXquant first_board_buy 回暖下限）
+    # v0.41 全市场红盘比（情绪温度消费口径统一：冰点/回暖判定用全市场，替代个股板块近似；docs/16）
+    'market_red_enabled': True,        # 全市场红盘比总开关
+    'market_batch': 300,               # 全量分片 get_snapshot 批规模（与 scan_batch 一致）
+    'market_red_ttl': 60.0,            # 全市场红盘比缓存 s（10:00 后）
+    'market_red_ttl_fast': 30.0,       # 10:00 前快速刷新缓存 s（受单轮全量耗时下限约束，盘中探针校准）
+    'frame_market_limit': 2,           # 帧内全市场红盘比 fetch 次数（独立预算源，不挤占实时快照）
+    'frame_market_limit_fast': 4,      # 10:00 前
+    # v0.41 emotion 档位 -> 总仓位硬上限（与规则 ice/phase 冲突时取保守值 + WARN）
+    'emotion_cap_ice': 0.40,           # 冰点/偏冷
+    'emotion_cap_warm': 0.80,          # 回暖/发酵
+    'emotion_cap_taper': 0.50,         # 高潮/过热（分歧保护下限档）
     # v0.18 买入场景补齐：核心票买入 + 首板打板（AXquant first_board_buy / CORE 门禁）
     'core_buy_enabled': True,          # 核心票买入总开关
     'core_max_lianban': 6,             # 核心票连板上限：>=6 不追（高标不接）
@@ -1388,15 +1399,90 @@ def _red_ratio(sec):
     denom = up + dn
     return float(up) / denom if denom else 0.5
 
+
+def _market_red_ttl():
+    # 全市场红盘比缓存 TTL：10:00 前快速刷新（对齐 board_rank_fast_until_minute）
+    try:
+        if _min_age() <= int(BLS.get('board_rank_fast_until_minute', 30)):
+            return float(BLS.get('market_red_ttl_fast', 30.0))
+    except Exception:
+        pass
+    return float(BLS.get('market_red_ttl', 60.0))
+
+
+def _fetch_market_red(pool):
+    # 全量分片 get_snapshot 统计 涨/(涨+跌)（与 AXquant 生成侧口径一致，不含平盘）；无有效样本 -> None
+    batch = max(int(BLS.get('market_batch', 300)), 1)
+    up = dn = 0
+    t0 = time.time()
+    n_batch = 0
+    for i in range(0, len(pool), batch):
+        chunk = pool[i:i + batch]
+        n_batch += 1
+        try:
+            sn = get_snapshot(chunk)
+            if not isinstance(sn, dict):
+                continue
+        except Exception:
+            continue
+        for code, d in sn.items():
+            try:
+                pre = float(d.get('preclose_px') or 0.0)
+                px = float(d.get('last_px') or 0.0)
+                if pre <= 0 or px <= 0:
+                    continue
+                if px > pre:
+                    up += 1
+                elif px < pre:
+                    dn += 1
+            except Exception:
+                continue
+    denom = up + dn
+    if denom <= 0:
+        log.info('[market-red] 无有效样本（全量分片 %d 批）-> None' % n_batch)
+        return None
+    ratio = float(up) / denom
+    log.info('[market-red] 全市场红盘比=%.2f%% up=%d dn=%d 批=%d 样本=%d 耗时=%.1fs'
+             % (ratio * 100.0, up, dn, n_batch, denom, time.time() - t0))
+    return ratio
+
+
+def _market_red_ratio():
+    # 全市场红盘比（v0.41）：get_Ashares 全量分片 get_snapshot 统计，独立预算源 market；
+    # 失败/无池 -> None（上层降级基线驱动保守上限）。日切随 DataHub 缓存 key(day) 失效。
+    try:
+        day = str(get_trading_day())
+        if getattr(g, 'pool_day', '') != day:
+            try:
+                g.pool_all = [x for x in (_norm_sec(c) for c in (get_Ashares() or [])) if x]
+                g.pool_day = day
+            except Exception as e:
+                log.warn('market-red get_Ashares fail: %r' % e)
+                g.pool_all = []
+        pool = list(g.pool_all or [])
+        if not pool:
+            return None
+        dh = _get_ds()
+        return dh.cached(('mkt_red', day), '_mkt_', _market_red_ttl(),
+                         lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
+    except Exception as e:
+        log.warn('market-red fail: %r' % e)
+        return None
+
+
 def _sentiment_warm(sec):
-    # v0.29 情绪回暖判定：T 日冰点基线 + 今日板块红盘比恢复（>= 恢复阈值，冰点越久阈值越低=回暖概率增加）。
-    # 未启用 / 无冰点基线 -> None（不参与闸门）；今日继续冰点（红盘比<ice_ratio）-> False。
+    # v0.41 情绪回暖判定：T 日冰点基线 + 今日全市场红盘比恢复（>= 恢复阈值，冰点越久阈值越低=回暖概率增加）。
+    # 未启用 / 无冰点基线 -> None（不参与闸门）；全市场红盘比缺失 -> False（保守不放行）；
+    # 今日继续冰点（全市场红盘比<ice_ratio）-> False。
     if not BLS.get('sentiment_enabled', False):
         return None
     s = getattr(g, 'sentiment', None)
     if not s or not s.get('ice'):
         return None
-    red = _red_ratio(sec)
+    red = _market_red_ratio()
+    if red is None:
+        log.info('[sentiment] %s 全市场红盘比缺失 -> 保守不放行' % _sn(sec))
+        return False
     ice_ratio = float(BLS.get('sentiment_ice_ratio', 0.40))
     if red < ice_ratio:
         log.info('[sentiment] %s 继续冰点 red=%.2f (<%.2f) 等下一交易日再验证回暖' % (_sn(sec), red, ice_ratio))
@@ -1447,24 +1533,57 @@ def _warm_cap(s):
     return cap
 
 
+def _emotion_cap(s):
+    # v0.41 emotion 档位 -> 总仓位硬上限（None=不干预）；与规则 ice/phase 冲突取保守值并 WARN。
+    emo = str(s.get('emotion') or '').strip()
+    if not emo:
+        return None
+    ice = bool(s.get('ice'))
+    cap_ice = float(BLS.get('emotion_cap_ice', 0.40))
+    cap_warm = float(BLS.get('emotion_cap_warm', 0.80))
+    cap_tap = float(BLS.get('emotion_cap_taper', 0.50))
+    if emo in ('冰点', '偏冷'):
+        return cap_ice
+    if emo in ('回暖', '发酵'):
+        if ice:
+            log.info('[sentiment] 冲突: emotion=%s 但 ice=%d -> 规则冰点优先(保守)' % (emo, int(ice)))
+            return cap_ice
+        return cap_warm
+    if emo in ('高潮', '过热'):
+        return cap_tap
+    return None
+
+
 def _sentiment_pos_cap(context, sec):
-    # v0.30 情绪总仓位上限（None=不限）：
-    #   冰点基线存在且今日未回暖 -> ice_pos_pct(40%)；已回暖/无冰点基线(回暖延续) -> warm_cap(80%-taper)。
+    # v0.41 情绪总仓位上限（None=不限）：
+    #   冰点基线存在 -> 按今日全市场红盘比判定冰点/回暖（全市场缺失降级冰点 40%）；
+    #   已回暖/无冰点基线(回暖延续) -> warm_cap(80%-taper)；emotion 档位再收窄（冲突保守+WARN）。
     if not BLS.get('sentiment_pos_cap_enabled', False):
         return None
     s = getattr(g, 'sentiment', None)
     if not s:
         return None
     if s.get('ice'):
-        red = _red_ratio(sec)
+        red = _market_red_ratio()
         streak = max(int(s.get('ice_streak') or 1), 1)
         th = max(float(BLS.get('sentiment_warm_min', 0.45)),
                  float(BLS.get('sentiment_warm_base', 0.55)) - streak * float(BLS.get('sentiment_warm_decay', 0.02)))
-        cap = float(BLS.get('ice_pos_pct', 0.40)) if red < th else _warm_cap(s)   # 冰点日(未回暖)/回暖日
+        if red is None:
+            cap = float(BLS.get('ice_pos_pct', 0.40))          # 全市场红盘比缺失 -> 降级冰点上限
+            note = 'mkt-red=None(降级冰点)'
+        else:
+            cap = float(BLS.get('ice_pos_pct', 0.40)) if red < th else _warm_cap(s)
+            note = 'mkt-red=%.2f th=%.2f' % (red, th)
     else:
-        cap = _warm_cap(s)                                    # 无冰点基线：回暖/延续日
-    log.info('[pos-cap] %s 情绪仓位上限 cap=%.2f (ice=%d warm_days=%d phase=%s)'
-             % (_sn(sec), cap, int(s.get('ice') or 0), int(s.get('warm_days') or 0), s.get('phase') or '-'))
+        cap = _warm_cap(s)                                     # 无冰点基线：回暖/延续日
+        note = '无冰点基线'
+    ec = _emotion_cap(s)                                       # emotion 档位硬上限（保守合并）
+    if ec is not None and cap > ec:
+        log.info('[pos-cap] %s emotion 档位收窄 %s -> %.2f（原 %.2f）' % (_sn(sec), s.get('emotion') or '-', ec, cap))
+        cap = ec
+    log.info('[pos-cap] %s 情绪仓位上限 cap=%.2f (ice=%d warm_days=%d phase=%s emotion=%s %s)'
+             % (_sn(sec), cap, int(s.get('ice') or 0), int(s.get('warm_days') or 0),
+                s.get('phase') or '-', s.get('emotion') or '-', note))
     return cap
 
 
@@ -1917,7 +2036,8 @@ def _load_boards():
 
 
 def _load_sentiment():
-    # 读 T 日情绪冰点基线（docs/40 契约）：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak
+    # 读 T 日情绪冰点基线（docs/40 契约）：date,...,divergence,emotion,emotion_basis
+    # emotion/emotion_basis 为复盘 marker 机器判定的情绪温度档位+依据（旧表头缺失时为空串）
     g.sentiment = None
     fp = None; rows = None
     for cand in _sentiment_paths():
@@ -1947,10 +2067,12 @@ def _load_sentiment():
             "warm_days": int(_fnum(rec.get("warm_days"))),
             "phase": (rec.get("phase") or "").strip(),
             "divergence": bool(int(_fnum(rec.get("divergence"))) or 0),
+            "emotion": (rec.get("emotion") or "").strip(),
+            "emotion_basis": (rec.get("emotion_basis") or "").strip(),
         }
-        log.info("[sentiment] loaded %s -> ice=%s streak=%d adv=%.1f%% seal=%.0f%% (date=%s)" % (
+        log.info("[sentiment] loaded %s -> ice=%s streak=%d adv=%.1f%% seal=%.0f%% emotion=%s (date=%s)" % (
             fp, g.sentiment["ice"], g.sentiment["ice_streak"], g.sentiment["advance_rate"],
-            g.sentiment["seal_rate"] * 100.0, g.sentiment["date"]))
+            g.sentiment["seal_rate"] * 100.0, g.sentiment["emotion"] or "-", g.sentiment["date"]))
         return g.sentiment
     except Exception as e:
         log.info("[sentiment] skip(invalid) %s: %r" % (fp, e))

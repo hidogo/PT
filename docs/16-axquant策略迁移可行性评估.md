@@ -97,7 +97,7 @@
 - **量比**：`get_snapshot(sec)` 自带 `vol_ratio`（PTrade 标准量比）。已让 `_volume_ratio(sec)` 优先取快照 `vol_ratio`，缺失回退 今日量/前5日均量（1d 近似）。
 - **红盘比**：Ptrade 无直接「全市场红盘占比」；但板块级可算。已新增 `_red_ratio(sec)`：`get_stock_blocks→板块代码 → get_industry_stocks→成分股 → get_snapshot 逐只涨跌`，统计 上涨家数/(上涨+下跌)。与既有板块强度 `_board_strength` 复用一个缓存函数 `_board_member_changes`（60s），无成员返回 0.5 中性。
 - 另有 `get_sort_msg(sort_type_grp)` 返回板块/行业 `rise_count/fall_count/member_count`/`vol_ratio`；但该券商对本函数签名不适配（此前刷 `入参错误:sort_type_grp`），故统一走板块成员聚合口径（已实测可用）。
-- 全市场红盘比：如需，可后续把多个板块/概念成员并集聚合，或对宽基指数用 get_sort_msg；当前仓控以个股所属板块红盘比收敛。
+- 全市场红盘比（v0.41 已落地）：`_market_red_ratio` 全量 get_snapshot 分片统计（`market_batch=300`，约 19 批），10:00 前快速期 TTL 30s，独立 market 预算；`_sentiment_pos_cap`/`_sentiment_warm` 改全市场口径，emotion 档位接入仓位上限（详见 docs/40）。
 
 ### 2. 按资金动态百分比设置（去硬编码 0.3）
 - 新增 BLS：`single_stock_cap=0.30`（单支=总资产×30%）、`ordinary_buy_ratio=0.10`（普通买入=总资产×10%，AXquant 1/10）、`board_buy_budget_ratio=0.20`（打板=总资产×20%）、`exp_order_pct=0.30`（预期买入比例，可调小如 0.01）。

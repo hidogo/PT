@@ -1495,12 +1495,14 @@ ok('T66 sentiment 字段齐(limit_up/seal/advance)', s66.get('limit_up') == 25 a
 ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
 ns['g'].sentiment = {'ice': True, 'ice_streak': 2, 'advance_rate': 30.1, 'seal_rate': 0.45}
 ns['BLS']['sentiment_enabled'] = True
-ns['_red_ratio'] = lambda sec: 0.55
+ns['_market_red_ratio'] = lambda: 0.55
 ok('T66 回暖判定 True(streak=2 th=0.51 red=0.55)', ns['_sentiment_warm']('600001.XSHG') is True)
-ns['_red_ratio'] = lambda sec: 0.50
+ns['_market_red_ratio'] = lambda: 0.50
 ok('T66 未回暖 False(streak=2 th=0.51 red=0.50)', ns['_sentiment_warm']('600001.XSHG') is False)
-ns['_red_ratio'] = lambda sec: 0.35
+ns['_market_red_ratio'] = lambda: 0.35
 ok('T66 继续冰点 False(red<0.40)', ns['_sentiment_warm']('600001.XSHG') is False)
+ns['_market_red_ratio'] = lambda: None
+ok('T66 全市场缺失 -> 保守 False', ns['_sentiment_warm']('600001.XSHG') is False)
 ns['BLS']['sentiment_enabled'] = False
 ok('T66 未启用 -> None', ns['_sentiment_warm']('600001.XSHG') is None)
 ns2 = fresh(); ns2['g'].sentiment = {'ice': False, 'ice_streak': 0}
@@ -1509,10 +1511,11 @@ ok('T66 无冰点基线 -> None', ns2['_sentiment_warm']('600001.XSHG') is None)
 
 ns = fresh(); ns['BLS']['sentiment_enabled'] = True
 ns['g'].sentiment = {'ice': True, 'ice_streak': 1}
-ns['_red_ratio'] = lambda sec: 0.55
+ns['_red_ratio'] = lambda sec: 0.55        # 板块门通过
+ns['_market_red_ratio'] = lambda: 0.55     # 全市场回暖
 ns['BLS']['red_gate_enabled'] = True
 ok('T66 _buy_red_ok 回暖放行(streak=1 th=0.53 red=0.55)', ns['_buy_red_ok']('600001.XSHG') is True)
-ns['_red_ratio'] = lambda sec: 0.52
+ns['_market_red_ratio'] = lambda: 0.52     # 全市场未回暖(red=0.52<th=0.53)
 ok('T66 _buy_red_ok 未回暖不放行(red=0.52<th=0.53)', ns['_buy_red_ok']('600001.XSHG') is False)
 ns3 = fresh(); ns3['BLS']['red_gate_enabled'] = False
 ok('T66 red_gate 关闭 -> 恒放行', ns3['_buy_red_ok']('600001.XSHG') is True)
@@ -1530,16 +1533,19 @@ ok('T67 sentiment 读入 warm_days=3 phase=cont divergence=1',
    s67 is not None and s67.get('warm_days') == 3 and s67.get('phase') == 'cont' and s67.get('divergence') is True)
 ok('T67 兼容旧列(ice/ice_streak 仍读)', s67.get('ice') is True and s67.get('ice_streak') == 2)
 
-# 2) 冰点基线 + 今日未回暖 -> 40%
+# 2) 冰点基线 + 今日未回暖 -> 40%（全市场红盘比口径）
 ns = fresh()
 ns['BLS']['sentiment_pos_cap_enabled'] = True
 ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False}
-ns['_red_ratio'] = lambda sec: 0.50   # streak=1 -> th=0.53 -> red<th 未回暖
+ns['_market_red_ratio'] = lambda: 0.50   # streak=1 -> th=0.53 -> red<th 未回暖
 ok('T67 冰点日未回暖 cap=0.40',
    abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
-ns['_red_ratio'] = lambda sec: 0.60   # red>=th 今日回暖
+ns['_market_red_ratio'] = lambda: 0.60   # red>=th 今日回暖
 ok('T67 冰点基线回暖日 cap=0.80(回暖首日)',
    abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.80) < 1e-9)
+ns['_market_red_ratio'] = lambda: None   # 全市场缺失 -> 降级冰点
+ok('T67 全市场红盘比缺失降级 cap=0.40',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
 
 # 3) 无冰点基线（回暖延续）-> _warm_cap 连续回暖递减 + 分歧保护
 ns = fresh()
@@ -1555,6 +1561,38 @@ ok('T67 warm_days=4 cap=0.60',
    abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.60) < 1e-9)
 ns['g'].sentiment['warm_days'] = 6
 ok('T67 warm_days>=5 下限 0.50',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.50) < 1e-9)
+
+# 4) v0.41 全市场 vs 板块口径分离：冰点日 cap 不受个股所属板块红盘比影响
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False}
+ns['_market_red_ratio'] = lambda: 0.35   # 全市场冰点
+ns['_red_ratio'] = lambda sec: 0.60      # 板块红盘比高（不应影响）
+ok('T67b 全市场冰点+板块高红盘 cap=0.40',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
+ns['_market_red_ratio'] = lambda: 0.60   # 全市场回暖
+ns['_red_ratio'] = lambda sec: 0.30      # 板块红盘比低（不应影响）
+ok('T67b 全市场回暖+板块低红盘 cap=0.80',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.80) < 1e-9)
+
+# 5) v0.41 emotion 档位 -> 上限映射 + 冲突保守
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False, 'emotion': '偏冷'}
+ns['_market_red_ratio'] = lambda: 0.60   # 规则判回暖 0.80；emotion 偏冷 -> 收窄 0.40
+ok('T67b emotion=偏冷 收窄 cap=0.40',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
+ns['g'].sentiment['emotion'] = '回暖'    # 与规则 ice 冲突 -> 规则优先保守
+ok('T67b emotion=回暖 与规则冰点冲突 cap=0.40',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.40) < 1e-9)
+ns = fresh()
+ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['g'].sentiment = {'ice': False, 'ice_streak': 0, 'warm_days': 1, 'phase': 'warm', 'divergence': False, 'emotion': '发酵'}
+ok('T67b emotion=发酵 无冰点基线 cap=0.80',
+   abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.80) < 1e-9)
+ns['g'].sentiment['emotion'] = '过热'    # 分歧保护档
+ok('T67b emotion=过热 分歧保护 cap=0.50',
    abs(ns['_sentiment_pos_cap'](ns['_ctx'], '600001.XSHG') - 0.50) < 1e-9)
 
 # 4) v0.31 默认已启用；显式关闭 -> 放行；超限 skip / 限内放行
@@ -1594,6 +1632,19 @@ import re
 src67 = io.open(SRC, encoding='utf-8').read()
 gates = re.findall(r'_buy_pos_ok\(context, sec, qty, limit\)', src67)
 ok('T67 两买入路径均接 _buy_pos_ok 闸门', len(gates) >= 2)
+
+
+# --- T67b 情绪档位列：sentiment CSV 带 emotion/emotion_basis 读入，旧列仍兼容 ---
+ns = fresh(); ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+_sent = os.path.join(ns['_TMP'], 'sentiment_latest.csv')
+with open(_sent, 'w', encoding='utf-8') as f:
+    f.write('date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis\n'
+            '2026-10-15,25,30,0.4500,30.10,2,6,1,2,3,cont,1,偏冷,涨停50家/连板16家/红盘比35.51%\n')
+s67b = ns['_load_sentiment']()
+ok('T67b sentiment 读入 emotion=偏冷', s67b is not None and s67b.get('emotion') == '偏冷')
+ok('T67b sentiment 读入 emotion_basis', s67b is not None and '红盘比35.51%' in s67b.get('emotion_basis', ''))
+ok('T67b 旧列兼容(ice/warm_days/divergence 仍读)', s67b is not None
+   and s67b.get('ice') is True and s67b.get('warm_days') == 3 and s67b.get('divergence') is True)
 
 
 # --- T68 v0.31b open_reason 缺失降级（build_expectation_bridge.cmd_review 不 abort，链路继续）---
@@ -1939,33 +1990,33 @@ _t74 = tempfile.mkdtemp(prefix="pt_sf74_")
 
 # 1) 同日冰点重复运行：streak 不虚增（10-19 ice=1 -> 10-20 ice=2 -> 再跑仍 2）
 _es_seed(_t74, "2026-10-19", True, 1, 0, "ice"); _es_lub(_t74, "2026-10-20", 25, 30.0)
-es74.run("2026-10-20", _t74, _t74)
-es74.run("2026-10-20", _t74, _t74)   # 同日重复
+es74.run("2026-10-20", _t74, _t74, _t74)
+es74.run("2026-10-20", _t74, _t74, _t74)   # 同日重复
 _r1 = _es_row(_t74)
 ok("T74 同日冰点重复运行 streak 不虚增(2->2)", _r1[7] == "1" and _r1[8] == "2" and _r1[9] == "0")
 
 # 2) 跨日冰点 -> streak+1
 _es_seed(_t74, "2026-10-20", True, 2, 0, "ice"); _es_lub(_t74, "2026-10-21", 25, 30.0)
-es74.run("2026-10-21", _t74, _t74)
+es74.run("2026-10-21", _t74, _t74, _t74)
 _r2 = _es_row(_t74)
 ok("T74 跨日冰点 streak+1(2->3)", _r2[7] == "1" and _r2[8] == "3")
 
 # 3) 前日冰点+今日回暖 -> streak 归 0，phase=warm warm_days=1
 _es_seed(_t74, "2026-10-20", True, 2, 0, "ice"); _es_lub(_t74, "2026-10-21", 40, 55.0)
-es74.run("2026-10-21", _t74, _t74)
+es74.run("2026-10-21", _t74, _t74, _t74)
 _r3 = _es_row(_t74)
 ok("T74 回暖日 streak 归 0 + phase=warm warm_days=1", _r3[7] == "0" and _r3[8] == "0" and _r3[9] == "1" and _r3[10] == "warm")
 
 # 4) 同日非冰点重复运行：warm_days 不虚增（cont 2->3 -> 再跑仍 3）
 _es_seed(_t74, "2026-10-20", False, 0, 2, "cont"); _es_lub(_t74, "2026-10-21", 40, 55.0)
-es74.run("2026-10-21", _t74, _t74)
-es74.run("2026-10-21", _t74, _t74)   # 同日重复
+es74.run("2026-10-21", _t74, _t74, _t74)
+es74.run("2026-10-21", _t74, _t74, _t74)   # 同日重复
 _r4 = _es_row(_t74)
 ok("T74 同日回暖延续重复运行 warm_days 不虚增(3->3)", _r4[7] == "0" and _r4[8] == "0" and _r4[9] == "3" and _r4[10] == "cont")
 
 # 5) latest 日期晚于当前（回补历史）-> 视为无前置，不污染
 _es_seed(_t74, "2026-10-21", True, 5, 0, "ice"); _es_lub(_t74, "2026-10-20", 25, 30.0)
-es74.run("2026-10-20", _t74, _t74)
+es74.run("2026-10-20", _t74, _t74, _t74)
 _r5 = _es_row(_t74)
 ok("T74 未来/更晚 latest 视为无前置(重新累计 streak=1)", _r5[7] == "1" and _r5[8] == "1")
 

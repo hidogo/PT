@@ -10,15 +10,18 @@
   - T+1 恢复（红盘比恢复）判「情绪回暖」由云端 `_sentiment_warm` 消费，冰点越久恢复阈值越低；
   - 闭环（v0.30）：非冰点日为回暖/延续日，连续天数 warm_days 累计；warm_days >= 分歧阈值(默认3) -> divergence=1（分歧概率上升）；
     phase: ice=冰点 / warm=回暖首日 / cont=回暖延续。
-列：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence
-  seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1。
+列：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis
+  seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1；
+  emotion 为复盘 marker 机器判定的情绪温度档位（冰点/偏冷/回暖/发酵/高潮/过热），emotion_basis 为档位依据，
+  均来自 position_review marker extra.emotion_temperature；缺失写空串（区别于真实值）。
 
 输出（待上传文件夹，客户端定时上传=按文件夹）：
   sentiment_<date>.csv    当日情绪基线
   sentiment_latest.csv    稳定指针（云端盘前首选读）
 列（与 SENTIMENT_HEADER 一致，两文件同构）：
-  date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence
-  seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1。
+  date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis
+  seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1；
+  emotion/emotion_basis 来自复盘 marker 情绪温度（见上），缺失为空串。
 
 用法（本机 Python3.10，无需登录）：
   python export_sentiment.py [--date 2026-10-19] [--lub <axquant json 目录>] [--out-dir <上传文件夹>]
@@ -47,6 +50,7 @@ DEFAULT_DIVERGENCE_START = 3  # 连续回暖/延续 >= 此天数 -> divergence=1
 SENTIMENT_HEADER = [
     "date", "limit_up", "break_count", "seal_rate", "advance_rate",
     "max_board", "lianban_count", "ice", "ice_streak", "warm_days", "phase", "divergence",
+    "emotion", "emotion_basis",
 ]
 
 
@@ -118,6 +122,31 @@ def _read_red_ratio(date: str, pr_dir: str | None = None) -> float | None:
     return None
 
 
+def _read_emotion(date: str, pr_dir: str | None = None) -> dict:
+    """读 AXquant position_review_<date>.jsonl 的 marker extra.emotion_temperature
+    （复盘任务机器判定的情绪温度档位+依据）；文件/字段缺失 -> 空串。"""
+    fp = os.path.join(pr_dir or _default_axquant_review_dir(), "position_review_%s.jsonl" % date)
+    if not os.path.isfile(fp):
+        return {"conclusion": "", "basis": ""}
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("record_type") != "position_review_marker":
+                    continue
+                et = (rec.get("extra") or {}).get("emotion_temperature") or {}
+                return {
+                    "conclusion": str(et.get("conclusion") or "").strip(),
+                    "basis": str(et.get("basis") or "").strip(),
+                }
+    except Exception:
+        return {"conclusion": "", "basis": ""}
+    return {"conclusion": "", "basis": ""}
+
+
 def _read_prev_latest(out_dir: str):
     """读上一版 sentiment_latest.csv -> (ice, ice_streak, warm_days, prev_date)；无/坏 -> (False, 0, 0, None)。"""
     fp = os.path.join(out_dir, "sentiment_latest.csv")
@@ -159,6 +188,7 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
     seal_rate = (pool_total / (pool_total + break_total)) if (pool_total + break_total) > 0 else 1.0
     red_ratio = _read_red_ratio(date, pr_dir)                  # 全市场红盘比%（tdx ZAF 收盘实时值，优先）
     advance_rate = red_ratio if red_ratio is not None else _fnum(summary.get("advance_rate_pct"))
+    emotion = _read_emotion(date, pr_dir)                      # 情绪温度档位+依据（复盘 marker）
     if red_ratio is not None:
         print("[sentiment] 红盘比来源: %s position_review emotion_temperature red_ratio_pct=%.2f%%（全市场，优先）" % (date, red_ratio))
     else:
@@ -194,7 +224,8 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
 
     os.makedirs(out_dir, exist_ok=True)
     row = [date, pool_total, break_total, "%.4f" % seal_rate, "%.2f" % advance_rate,
-           max_board, lianban_count, int(ice), ice_streak, warm_days, phase, divergence]
+           max_board, lianban_count, int(ice), ice_streak, warm_days, phase, divergence,
+           emotion.get("conclusion", ""), emotion.get("basis", "")]
     csv_path = os.path.join(out_dir, "sentiment_%s.csv" % date)
     latest = os.path.join(out_dir, "sentiment_latest.csv")
     for fp in (csv_path, latest):
@@ -204,9 +235,9 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
             w.writerow(SENTIMENT_HEADER)
             w.writerow(row)
         os.replace(tmp, fp)
-    print("[sentiment] %s -> ice=%d streak=%d warm_days=%d phase=%s divergence=%d adv=%.1f%% seal=%.0f%% limup=%d brk=%d -> %s"
+    print("[sentiment] %s -> ice=%d streak=%d warm_days=%d phase=%s divergence=%d adv=%.1f%% seal=%.0f%% limup=%d brk=%d emotion=%s -> %s"
           % (date, int(ice), ice_streak, warm_days, phase, divergence, advance_rate, seal_rate * 100.0,
-             pool_total, break_total, csv_path))
+             pool_total, break_total, emotion.get("conclusion") or "-", csv_path))
     print("[sentiment] 规则: T日冰点(ice=1) -> T+1 红盘比恢复=回暖(云端 _sentiment_warm 消费)；"
           "T+1 继续冰点 -> streak+1，下交易日再验证回暖且恢复阈值降低；回暖/延续 warm_days>=%d -> 分歧概率上升" % divergence_start)
     _prune_old(out_dir, keep_days)
