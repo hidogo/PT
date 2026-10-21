@@ -175,6 +175,7 @@
 - [ ] 09:25 日志 `[exp] 涨停池竞价三态合成 -> exceed=N meet=N miss=N`（合计≈涨停池只数）。
 - [ ] 09:25 竞价终态对超预期涨停池标的打 `[exp] <名>(code) 09:25竞价终态初步确认超预期 -> 观察`（与供方推荐同流程）。
 - [ ] 09:25 竞价数据缺失兜底加固（v0.36f）：逐只 actual=0.0% 且 open 未回填（快照/趋势均缺）不误弃、保持等待分时确认；open 已回填的真实平开(0.0%)才判 auction_not_met 放弃。
+- [ ] 盘中重启重建（v0.36g）：before_trading_start 同日重启分支重跑 涨停池/自选三态合成 + 竞价覆盖，防 expect_buy 45->12 丢失（09:26-10:00 重启不丢买入窗口）；开盘日验证重启后 [pool] expect_buy 不缩水。
 - [ ] 绿开（miss）涨停池标的当日不买入；10:00 前分时确认超预期（两分钟上攻/一分钟冲涨停，不破 VWAP）才买。
 - [ ] 多候选竞争日买上限 1 时：供方推荐（文件顺序）优先，涨停池合成按「分最高、最早触板(最主动)」排序后置。
 - [ ] `[pool]` 的 expect_buy 计数包含涨停池合成条目（pool_static 同步并入）。
@@ -314,7 +315,7 @@
       据探针结果定候选类别过滤（`get_industry_stocks` 官方只保证行业编码，概念(GN)支持度盘中验证，docs/06）。
 - [ ] **5日强度数据链路**：`_board_open_gain`（批量快照 open 口径，按日缓存一次）；`_board_5d_strength`（前20成员 1d 日线收盘涨跌均值，帧预算 `frame_day_limit` 8 / 快速期 12，按日缓存+分批续算、样本>=50% 才出值）。
 - [ ] 盘前/盘中核对：日志 `[probe] <sec> blocks=... industry_members=...`（每日一次）、`[elastic] new_top_board <板> strength=..% open=..% avg5=..% lead=..%`、`order sent .. elastic_top board=.. chg=..% 1m=..%`；`[budget]` 显示 `board=24/24`（10:00 前，v0.36e 合并快照每帧一批）/ `m1_p=15/15` / `day=12/12`。
-- [ ] selftest T79（预算/prio/single）/ T80（auction_c 覆盖）/ T82（新爆发触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+新 T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）+ T88（竞价数据缺失兜底加固）通过；全量 429 PASS / 0 FAIL；双编译通过。
+- [ ] selftest T79（预算/prio/single）/ T80（auction_c 覆盖）/ T82（新爆发触发/持续跟踪/换榜/因子门控/5日样本未够/触发上限/稳定窗口/易主确认/领先幅度/探针/最主动优先/10%前下单/买入后不重买）+新 T84-T87（v0.36e 概念口径/合并快照/两段式surge/回退API）+ T88（竞价数据缺失兜底加固）+ T89（盘中重启重建涨停池/自选三态）通过；全量 432 PASS / 0 FAIL；双编译通过。
 
 ## 26. 板块映射文件链路（v0.36d/e，2026-10-21）：本地生成 -> 上传 -> 云端 [boards] loaded -> 概念口径消费
 - [ ] **本地生成器** `research/expectation/export_boards.py`：读 AXquant `data/ths_board_mapping.json`（同花顺行业/概念映射）-> 写
@@ -330,7 +331,7 @@
       b) 候选两段式 `_calc_elastic_top_candidates`：批量快照按涨幅粗排（20cm 且 <10%）-> 只对前 `elastic_top_surge_top_n=5` 算 1m surge；`m1_surge_cache_ttl` 15s->30s；
       d) 预算：`frame_board_limit_fast` 12->24。
 - [ ] 盘前/盘中核对：日志 `[boards] loaded ... boards=280 stocks=5565`、`[elastic] new_top_board <THS概念名> ...`；`[budget]` 显示 `board=..`（合并快照每帧 1 次批量）/ `m1_p=15/15` / `day=12/12`。
-- [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）通过；全量 429 PASS / 0 FAIL；双编译通过。
+- [ ] selftest T83（加载/反索引/类型/缺文件不崩）+ T84（概念过滤/成员走文件/强度/排名入口）+ T85（一帧多板块仅1次批量快照 spend）+ T86（surge 只算前5）+ T87（缺文件回退 API 全链）+ T88（actual=0 且 open 未回填 -> 不误弃等待；open 已回填平开 0.0% 才判未达标）+ T89（盘中重启重建涨停池/自选三态）通过；全量 432 PASS / 0 FAIL；双编译通过。
 
 ## 27. 待上传目录瘦身（v0.36e，2026-10-21）：定时上传有数据限制，上传载荷恒定
 - [ ] **工具** `research/expectation/maintain_bridge_dir.py`：根目录三类 dated（`expectation_/zt_lianban_/sentiment_YYYY-MM-DD.csv`）

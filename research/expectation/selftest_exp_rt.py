@@ -2356,5 +2356,31 @@ ns2['_two_1m_break'] = lambda c: False
 ns2['_below_vwap'] = lambda c: False
 st2, reason2 = ns2['_exp_rt_status']('600075.XSHG')
 ok('T88 actual=0 & open present -> CS', st2 == ns2['CS'] and reason2.startswith('auction_not_met'))
+
+# --- T89 v0.36g 盘中重启：重建涨停池/自选三态（防 expect_buy 45->12 丢失） ---
+ns = fresh(); ns['load_state'] = lambda: None; ns['_save_state'] = lambda: None
+ns['_load_expectation'] = lambda: 0; ns['_load_selfwatch'] = lambda: 0; ns['_load_sentiment'] = lambda: 0
+ns['_load_zt_lianban'] = lambda: 0; ns['_load_boards'] = lambda: 0
+ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None; ns['_board_probe'] = lambda: None
+ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
+ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
+g = ns['g']
+g.state_day = '2026-10-16'          # 同日盘中重启
+g.daily = {'bought': ['600001.XSHG'], 'sold': []}
+g.exp_file = {'600100.XSHG': {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'pending_exceed',
+                              'expected_auction_change_pct': 2.0, 'has_expected_auction': True,
+                              'yesterday_open_pct': 2.0}}   # 供方文件条目（示例）
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 0}, '600002.XSHG': {'board_cnt': 1}}
+g.selfwatch = ['600003.XSHG']
+g.spot['600001.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.8}   # +8% 超预期
+g.spot['600002.XSHG'] = {'last_px': 9.6, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 9.6}     # -4% 绿开 miss
+g.spot['600003.XSHG'] = {'last_px': 10.2, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.2}   # +2% meet
+ns['before_trading_start'](ns['_CTX'], None)
+e1 = g.exp_file.get('600001.XSHG') or {}
+e2 = g.exp_file.get('600002.XSHG') or {}
+e3 = g.exp_file.get('600003.XSHG') or {}
+ok('T89 盘中重启重建涨停池三态', e1.get('_src') == 'zt_pool' and e1.get('expected_status') == 'pending_exceed' and e2.get('expected_status') == 'pending_miss')
+ok('T89 盘中重启重建自选三态', e3.get('_src') == 'selfwatch' and e3.get('expected_status') == 'pending_meet')
+ok('T89 重启保留当日已买', g.daily['bought'] == ['600001.XSHG'])
 print('ALL DONE')
 

@@ -472,6 +472,12 @@ def before_trading_start(context, data):
         pass
     if _restart_same_day:
         try:
+            _synth_pool_expect()        # v0.36g 盘中重启：重建涨停池三态（防 expect_buy 45->12 丢失）
+            _synth_selfwatch_expect()   # v0.36g 盘中重启：重建自选股三态
+            _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))
+        except Exception:
+            pass
+        try:
             _mark_one_word_open()   # v0.31c 盘中重启：重标一字板（免5s门槛不丢）
         except Exception:
             pass
