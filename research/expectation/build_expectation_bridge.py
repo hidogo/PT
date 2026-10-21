@@ -37,6 +37,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 import bridge  # noqa: E402
+import bridge.axquant_contract as axc  # noqa: E402
 
 
 CSV_HEADER = [
@@ -91,16 +92,20 @@ def cmd_from_jsonl(args: argparse.Namespace) -> int:
     src = args.source or ""
     if not src:
         local = bridge.default_expectation_path(td)
-        if os.path.isfile(local):
+        if _usable_expectation_source(local):
             src = local
         else:
-            ax = os.path.abspath(os.path.join(
-                bridge.expectation_store._expectation_data_dir(),
-                "..", "..", "AXquant", "data", "position_expectation_%s.jsonl" % td))
-            if os.path.isfile(ax):
-                src = ax
+            share = axc.expectation_source_path(td)
+            if _usable_expectation_source(share):
+                src = share
+            else:
+                ax = os.path.abspath(os.path.join(
+                    bridge.expectation_store._expectation_data_dir(),
+                    "..", "..", "AXquant", "data", "position_expectation_%s.jsonl" % td))
+                if _usable_expectation_source(ax):
+                    src = ax
     if not src or not os.path.isfile(src):
-        print("[from-jsonl] 找不到预期 JSONL（本地与 AXquant 兜底均无）", file=sys.stderr)
+        print("[from-jsonl] 找不到预期 JSONL（本地 / ShareData / AXquant 兜底均无）", file=sys.stderr)
         return 2
 
     out_dir = args.out_dir or bridge.PTRADE_BRIDGE_DIR
@@ -177,6 +182,27 @@ def _read_jsonl(path):
             except Exception:
                 continue
     return out
+
+
+def _usable_expectation_source(path):
+    """候选源需含至少一条带 code 的预期记录（跳过空文件/仅 marker 终态，防空文件抢占）。"""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(rec, dict) and rec.get("code"):
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 def _snapshot_map_from_file(path):

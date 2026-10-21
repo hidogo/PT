@@ -28,6 +28,11 @@ _DATA = os.path.join(_PROJ, "data")
 _SHARE = os.path.abspath(os.path.join(_PROJ, "..", "ShareData"))
 
 
+def expectation_source_path(trade_date: str) -> str:
+    """预期源 JSONL：AXquant 复盘任务落盘 ShareData，按预期交易日(T+1)命名。"""
+    return os.path.join(_SHARE, "position_expectation_%s.jsonl" % trade_date)
+
+
 def axquant_root() -> str:
     env = os.environ.get("AXQUANT_PROJECT_DIR", "").strip()
     if env and os.path.isdir(env):
