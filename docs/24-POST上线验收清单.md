@@ -340,6 +340,7 @@
       `on_trade_response`（mode=fill + 已成交量）；信号行带当时评分 score 与场景 note。
 - [ ] **采集器兼容**：`log_collector.py` 新增 `signal` 分类，输出 `data/logs/log_<date>.signal.csv`
       （time/sec/side/qty/limit/mode/note/score/ent/status），与现有 JSON 入库、seal.csv 同链；可形成「信号(exp-order/may-order)→回报(FILLED/REJECTED)」对账。
+- [ ] **部署核对（v0.36j）**：日志首行 `buysell_core init version=v0.36j`（init 打印 STRATEGY_VERSION），唯一确认云端运行版本，避免“版本未知”推讯。
 - [ ] 盘后核对：日志中每笔买卖都有 [signal] 行，`log_collector ingest` 后 `log_<date>.signal.csv` 行数=信号笔数；
       selftest T90（格式/SIM/回报终态）+ T91（采集器识别/解析字段）通过；全量 437 PASS / 0 FAIL；双编译通过。
 
@@ -353,3 +354,20 @@
 - [ ] **挂接**：`run_one_click_after_close.py`（步骤6，收盘生成新文件后归档昨日更早）/ `run_one_click_premarket.py`（步骤3b，09:00 上传前再收敛一次）；
       日志关键字 `[maintain] 完成: 根目录文件 N -> N 个, 体积 B -> B ... (k 个移入 archive/, m 个删除)`；幂等（无清理时 0 移动）。
 - [ ] 独立运行：`python maintain_bridge_dir.py --root <待上传根> --dry-run`（默认根 = PTRADE_BRIDGE_DIR）；功能自测（临时目录：移动/删除/保留/幂等）通过。
+## 29. v0.37 中位/主动/唯一性稳健性修复（2026-10-21，docs/33）：首板闸门/唯一性兜底收紧
+- [ ] **P0-a 最快拉升判快改逐笔毫秒归一**（`_first_zt_ms`）：逐笔 `business_time`/快照 `hsTimeStamp`（YYYYMMDDHHMMSSmmm 17 位）优先，帧 `ts`（epoch 秒）归一到同格式；`_board_first_zt`（板块内首个触板）/ `_pool_exp_priority`（涨停池观察排序）同步——同帧并列精确到那一笔，消除 3s 帧 ts 并列误判。
+- [ ] **P0-b 首板闸门比较宇宙切概念文件口径**（`_board_member_codes`）：文件 `g.boards` 已加载时用 `_concept_boards_of` + `_board_members_file`（THS 概念，与弹性套利一致），未加载回退 API 首板块前 N；「板块内涨幅最高/最主动」不再与行业口径/前20 之外的成员错配。
+- [ ] **P0-c 板块内涨幅最高批量回填**（`_board_top_gainer`）：缺失/无效快照一次 `_get_snapshot_many` 批量回填 `g.spot`，消除逐只串行 `get_snapshot` 拖慢 3s 首板路径。
+- [ ] **P1-d zt_lianban 权威唯一列**：`export_lianban.py` 复用 `derive_closing_board_status`（AXquant 同源：THS 概念映射+主题桶归并，`publish._load_board_mapping` 补 AXquant 路径+只消费概念）预计算 `unique_high/follower_count` 写入 CSV（新列 `date,..,reason,unique_high,follower_count`）；云端 `_load_zt_lianban` 读列优先（`[zt-lianban] loaded -> N unique_high=M`），`_annotate_zt_uniqueness` 仅缺列时首 token 兜底——消除首 token 拆组漂移（10-20 实盘：大业股份(人形机器人3板)/京城股份(机器人集成3板) 云兜底误授唯一穿透中位规避，权威口径并列 3 板均按中位规避，与 AXquant 复盘 role_detail=mid 一致）。
+- [ ] 盘前核对：`zt_lianban_latest.csv` 表头含 `unique_high,follower_count`；日志 `[zt-lianban] loaded .. -> 54 unique_high=2`（10-20 样本吉大正元4板/海正药业2板授唯一）。
+- [ ] 回归：selftest T92 系列（毫秒归一/最快拉升/概念成员/批量回填/权威列加载与中位规避/export_lianban 列）+ T37/T45 同步批量语义；全量 **452 PASS / 0 FAIL**；双编译（本机 py + PT `Libs/Python/python3`）通过；部署核对日志首行 `buysell_core init version=v0.37`。
+
+## 30. v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2，2026-10-21，docs/33）：连板唯一性/主动进攻性/扫板灵敏度
+- [ ] **A 动态唯一龙头**（`_try_dyn_unq`，09:30-10:00 帧末）：候选=涨停池/自选 `side=buy` 且 `first_zt` 首触；取首概念板块（`_concept_boards_of`+`_board_members_file`，缺快照一次 `_get_snapshot_many` 批量回填 `g.spot`）成员身位（`_dyn_level_of`=权威 `board_cnt`+今日触板 `last_px>=up*0.998`）——无更高/并列 → `g.dyn_unq.uniq[sec].uniq=True`（唯一龙头，日志 `[dyn-unq] .. 动态唯一龙头(首触)`）；并列/更高→False，60s 节流可重评（竞品炸板身位回落可转唯一）。
+- [ ] **B 跟风确认**（`_dyn_unq_eval_follow`）：首触后 `dyn_unq_follow_win_sec=300s` 窗口内，同板块身位更低且未封板成员涨幅前5（`dyn_unq_surge_top_n=5`）算 `_elastic_1m_surge`（m1 预算/15s 缓存），达标 `dyn_unq_surge_pct=1.5%` 家数 `>=dyn_unq_follower_min=2` → `confirm=True`（日志 `[dyn-unq] .. 跟风确认 N家`）；已封板/身位不低于龙头不算跟风；15s 节流重评。
+- [ ] **C 消费**：`_pool_exp_priority` 确认龙头 `+dyn_unq_sort_bonus=2.0` 排序加分（涨停池分最高/最主动优先内更靠前）；`_attempt_expected_buy` CX 路径补 `[dyn-unq] CX 动态唯一龙头确认 -> 预期买入` 日志；持仓侧 `_hold_arb_log` 提示「持有提示(不改卖出阈值)」。
+- [ ] **D 竞价唯一扫板**（`_try_dyn_sweep`，09:30-09:45）：竞价终态超预期（`pending_exceed`）+同身位竞品不及预期（`_dyn_unq_auction_eval` 09:25/09:31 批量算好存 `g.dyn_unq.auction`，0 盘中 RPC）+开盘上攻冲板（`_two_1m_break` 或 `_limit_up_within_1m`）+跟风确认 +现价`<涨停价*0.998`（未封板）→ `place_order(mode='board')` 限价=涨停价、预算 `dyn_sweep_budget_ratio=0.20`（=打板 20%），避免买不到；已封板/一字/现价=涨停价不扫；一帧一单，`daily['bought']`+`swept`+`buy_log` 去重（与预期买入冷启动互斥）。
+- [ ] 生命周期：A/B/C 09:30-10:00（`dyn_unq_window_minute=30`），D 09:30-09:45（`dyn_sweep_window_minute=15`）；10:00 后停止新评估、保留已确认状态。状态 `g.dyn_unq={'day','auction','uniq','swept'}` 按日重置、随 `_save_state/load_state` 持久化（同日重启保留、跨日重置）。
+- [ ] 参数（BLS 新增，可一键关）：`dyn_unq_enabled/WindowMinute/FollowWinSec/MemberCap/SurgeTopN/FollowerMin/SurgePct/SortBonus` + `dyn_sweep_enabled/WindowMinute/BudgetRatio`；默认 09:30 强度≥2% 新最强板块跟踪与弹性套利链路互不冲突（扫板仅在唯一龙头且未封板时触发）。
+- [ ] 回归：selftest T93 系列（A 唯一/并列/更高/窗口外/批量快照回填；B 达标/不足/窗口外/已封板不算跟风；D 扫板 mode=board 预算20% 限价=涨停价/已触板不扫/竞品非唯一不扫/未确认不扫/已买已扫去重；C 排序加分/CX标注/持有提示；竞价唯一预判 唯一与并列；重启保留/跨日重置）；全量 **475 PASS / 0 FAIL**；双编译通过；部署核对日志首行 `buysell_core init version=v0.38`。
+- [ ] 环境提示：本机 `export_sentiment` 会优先读 `D:/PROJ/AXquant/data/review/position_review_<date>.jsonl` 的红盘比（全市场），T74 在真实复盘文件存在时会按真实值断言失败（非策略回归）——跑 selftest 前可临时改名当日 position_review，跑完还原；或改用 `--pr-dir` 隔离目录。

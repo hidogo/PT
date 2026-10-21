@@ -1,4 +1,20 @@
 # -*- coding: utf-8 -*-
+# ============================================================
+# 当前版本：v0.38（2026-10-21）（前一版 v0.37 未存档；再前 v0.36i 存档 36ca6c6）
+# 部署核对：日志首行 `buysell_core init version=v0.38 ...`（init 打印 STRATEGY_VERSION）
+# 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
+#          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
+#          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
+#          v0.36i 统一买卖信号结构化 [signal]（采集器按日入库/对账）
+#          v0.36j 文件头版本号注释 + init 日志打版本（部署核对）
+#          v0.37 中位/主动/唯一性稳健性修复（docs/33）：a) 最快拉升判快改逐笔毫秒归一(_first_zt_ms)；
+#                b) 首板闸门比较宇宙切概念文件口径(_board_member_codes)；c) 板块内涨幅最高批量回填快照；
+#                d) zt_lianban 追加权威唯一列(unique_high/follower_count, AXquant 同源预计算)云端读列优先。
+#          v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（docs/30）：A 动态唯一(首触无更高/并列身位)；
+#                B 跟风确认(首触300s窗口内 同板块身位更低未封板成员 1m surge>=1.5% 达2家)；
+#                C 排序加分/CX标注/持有提示；D 竞价唯一(同身位竞品不及预期)+开盘上攻冲板+跟风确认
+#                +现价<涨停价 -> 涨停价扫板(预算20%, 避免买不到)；已封板/一字不扫。
+# ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
 #   (decision/sell.py, decision/__init__.py, scorer/*, btree/builder.py ma_pullback)
@@ -18,6 +34,8 @@
 #   tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 import time, pickle, csv
 from datetime import timedelta
+
+STRATEGY_VERSION = "v0.38"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
 
 
 # ---------- 参数 ----------
@@ -168,6 +186,18 @@ BLS = {
         'vwap_follow':           {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0},
         'none':                  {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0},
     },
+    # v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2，docs/30）
+    'dyn_unq_enabled': True,            # 盘中动态唯一+跟风确认 总开关
+    'dyn_unq_window_minute': 30,        # A/B/C 生命周期：09:30-10:00
+    'dyn_unq_follow_win_sec': 300,      # 跟风确认窗口：龙头首触后 300s
+    'dyn_unq_member_cap': 15,           # 同板块成员批量快照上限
+    'dyn_unq_surge_top_n': 5,           # 涨幅前 N 算 1m surge
+    'dyn_unq_follower_min': 2,          # 跟风确认最少家数
+    'dyn_unq_surge_pct': 1.5,           # 跟风 1m 拉升阈值 %
+    'dyn_unq_sort_bonus': 2.0,          # 确认龙头排序加分（_pool_exp_priority）
+    'dyn_sweep_enabled': True,          # 竞价唯一扫板 开关
+    'dyn_sweep_window_minute': 15,      # 扫板窗口 09:30-09:45
+    'dyn_sweep_budget_ratio': 0.20,     # 扫板单笔预算（=打板 20%）
 }
 # 打分加减分配置（scoring.bonus.* / scoring.penalty.* 默认）
 BONUS = {
@@ -418,6 +448,7 @@ def initialize(context):
     g.seal_base = {}    # sec -> 当日首次封单量基准
     g.seal_bid_base = {}  # sec -> 当日首次封单委托笔数基准（L2）
     g.first_zt = {}     # sec -> 涨停首笔成交感知状态（tick_data，仅交易）
+    g.dyn_unq = None    # v0.38 盘中动态唯一+跟风+扫板状态（按日重置，随 g 持久化）
     g.break_sold = set()  # sec -> 炸板事件卖出首触发标记（v0.26，跨重启持久化）
     g.seal_sold = set()   # sec -> 封单大减事件卖出首触发标记（v0.26）
     g.sealed_since = {}   # sec -> 封死状态持续计时起点（v0.26b，5s 新鲜度确认）
@@ -428,7 +459,7 @@ def initialize(context):
     run_daily(context, auction_pre_confirm, time='09:25')
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, mid_probe, time='11:00')
-    log.info('buysell_core init universe=%s DO_ORDER=%s EXPECT_ORDER=%s' % (_snl(BLS['universe']), BLS['DO_ORDER'], BLS.get('EXPECT_ORDER', False)))
+    log.info('buysell_core init version=%s universe=%s DO_ORDER=%s EXPECT_ORDER=%s' % (STRATEGY_VERSION, _snl(BLS['universe']), BLS['DO_ORDER'], BLS.get('EXPECT_ORDER', False)))
 
 
 def before_trading_start(context, data):
@@ -521,6 +552,10 @@ def handle_data(context, data):
         _try_elastic_top_buy(context)   # v0.36 新最强板块弹性套利（1m 兜底）
     except Exception as e:
         log.warn('elastic_top buy fail: %r' % e)
+    try:
+        _try_dyn_unq(context)            # v0.38 盘中动态唯一+跟风+扫板（1m 兜底，状态幂等）
+    except Exception as e:
+        log.warn('dyn_unq(1m) fail: %r' % e)
 
 
 # ================= 行情/工具 =================
@@ -1760,6 +1795,9 @@ def _load_zt_lianban():
         return 0
     try:
         hdr = [x.strip().lower() for x in rows[0]]
+        has_unq = 'unique_high' in hdr
+        has_flw = 'follower_count' in hdr
+        g.zt_unq_authoritative = has_unq    # v0.37 文件带权威唯一列（AXquant 同源预计算）-> 优先读列
         for r in rows[1:]:
             rec = dict(zip(hdr, r))
             code = (rec.get("code") or "").strip()
@@ -1773,8 +1811,10 @@ def _load_zt_lianban():
                 "chg_pct": _fnum(rec.get("chg_pct")),
                 "is_st": bool(int(_fnum(rec.get("is_st"))) or 0),
                 "reason": (rec.get("reason") or "").strip(),
+                "unique_high": bool(int(_fnum(rec.get("unique_high"))) or 0) if has_unq else False,
+                "follower_count": int(_fnum(rec.get("follower_count"))) if has_flw else 0,
             }
-        n_unq = _annotate_zt_uniqueness()   # v0.34b 云端唯一高度板兜底标注（板块内最高身位唯一+跟风低位板）
+        n_unq = _annotate_zt_uniqueness()   # v0.34b 兜底标注；v0.37 文件权威列优先
         log.info("[zt-lianban] loaded %s -> %d unique_high=%d" % (fp, len(g.zt_lianban), n_unq))
         return len(g.zt_lianban)
     except Exception as e:
@@ -1786,10 +1826,15 @@ def _annotate_zt_uniqueness():
     #   板块口径 = 涨停原因首 token（云端无权威板块映射，用首 token 兜底分组，与 AXquant 复盘 board_name 同源）；
     #   组内>=2家 且 最高身位唯一 -> unique_high=True（组内其余更低身位即跟风低位板）；
     #   特例：全市场最高身位唯一（高度压制到 3/4 板等场景）也授 unique_high。
+    # v0.37：zt_lianban 文件带权威唯一列（AXquant 同源预计算 unique_high/follower_count）时直接读列，
+    #   消除首 token 拆组漂移（如 大业股份/京城股份 同题材并列 3 板被误授唯一穿透中位规避）；
+    #   仅文件缺列时才按首 token 兜底重算。
     # 复盘 role_detail 权威标注优先（mid 规避 / unique 放行），本函数仅供无标注时兜底。
     zt = getattr(g, 'zt_lianban', {}) or {}
     if not zt:
         return 0
+    if getattr(g, 'zt_unq_authoritative', False):
+        return sum(1 for rec in zt.values() if rec.get('unique_high'))
     groups = {}
     for code, rec in zt.items():
         reason = str(rec.get('reason') or '')
@@ -2103,6 +2148,8 @@ def _attempt_expected_buy(context, code):
     if st in (CX, CM):
         if not place_expected_order(context, code, note="exp_rt %s %s" % (st, reason)):
             return None   # 发单失败 -> 下次重试，不置 fired
+        if st == CX and _dyn_unq_confirmed(code):
+            log.info('[dyn-unq] %s CX 动态唯一龙头确认 -> 预期买入' % _sn(code))
         g.daily["bought"].append(code)
         g.exp_fired.add(code)
         g.buy_log[code] = now
@@ -2110,13 +2157,281 @@ def _attempt_expected_buy(context, code):
         return True
     return None   # 仍在等待，不爆
 
+# ================= v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2，docs/30） =================
+def _dyn_unq_state():
+    # 状态容器（按日重置：auction 竞价唯一预判 / uniq 动态唯一龙头+跟风确认 / swept 已扫板）
+    try:
+        day = str(get_trading_day())
+    except Exception:
+        day = ''
+    st = getattr(g, 'dyn_unq', None)
+    if not st or st.get('day') != day:
+        st = {'day': day, 'auction': {}, 'uniq': {}, 'swept': {}}
+        g.dyn_unq = st
+    return st
+
+
+def _auction_level(sec):
+    # 竞价身位（v0.38）：T-1 权威连板数（竞价未开盘，今日续板未知 -> 不加）；名单缺失回退 0
+    try:
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        return int(zt.get('board_cnt') or 0)
+    except Exception:
+        return 0
+
+
+def _dyn_level_of(sec, snap=None):
+    # 盘中身位（v0.38）：权威 T-1 board_cnt + 今日是否触板（快照 last_px>=up*0.998，对齐 _limitup_days 续板口径）
+    d = snap.get(sec) if snap else (g.spot.get(sec) or {})
+    try:
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        base = int(zt.get('board_cnt') or 0)
+    except Exception:
+        base = 0
+    try:
+        up = float(d.get('up_px') or 0.0); px = float(d.get('last_px') or 0.0)
+        if up > 0 and px and px >= up * 0.998:
+            base += 1
+    except Exception:
+        pass
+    return base
+
+
+def _dyn_unq_confirmed(sec):
+    # 动态唯一龙头已跟风确认（排序加分/CX标注/扫板前提）
+    st = getattr(g, 'dyn_unq', None)
+    if not st:
+        return False
+    u = (st.get('uniq') or {}).get(sec) or {}
+    return bool(u.get('uniq') and u.get('confirm'))
+
+
+def _dyn_unq_auction_unique(sec):
+    # 竞价唯一（同身位竞品均不及预期）——扫板前提之一
+    st = getattr(g, 'dyn_unq', None)
+    if not st:
+        return False
+    a = (st.get('auction') or {}).get(sec) or {}
+    return bool(a.get('unique'))
+def _dyn_unq_auction_eval():
+    # 竞价唯一预判（09:25/09:31 各算一次，0 盘中 RPC）：对 side=buy 预期条目统计
+    # 同板块同身位（board_cnt）竞品中竞价超预期(pending_exceed)家数 -> 0 则本票竞价唯一。
+    if not BLS.get('dyn_unq_enabled', True):
+        return
+    st = _dyn_unq_state()
+    if st.get('auction_done'):
+        return
+    entries = {c: en for c, en in (g.exp_file or {}).items() if str(en.get('side') or '') == 'buy'}
+    if not entries:
+        return                                  # 无候选：不置 done（09:31 文件迟到可重算）
+    cboard = {}
+    board_of = {}
+    for c in entries:
+        for b in _concept_boards_of(c):
+            if _board_members_file(b, 1):
+                cboard[c] = b
+                board_of.setdefault(b, []).append(c)
+                break
+    for c, en in entries.items():
+        st_ = str(en.get('expected_status') or '')
+        exceed = 'exceed' in st_
+        b = cboard.get(c)
+        lvl = _auction_level(c)
+        peer_n = 0; peer_ex = 0
+        for p in (board_of.get(b) or []) if b else []:
+            if p == c:
+                continue
+            if _auction_level(p) != lvl:
+                continue
+            peer_n += 1
+            if 'exceed' in str((g.exp_file.get(p) or {}).get('expected_status') or ''):
+                peer_ex += 1
+        st['auction'][c] = {'exceed': exceed, 'level': lvl, 'peer_cnt': peer_n,
+                            'peer_exceed': peer_ex, 'unique': (exceed and peer_ex == 0)}
+        if exceed:
+            log.info('[dyn-unq] 竞价唯一预判 %s 身位=%s 竞品=%d/超预期=%d -> %s' % (
+                _sn(c), lvl, peer_n, peer_ex, '唯一' if peer_ex == 0 else '并列'))
+    st['auction_done'] = True
+    return len(st['auction'])
+
+
+def _dyn_unq_eval_uniq(sec, st, now):
+    # A 动态唯一首评：取首概念板块成员批量回填快照，身位无更高/并列 -> 唯一龙头
+    boards = [b for b in _concept_boards_of(sec) if _board_members_file(b, 1)]
+    if not boards:
+        return
+    board = boards[0]
+    members = [m for m in _board_members_file(board, int(BLS.get('dyn_unq_member_cap', 15))) if m]
+    if not members:
+        return
+    _need = [m for m in members if not (g.spot.get(m) or {}).get('last_px')]
+    if _need:
+        try:
+            _snap = _get_snapshot_many(_need, len(_need)) or {}
+            for _m, _d in _snap.items():
+                if _d:
+                    g.spot[_m] = _d
+        except Exception:
+            pass
+    my_lvl = _dyn_level_of(sec, {sec: g.spot.get(sec) or {}})
+    higher = same = False
+    for m in members:
+        if m == sec:
+            continue
+        ml = _dyn_level_of(m, {m: g.spot.get(m) or {}})
+        if ml > my_lvl:
+            higher = True
+        elif ml == my_lvl:
+            same = True
+    if higher or same:
+        st['uniq'][sec] = {'board': board, 'uniq': False, 'ts': now, 'level': my_lvl, 'members': members}
+        return
+    st['uniq'][sec] = {'board': board, 'uniq': True, 'ts': now, 'level': my_lvl,
+                       'members': members, 'confirm': False, 'confirm_ts': 0,
+                       'follow_ev': False, 'last_follow': 0.0, 'surge_cnt': 0}
+    log.info('[dyn-unq] %s 板块=%s 身位=%d -> 动态唯一龙头(首触)' % (_sn(sec), board, my_lvl))
+def _dyn_unq_eval_follow(sec, st, u):
+    # B 跟风确认：首触后窗口内，同板块身位更低且未封板成员涨幅前5算 1m surge，
+    # 达标家数 >= dyn_unq_follower_min -> confirm（15s 节流重评，窗口内批量快照一次）。
+    now = time.time()
+    if u.get('confirm'):
+        return
+    if now - float(u.get('last_follow') or 0) < 15.0:
+        return
+    u['last_follow'] = now
+    first_ts = ((g.first_zt or {}).get(sec) or {}).get('ts') or u.get('ts') or now
+    if now - float(first_ts) > float(BLS.get('dyn_unq_follow_win_sec', 300.0)):
+        return
+    members = u.get('members') or []
+    if not u.get('follow_ev'):
+        _need = [m for m in members if m != sec and not (g.spot.get(m) or {}).get('last_px')]
+        if _need:
+            try:
+                _snap = _get_snapshot_many(_need, len(_need)) or {}
+                for _m, _d in _snap.items():
+                    if _d:
+                        g.spot[_m] = _d
+            except Exception:
+                pass
+        u['follow_ev'] = True
+    my_lvl = u.get('level') or _dyn_level_of(sec, {sec: g.spot.get(sec) or {}})
+    followers = []
+    for m in members:
+        if m == sec:
+            continue
+        d = g.spot.get(m) or {}
+        try:
+            up = float(d.get('up_px') or 0.0); px = float(d.get('last_px') or 0.0)
+            pre = float(d.get('preclose_px') or 0.0)
+        except Exception:
+            continue
+        if up > 0 and px and px >= up * 0.998:
+            continue                           # 已封板：非跟风（并列冲板）
+        if _dyn_level_of(m, {m: d}) >= my_lvl:
+            continue                           # 身位不低于龙头：不算跟风
+        chg = (px / pre - 1.0) * 100.0 if (pre > 0 and px > 0) else -1.0
+        if chg > 0:
+            followers.append((chg, m))
+    followers.sort(reverse=True)
+    surge_cnt = 0
+    for _chg, m in followers[:int(BLS.get('dyn_unq_surge_top_n', 5))]:
+        try:
+            if _elastic_1m_surge(m) >= float(BLS.get('dyn_unq_surge_pct', 1.5)):
+                surge_cnt += 1
+        except Exception:
+            continue
+    u['surge_cnt'] = surge_cnt
+    if surge_cnt >= int(BLS.get('dyn_unq_follower_min', 2)):
+        u['confirm'] = True; u['confirm_ts'] = now
+        log.info('[dyn-unq] %s 跟风确认 %d家(1m>=%.1f%%) -> 确认' % (
+            _sn(sec), surge_cnt, float(BLS.get('dyn_unq_surge_pct', 1.5))))
+def _try_dyn_sweep(context, st=None):
+    # D 竞价唯一扫板：竞价终态超预期+同身位竞品不及预期(竞价唯一)+开盘上攻冲板(_two_1m_break/
+    # _limit_up_within_1m)+跟风确认+现价<涨停价(未封板) -> 涨停价扫板(预算20%)，避免买不到；已封板不扫。
+    if not BLS.get('dyn_sweep_enabled', True):
+        return
+    if _min_age() > int(BLS.get('dyn_sweep_window_minute', 15)):
+        return
+    if len(g.daily['bought']) >= BLS['daily_max_buy']:
+        return
+    st = st or _dyn_unq_state()
+    positions = context.portfolio.positions
+    now = time.time()
+    for sec, en in (g.exp_file or {}).items():
+        if str(en.get('side') or '') != 'buy':
+            continue
+        if sec in positions or sec in g.daily['bought'] or sec in st.get('swept', {}):
+            continue
+        if not _dyn_unq_auction_unique(sec) or not _dyn_unq_confirmed(sec):
+            continue
+        if not trade_open(sec):
+            continue
+        if _is_one_word_open(sec) or _block_sealed_buy(sec):
+            continue
+        s = g.spot.get(sec) or {}
+        px = last_px(sec); up = float(s.get('up_px') or 0.0)
+        if not px or px <= 0 or up <= 0 or px >= up * 0.998:
+            continue                           # 已触板/现价=涨停价：不扫板（限价=涨停价只在前排队）
+        if not (_two_1m_break(sec) or _limit_up_within_1m(sec)):
+            continue                           # 开盘上攻冲板（两分钟上攻 或 一分钟冲涨停）
+        if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
+            continue
+        limit = _order_limit(sec, 'buy', 'board')
+        if not limit:
+            log.info('[dyn-sweep] %s sealed -> no sweep' % _sn(sec))
+            continue
+        place_order(context, sec, 'buy',
+                    note='dyn_sweep px=%.2f limit=%.2f 跟风%d家' % (
+                        px, limit, (st.get('uniq', {}).get(sec) or {}).get('surge_cnt', 0)),
+                    mode='board', ratio=float(BLS.get('dyn_sweep_budget_ratio', 0.20)))
+        g.daily['bought'].append(sec); g.buy_log[sec] = now
+        st['swept'][sec] = {'ts': now}
+        _save_state()
+        return                                   # 一帧一单
+def _try_dyn_unq(context):
+    # v0.38 盘中动态唯一+跟风确认（P2-A/B/C）：09:30-10:00 帧末；10:00 后停止新评估、保留 confirm。
+    if not BLS.get('dyn_unq_enabled', True):
+        return
+    if _min_age() > int(BLS.get('dyn_unq_window_minute', 30)):
+        return
+    positions = context.portfolio.positions
+    st = _dyn_unq_state()
+    now = time.time()
+    try:
+        for sec in list(positions):               # C-持有侧：确认龙头持仓提示（不改卖出阈值）
+            if _dyn_unq_confirmed(sec) and (g.first_zt or {}).get(sec):
+                _hold_arb_log(sec, '盘中动态唯一龙头确认 -> 持有提示(不改卖出阈值)')
+    except Exception:
+        pass
+    cands = [c for c, en in (g.exp_file or {}).items()
+             if str(en.get('side') or '') == 'buy' and (g.first_zt or {}).get(c) and c not in positions]
+    for sec in cands:
+        try:
+            u = st['uniq'].get(sec)
+            if u is not None and u.get('uniq') is False:
+                if now - float(u.get('ts') or 0) < 60.0:
+                    continue                       # 非唯一重评节流（竞品炸板身位回落可转唯一）
+                u['ts'] = now
+            if u is None or u.get('uniq') is False:
+                _dyn_unq_eval_uniq(sec, st, now)   # A 动态唯一（首评/重评）
+                u = st['uniq'].get(sec)
+            if not u or not u.get('uniq'):
+                continue
+            _dyn_unq_eval_follow(sec, st, u)       # B 跟风确认
+        except Exception as e:
+            log.warn('dyn_unq %s fail %r' % (_sn(sec), e))
+    _try_dyn_sweep(context, st)                    # D 竞价唯一扫板
+
+
 def _pool_exp_priority(code):
     # v0.27 涨停池观察候选排序：分最高优先，其次「最主动」（最早触板/最快拉升）
     try:
         sc = float(score_now(code) or 0.0)
     except Exception:
         sc = 0.0
-    act = float((g.first_zt.get(code) or {}).get('ts') or 1e18)
+    if _dyn_unq_confirmed(code):
+        sc += float(BLS.get('dyn_unq_sort_bonus', 2.0))   # v0.38 动态唯一龙头确认排序加分
+    act = _first_zt_ms(code) or 1e18   # v0.37 毫秒归一（逐笔 ms 优先, 帧 ts 归一）
     return (-sc, act)
 
 def _try_expected_buys(context):
@@ -2264,19 +2579,27 @@ def _board_member_codes(sec):
     if c and (time.time() - c[0]) < 60:
         return list(c[1])
     codes = []
+    cap = int(BLS.get('board_member_cap', 20))
     try:
-        blocks = get_stock_blocks(sec) or {}
-        board_code = None
-        for lst in blocks.values():
-            if isinstance(lst, list):
-                for row in lst:
-                    if isinstance(row, list) and len(row) >= 1 and str(row[0]).strip():
-                        board_code = row[0]
-                        break
+        # v0.37 首板闸门比较宇宙优先概念文件口径（THS 概念, 与弹性套利一致）；文件未加载回退 API 首板块前 N
+        if getattr(g, 'boards', None):
+            for b in _concept_boards_of(sec):
+                codes = _board_members_file(b, cap)
+                if codes:
+                    break
+        if not codes:
+            blocks = get_stock_blocks(sec) or {}
+            board_code = None
+            for lst in blocks.values():
+                if isinstance(lst, list):
+                    for row in lst:
+                        if isinstance(row, list) and len(row) >= 1 and str(row[0]).strip():
+                            board_code = row[0]
+                            break
+                if board_code:
+                    break
             if board_code:
-                break
-        if board_code:
-            codes = [x for x in (_norm_sec(m) for m in (get_industry_stocks(str(board_code)) or [])[:20]) if x]
+                codes = [x for x in (_norm_sec(m) for m in (get_industry_stocks(str(board_code)) or [])[:cap]) if x]
     except Exception:
         codes = []
     g.bs_codes[sec] = (time.time(), tuple(codes))
@@ -2288,11 +2611,19 @@ def _board_top_gainer(sec):
     my = _sector_chg(sec)
     if my <= 0:
         return False
-    for m in _board_member_codes(sec):
-        if m == sec:
-            continue
+    mem = [m for m in _board_member_codes(sec) if m != sec]
+    _need = [m for m in mem if not (g.spot.get(m) or {}).get('last_px') or not (g.spot.get(m) or {}).get('preclose_px')]
+    if _need:
         try:
-            d = g.spot.get(m) or (get_snapshot(m) or {}).get(m) or {}
+            _sn = _get_snapshot_many(_need, len(_need)) or {}
+            for _m, _d in _sn.items():
+                if _d:
+                    g.spot[_m] = _d
+        except Exception:
+            pass
+    for m in mem:
+        try:
+            d = g.spot.get(m) or {}
             mp = float(d.get('preclose_px') or 0.0); mpx = float(d.get('last_px') or 0.0)
         except Exception:
             continue
@@ -2301,17 +2632,34 @@ def _board_top_gainer(sec):
     return True
 
 
+def _first_zt_ms(sec):
+    # 首触时刻归一（YYYYMMDDHHMMSSmmm 毫秒整数, 与逐笔 business_time / 快照 hsTimeStamp 同格式）：
+    # 逐笔/快照 ms 优先；缺省把帧 ts（epoch 秒）归一到同格式, 避免 17 位与 13 位 epoch 混比错序。
+    f = g.first_zt.get(sec) or {}
+    ms = f.get('ms')
+    if ms:
+        try:
+            return int(ms)
+        except Exception:
+            pass
+    ts = f.get('ts') or 0.0
+    if not ts:
+        return 0
+    lt = time.localtime(float(ts))
+    return int(time.strftime('%Y%m%d%H%M%S', lt)) * 1000 + int(float(ts) % 1 * 1000)
+
+
 def _board_first_zt(sec):
     # 主动（最快拉升）：同板块成员中首个触板（无更早触板成员则本票为最快）；缺成员对比时放行
-    my = (g.first_zt.get(sec) or {}).get('ts') or time.time()
+    # v0.37 比较用逐笔毫秒归一（同帧 ts 并列 -> 精确到那一笔）；本票未记录触板时刻时保守非最快
+    my = _first_zt_ms(sec) or None
     for m in _board_member_codes(sec):
         if m == sec:
             continue
         if _is_one_word_open(m):
             continue                      # 一字板成员不参与"主动最快"竞争（竞价一字非主动拉升）
-        f = g.first_zt.get(m) or {}
-        t = f.get('ts') or 0
-        if t and t < my - 1e-6:
+        t = _first_zt_ms(m)
+        if t and (my is None or t < my - 1e-6):
             return False
     return True
 
@@ -3556,6 +3904,11 @@ def tick_data(context, data):
         _try_elastic_top_buy(context)
     except Exception as e:
         log.warn('elastic_top buy fail: %r' % e)
+    # v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2）
+    try:
+        _try_dyn_unq(context)
+    except Exception as e:
+        log.warn('dyn_unq fail: %r' % e)
     # v0.25 Phase 3：帧末拉取预算统计
     if BLS.get('budget_log_enabled', True):
         try:
@@ -3575,6 +3928,7 @@ def auction_pre_confirm(context):
     _load_zt_lianban()
     _load_boards()               # v0.36d 板块映射文件 09:25 重读（命中 9:20 上传）
     _synth_pool_expect()         # v0.27：涨停池竞价三态初步确认（超预期->观察）
+    _dyn_unq_auction_eval()      # v0.38 竞价唯一预判（同身位竞品不及预期 -> 扫板前提，0 盘中 RPC）
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
     _synth_selfwatch_expect()    # v0.35e：自选股竞价三态（超预期->观察）
@@ -3607,6 +3961,7 @@ def after_open_probe(context):
     # 兜底重读：9:20 上传若稍晚到，09:31 再读一次（幂等）
     _load_expectation()
     _synth_pool_expect()         # v0.27：涨停池三态（09:31 兜底重合成，覆盖重读清空）
+    _dyn_unq_auction_eval()      # v0.38 竞价唯一预判（09:31 兜底重算）
     if BLS.get('selfwatch_enabled', True):
         _load_selfwatch()
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
@@ -3890,11 +4245,13 @@ def load_state():
             g.first_zt = dict(st.get('first_zt') or {})
             g.break_sold = set(st.get('break_sold') or [])
             g.seal_sold = set(st.get('seal_sold') or [])
+            g.dyn_unq = st.get('dyn_unq')
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
             g.first_zt = getattr(g, 'first_zt', None) or {}
             g.break_sold = set()
             g.seal_sold = set()
+            g.dyn_unq = None
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = {'bought': [], 'sold': []}; g.state_day = None
@@ -3916,7 +4273,8 @@ def _save_state():
                          'first_zt': dict(getattr(g, 'first_zt', None) or {}),
                          'first_zt_day': _today,
                          'break_sold': sorted(getattr(g, 'break_sold', None) or []),
-                         'seal_sold': sorted(getattr(g, 'seal_sold', None) or [])}, f, protocol=2)
+                         'seal_sold': sorted(getattr(g, 'seal_sold', None) or []),
+                         'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {})}, f, protocol=2)
     except Exception as e:
         log.warn('save_state fail %r' % e)
 

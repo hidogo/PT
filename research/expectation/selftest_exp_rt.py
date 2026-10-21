@@ -729,9 +729,10 @@ ok('T37 无名单回退 连板<=1 -> True', ns['_is_first_board']('600001.XSHG')
 ns = fresh(); ns['g'].spot['600001.XSHG'] = {'last_px': 10.5, 'preclose_px': 10.0, 'up_px': 11.0}
 ns['_board_member_codes'] = lambda sec: ['600001.XSHG', '600002.XSHG']
 ns['last_px'] = lambda sec: {'600001.XSHG': 10.5, '600002.XSHG': 10.3}.get(sec, 10.0)
-ns['get_snapshot'] = lambda m: {m: {'last_px': 10.3 if m == '600002.XSHG' else 10.5, 'preclose_px': 10.0}}
+ns['_get_snapshot_many'] = lambda codes, cap: {c: {'last_px': 10.3 if c == '600002.XSHG' else 10.5, 'preclose_px': 10.0} for c in codes}
 ok('T37 板块内最高 -> True', ns['_board_top_gainer']('600001.XSHG') is True)
-ns['get_snapshot'] = lambda m: {m: {'last_px': 10.9 if m == '600002.XSHG' else 10.5, 'preclose_px': 10.0}}
+ns['g'].spot.pop('600002.XSHG', None)   # 模拟下一帧刷新, 触发批量重取
+ns['_get_snapshot_many'] = lambda codes, cap: {c: {'last_px': 10.9 if c == '600002.XSHG' else 10.5, 'preclose_px': 10.0} for c in codes}
 ok('T37 有成员更高 -> False', ns['_board_top_gainer']('600001.XSHG') is False)
 
 ns = fresh()
@@ -980,13 +981,12 @@ ns = fresh()
 ns['g'].watch = []; ns['g'].pool_static = []
 ns['last_px'] = lambda sec: ns['g'].spot.get(sec, {}).get('last_px', 0.0)
 ns['_board_member_codes'] = lambda sec: ['600001.XSHG', '600002.XSHG']
-snap_calls = []
-ns['get_snapshot'] = lambda sec: snap_calls.append(sec) or {'600002.XSHG': {'preclose_px': 10.0, 'last_px': 10.2}}
+ns['_get_snapshot_many'] = lambda codes, cap: {c: {'preclose_px': 10.0, 'last_px': 10.2} for c in codes}
 ns['g'].spot['600001.XSHG'] = {'preclose_px': 10.0, 'last_px': 10.5}   # 我 +5%
 ns['g'].spot['600002.XSHG'] = {'preclose_px': 10.0, 'last_px': 10.3}   # 成员 +3%
-ok('T45 成员在 g.spot -> 不调 get_snapshot', ns['_board_top_gainer']('600001.XSHG') is True and snap_calls == [])
+ok('T45 成员在 g.spot -> 不调批量', ns['_board_top_gainer']('600001.XSHG') is True and '600002.XSHG' in ns['g'].spot and ns['g'].spot['600002.XSHG']['last_px'] == 10.3)
 ns['g'].spot['600002.XSHG'] = {}
-ok('T45 成员缺快照 -> 回退 get_snapshot', ns['_board_top_gainer']('600001.XSHG') is True and snap_calls == ['600002.XSHG'])
+ok('T45 成员缺快照 -> 批量回填', ns['_board_top_gainer']('600001.XSHG') is True and ns['g'].spot['600002.XSHG'].get('last_px') == 10.2)
 ns['g'].spot['600002.XSHG'] = {'preclose_px': 10.0, 'last_px': 10.6}   # 成员 +6% > 我
 ok('T45 成员更高 -> 非最高', ns['_board_top_gainer']('600001.XSHG') is False)
 
@@ -2425,5 +2425,311 @@ _p = _lc.parse_text(_txt)
 ok('T91 采集器识别 signal', any(e['type'] == 'signal' for e in _p['entries']))
 _row = _lc._parse_signal("[signal] 600001.XSHG side=BUY qty=200 limit=15.58 mode=board note=exp_rt CX score=66.5 ent=E1 status=SENT")
 ok('T91 解析 signal 字段', _row[0] == '600001.XSHG' and _row[1] == 'BUY' and _row[2] == '200' and _row[4] == 'board' and _row[8] == 'SENT')
+# --- T92 v0.37 P0/P1 审计修复：主动毫秒归一 / 概念比较宇宙 / 批量快照 / 唯一列权威优先 ---
+# T92a 首触时刻归一：逐笔 ms 优先, 帧 ts 归一同格式（YYYYMMDDHHMMSSmmm 可比较）
+ns = fresh()
+ns['g'].first_zt = {'600001.XSHG': {'ms': 20261020093231240, 'ts': 1e9},
+                    '600002.XSHG': {'ts': 1e9 + 2.0},
+                    '600003.XSHG': {'ts': 1e9 + 5.0}}
+ok('T92 逐笔ms优先(17位)', ns['_first_zt_ms']('600001.XSHG') == 20261020093231240)
+_ta2 = ns['_first_zt_ms']('600002.XSHG'); _ta3 = ns['_first_zt_ms']('600003.XSHG')
+ok('T92 帧ts归一(17位可比较)', _ta2 > 10 ** 14 and _ta3 > 10 ** 14 and _ta2 < _ta3)
+ok('T92 无记录0', ns['_first_zt_ms']('600004.XSHG') == 0)
+
+# T92b 最快拉升用毫秒（同帧 ts 并列 -> ms 精确判快）
+ns = fresh()
+g = ns['g']
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A']}
+g.first_zt = {'600001.XSHG': {'ms': 20261020093200000, 'ts': 900.0},
+              '600002.XSHG': {'ms': 20261020093230000, 'ts': 900.0}}
+g.one_word_open = set()
+ok('T92 ms更早为最主动', ns['_board_first_zt']('600001.XSHG') is True)
+ok('T92 ms更晚非最主动', ns['_board_first_zt']('600002.XSHG') is False)
+
+# T92c 首板闸门比较宇宙：概念文件优先（不走 API 行业首板块）
+ns = fresh()
+g = ns['g']
+g.boards = {'人工智能': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'人工智能': 'concept'}
+g.stock_boards = {'600001.XSHG': ['人工智能'], '600002.XSHG': ['人工智能']}
+_calls = []
+ns['get_stock_blocks'] = lambda sec: _calls.append(sec) or {}
+ok('T92 概念文件口径成员', ns['_board_member_codes']('600001.XSHG') == ['600001.XSHG', '600002.XSHG'])
+ok('T92 概念口径不走API', _calls == [])
+
+# T92d 板块内涨幅最高：批量回填缺失快照（一次 _get_snapshot_many）
+ns = fresh()
+g = ns['g']
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A']}
+g.spot['600001.XSHG'] = {'preclose_px': 10.0, 'last_px': 11.0}   # 本票 +10%
+_got = {}
+ns['_get_snapshot_many'] = lambda codes, cap: _got.update({c: {'preclose_px': 10.0, 'last_px': 10.5} for c in codes}) or _got
+ok('T92 涨幅最高(sec+10%>成员+5%)', ns['_board_top_gainer']('600001.XSHG') is True)
+ok('T92 批量回填写g.spot', '600002.XSHG' in g.spot and g.spot['600002.XSHG']['last_px'] == 10.5)
+
+# T92e zt_lianban 权威唯一列优先（AXquant 同源预计算列 -> 读列不重算, 并列3板按中位规避）
+ns = fresh()
+_lb92 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb92, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count\n'
+            '2026-10-20,603278.XSHG,大业股份,3,09:25,1.0,10.0,0,人形机器人+胎圈钢丝,0,0\n'
+            '2026-10-20,603081.XSHG,京城股份,3,09:25,1.0,10.0,0,机器人集成+气体,0,0\n'
+            '2026-10-20,003029.XSHE,吉大正元,4,09:25,1.0,10.0,0,低空安全+密码,1,4\n')
+n92e = ns['_load_zt_lianban']()
+ok('T92e 权威列加载', n92e == 3 and ns['g'].zt_unq_authoritative is True)
+ok('T92e 权威列不重算(并列3板非唯一)', ns['g'].zt_lianban['603278.XSHG']['unique_high'] is False and ns['g'].zt_lianban['603081.XSHG']['unique_high'] is False)
+ok('T92e 权威唯一高板读列', ns['g'].zt_lianban['003029.XSHE']['unique_high'] is True and ns['g'].zt_lianban['003029.XSHE']['follower_count'] == 4)
+ok('T92e 权威列中位规避', ns['_mid_board_avoid']('603278.XSHG') is True)
+ok('T92e 权威唯一高板放行', ns['_mid_board_avoid']('003029.XSHE') is False)
+
+# T92f export_lianban.build_csv 追加权威唯一列
+import export_lianban as _el92
+_csv92 = _el92.build_csv('2026-10-20',
+    [{'code': '003029.XSHE', 'name': '吉大正元', 'board_cnt': 4, 'limit_up_time': '09:25',
+      'seal_money': 1.0, 'chg_pct': 10.0, 'is_st': 0, 'reason': '低空安全+密码'}],
+    {'003029.XSHE': {'unique_high_board': True, 'follower_count': 4}})
+ok('T92f build_csv 权威列', 'unique_high' in _csv92.split('\n')[0] and ',1,4\n' in _csv92 and '003029.XSHE' in _csv92)
+
+# --- T93 v0.38 P2 盘中动态唯一+跟风确认+竞价唯一扫板 ---
+def _dyn_fix(ns, dragon='600001.XSHG', members=('600001.XSHG', '600002.XSHG', '600003.XSHG')):
+    g = ns['g']
+    g.boards = {'概念A': list(members)}
+    g.board_type = {'概念A': 'concept'}
+    g.stock_boards = {m: ['概念A'] for m in members}
+    g.zt_lianban = {m: {'board_cnt': 1 if m == dragon else 0, 'is_st': False} for m in members}
+    g.exp_file = {m: {'side': 'buy', 'entry_type': 'normal',
+                      'expected_status': 'pending_exceed' if m == dragon else 'pending_meet', '_src': 'zt_pool'} for m in members}
+    g.first_zt = {dragon: {'ts': time.time() - 30.0, 'ms': 20261020093200000, 'break': False}}
+    g.one_word_open = set()
+    for m in members:
+        g.spot[m] = {'last_px': 11.0 if m == dragon else 10.3, 'preclose_px': 10.0,
+                     'up_px': 11.0, 'open_px': 10.0, 'trade_status': 'OPEN'}
+    return g
+
+# T93a A 动态唯一：首触 + 板块内身位无更高/并列 -> 唯一龙头（跟风未确认）
+ns = fresh(); g = _dyn_fix(ns)
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 0.0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 A 首触无更高/并列 -> 唯一龙头', g.dyn_unq['uniq']['600001.XSHG'].get('uniq') is True and g.dyn_unq['uniq']['600001.XSHG'].get('confirm') is False)
+
+# T93b A 并列身位（成员同身位且已触板）-> 非唯一
+ns = fresh(); g = _dyn_fix(ns)
+g.zt_lianban['600002.XSHG']['board_cnt'] = 1
+g.spot['600002.XSHG']['last_px'] = 11.0
+ns['_min_age'] = lambda: 0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 A 并列身位 -> 非唯一', g.dyn_unq['uniq']['600001.XSHG'].get('uniq') is False)
+
+# T93c A 更高身位成员 -> 非唯一
+ns = fresh(); g = _dyn_fix(ns)
+g.zt_lianban['600002.XSHG']['board_cnt'] = 3
+ns['_min_age'] = lambda: 0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 A 更高身位 -> 非唯一', g.dyn_unq['uniq']['600001.XSHG'].get('uniq') is False)
+
+# T93d A 生命周期窗口外（10:00 后）-> 不评估
+ns = fresh(); g = _dyn_fix(ns)
+ns['_min_age'] = lambda: 31
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 A 窗口外不评估', ((getattr(g, 'dyn_unq', None) or {}).get('uniq') or {}) == {})
+
+# T93e B 跟风确认：同板块身位更低未封板成员 1m surge>=1.5% 达 2 家 -> confirm
+ns = fresh(); g = _dyn_fix(ns)
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 2.0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 B 跟风2家达标 -> 确认', g.dyn_unq['uniq']['600001.XSHG'].get('confirm') is True and g.dyn_unq['uniq']['600001.XSHG'].get('surge_cnt') == 2)
+# T93f B 跟风不足（1 家达标）-> 不确认
+ns = fresh(); g = _dyn_fix(ns)
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 2.0 if c == '600002.XSHG' else 0.5
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 B 跟风不足 -> 不确认', g.dyn_unq['uniq']['600001.XSHG'].get('confirm') is False)
+
+# T93g B 窗口外（首触 400s 前）-> 不确认
+ns = fresh(); g = _dyn_fix(ns)
+g.first_zt['600001.XSHG']['ts'] = time.time() - 400.0
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 2.0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 B 窗口外不确认', g.dyn_unq['uniq']['600001.XSHG'].get('confirm') is False)
+
+# T93h B 已封板成员不算跟风（仅1家未封板达标 -> 不确认）
+ns = fresh(); g = _dyn_fix(ns)
+g.spot['600002.XSHG']['last_px'] = 11.0            # 已封板：排除
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 2.0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 B 已封板成员不算跟风', g.dyn_unq['uniq']['600001.XSHG'].get('confirm') is False)
+
+# T93i A 成员缺快照 -> 批量快照回填一次后判唯一
+ns = fresh(); g = ns['g']
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A']}
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 1}, '600002.XSHG': {'board_cnt': 0}}
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed', '_src': 'zt_pool'}}
+g.first_zt = {'600001.XSHG': {'ts': time.time() - 30.0}}
+g.one_word_open = set()
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0}
+_calls = []
+ns['_get_snapshot_many'] = lambda codes, cap: _calls.append(list(codes)) or {x: {'last_px': 10.2, 'preclose_px': 10.0, 'up_px': 11.0} for x in codes}
+ns['_min_age'] = lambda: 0
+ns['_elastic_1m_surge'] = lambda c: 0.0
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 A 批量快照回填一次', len(_calls) == 1 and '600002.XSHG' in g.spot and g.dyn_unq['uniq']['600001.XSHG'].get('uniq') is True)
+# T93j D 扫板触发：竞价唯一+跟风确认+上攻冲板+现价<涨停价 -> 限价=涨停价 mode=board 预算20%
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed', '_src': 'zt_pool'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0, 'trade_status': 'OPEN'}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True, 'exceed': True, 'level': 1, 'peer_cnt': 0, 'peer_exceed': 0}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'level': 1, 'members': ['600001.XSHG'], 'surge_cnt': 2, 'ts': 0.0}},
+             'swept': {}}
+ns['_min_age'] = lambda: 5
+ns['_two_1m_break'] = lambda c: True
+ns['_limit_up_within_1m'] = lambda c: False
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec, mode=mode, ratio=ratio, note=note)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 D 扫板 mode=board ratio=0.20', _cap.get('sec') == '600001.XSHG' and _cap.get('mode') == 'board' and abs(float(_cap.get('ratio') or 0) - 0.20) < 1e-9)
+ok('T93 D 扫板落 daily/swept', '600001.XSHG' in g.daily['bought'] and '600001.XSHG' in g.dyn_unq['swept'])
+ok('T93 D 扫板限价=涨停价', ns['_order_limit']('600001.XSHG', 'buy', 'board') == 11.0)
+
+# T93k D 已触板/封板不扫（现价>=涨停价）
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'members': [], 'surge_cnt': 2}},
+             'swept': {}}
+ns['_min_age'] = lambda: 5
+ns['_two_1m_break'] = lambda c: True
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec, mode=mode)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 D 已触板不扫', _cap == {} and '600001.XSHG' not in g.daily['bought'])
+
+# T93l D 竞品超预期（非竞价唯一）-> 不扫
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': False, 'peer_exceed': 1}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'members': [], 'surge_cnt': 2}},
+             'swept': {}}
+ns['_min_age'] = lambda: 5
+ns['_two_1m_break'] = lambda c: True
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 D 竞品非唯一不扫', _cap == {} and '600001.XSHG' not in g.daily['bought'])
+# T93m D 跟风未确认 -> 不扫
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': False, 'members': []}},
+             'swept': {}}
+ns['_min_age'] = lambda: 5
+ns['_two_1m_break'] = lambda c: True
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 D 跟风未确认不扫', _cap == {} and '600001.XSHG' not in g.daily['bought'])
+
+# T93n D 已买/已扫去重 -> 不重复触发
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0}
+g.daily['bought'] = ['600001.XSHG']
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'members': []}},
+             'swept': {'600001.XSHG': {'ts': 1.0}}}
+ns['_min_age'] = lambda: 5
+ns['_two_1m_break'] = lambda c: True
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 D 已买/已扫去重', _cap == {} and g.dyn_unq['swept']['600001.XSHG']['ts'] == 1.0)
+
+# T93o C 排序加分：确认龙头优先（同分但触板更晚仍排前）
+ns = fresh(); g = ns['g']
+g.dyn_unq = {'day': '2026-10-16', 'auction': {},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True}},
+             'swept': {}}
+g.first_zt = {'600001.XSHG': {'ts': 2000.0}, '600002.XSHG': {'ts': 500.0}}
+ns['score_now'] = lambda sec: 60.0
+ok('T93 C 确认龙头排序加分', ns['_pool_exp_priority']('600001.XSHG') < ns['_pool_exp_priority']('600002.XSHG'))
+
+# T93p C CX 路径标注：确认龙头预期买入补 [dyn-unq] 日志
+ns = fresh(); g = ns['g']
+g.dyn_unq = {'day': '2026-10-16', 'auction': {},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True}},
+             'swept': {}}
+expbuyns(ns, '600001.XSHG')
+ns['_exp_rt_status'] = lambda c: (ns['CX'], 'two_1m_break')
+_rec = []
+ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600001.XSHG')
+ok('T93 C CX 触发并标注', r is True and '600001.XSHG' in g.daily['bought'] and any('dyn-unq' in m and 'CX' in m for m in _rec))
+
+# T93q C 持有侧提示（不改卖出阈值）
+ns = fresh(); g = ns['g']
+g.dyn_unq = {'day': '2026-10-16', 'auction': {},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True}},
+             'swept': {}}
+g.first_zt = {'600001.XSHG': {'ts': 1.0}}
+ns['_CTX'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(amount=1000)}
+ns['_min_age'] = lambda: 0
+_rec = []
+ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93 C 持有提示', any('持有提示' in m for m in _rec))
+# T93r 竞价唯一预判：同身位竞品均不及预期 -> 唯一；有竞品超预期 -> 并列
+ns = fresh(); g = ns['g']
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG', '600003.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A'], '600003.XSHG': ['概念A']}
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 1}, '600002.XSHG': {'board_cnt': 1}, '600003.XSHG': {'board_cnt': 0}}
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'},
+              '600002.XSHG': {'side': 'buy', 'expected_status': 'pending_meet'},
+              '600003.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+ns['_dyn_unq_auction_eval']()
+a1 = g.dyn_unq['auction']['600001.XSHG']
+ok('T93 竞价唯一(竞品meet) peer=1/超预期=0', a1['unique'] is True and a1['peer_cnt'] == 1 and a1['peer_exceed'] == 0)
+ns = fresh(); g = ns['g']
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A']}
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 1}, '600002.XSHG': {'board_cnt': 1}}
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'},
+              '600002.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+ns['_dyn_unq_auction_eval']()
+ok('T93 竞价并列(竞品exceed)', g.dyn_unq['auction']['600001.XSHG']['unique'] is False and g.dyn_unq['auction']['600001.XSHG']['peer_exceed'] == 1)
+
+# T93s 重启持久化：同日保留 / 跨日重置
+ns = fresh(); g = ns['g']
+g.dyn_unq = {'day': '2026-10-16', 'auction': {},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True}},
+             'swept': {}}
+ns['_save_state'](); g.dyn_unq = None; ns['load_state']()
+ok('T93 同日重启保留 confirm', (g.dyn_unq or {}).get('uniq', {}).get('600001.XSHG', {}).get('confirm') is True)
+ns = fresh(); g = ns['g']
+g.dyn_unq = {'day': '2026-10-16', 'auction': {},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True}},
+             'swept': {}}
+ns['get_trading_day'] = lambda: datetime.date(2026, 10, 19)
+st = ns['_dyn_unq_state']()
+ok('T93 跨日重置', st['day'] == '2026-10-19' and st['uniq'] == {} and st['swept'] == {})
+
 print('ALL DONE')
 

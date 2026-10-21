@@ -15,10 +15,12 @@
 """
 from __future__ import annotations
 import argparse, datetime, glob, json, os, re
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 import bridge  # noqa: E402  # 复用 PTRADE_BRIDGE_DIR / 数据目录常量
 from bridge.expectation_store import _expectation_data_dir  # noqa: E402
+from bridge.publish import derive_closing_board_status  # noqa: E402  # v0.37 AXquant 同源收盘地位重算（唯一身位/跟风数）
 
 
 def _code_ptrade(thscode: str) -> str:
@@ -70,14 +72,20 @@ def _pool_missing(payload: dict, rows) -> int:
     return 0
 
 
-def build_csv(date: str, rows: list[dict]) -> str:
-    head = "date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason"
+def build_csv(date: str, rows: list[dict], unq: dict | None = None) -> str:
+    # v0.37 追加权威唯一身位列（AXquant 同源收盘地位重算 derive_closing_board_status）：
+    #   unique_high / follower_count，云端读列优先、缺列回退首 token 兜底。
+    unq = unq or {}
+    head = "date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count"
     lines = [head]
     for r in rows:
         reason = r["reason"].replace(",", " ").replace("\n", " ").strip()
-        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s" % (
+        u = unq.get(r["code"]) or {}
+        uh = 1 if u.get("unique_high_board") else 0
+        fc = int(u.get("follower_count") or 0)
+        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s,%d,%d" % (
             date, r["code"], r["name"].replace(",", " "), r["board_cnt"],
-            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason))
+            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason, uh, fc))
     return "\n".join(lines) + "\n"
 
 
@@ -118,7 +126,13 @@ def run(date: str | None = None, lub_dir: str | None = None, out_dir: str | None
         return ""
     csv_path = os.path.join(out_dir, "zt_lianban_%s.csv" % date)
     latest = os.path.join(out_dir, "zt_lianban_latest.csv")
-    content_b = build_csv(date, rows).encode("utf-8")
+    unq = {}
+    try:
+        _st = derive_closing_board_status(date, boards_dir=Path(lub_dir or _default_axquant_lub_dir()))
+        unq = {_code_ptrade(c): s for c, s in (_st or {}).items()}
+    except Exception as e:
+        print("[zt-lianban] 唯一身位重算跳过(回退云端首token): %r" % e)
+    content_b = build_csv(date, rows, unq).encode("utf-8")
     extra = [os.path.join(out_dir, alias)] if alias else []
     for fp in tuple([csv_path, latest]) + tuple(extra):
         try:

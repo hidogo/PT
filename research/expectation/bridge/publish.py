@@ -400,6 +400,8 @@ _BOARD_MAPPING_CACHE: dict[str, set[str]] | None = None
 _BOARD_MAPPING_FILES = (
     Path(__file__).resolve().parents[3] / "data" / "ths_board_mapping.json",
     Path(__file__).resolve().parents[3] / "data" / "board_mapping_from_astock.json",
+    # v0.37 兜底 AXquant 同源 THS 概念映射（导出/复盘离线读取, 消除首 token 拆组漂移）
+    Path(__file__).resolve().parents[4] / "AXquant" / "data" / "ths_board_mapping.json",
 )
 
 
@@ -432,6 +434,9 @@ def _load_board_mapping() -> dict[str, set[str]]:
         elif isinstance(payload, list):
             for item in payload:
                 if not isinstance(item, dict):
+                    continue
+                # v0.37 只消费概念口径（对齐板块消费"只消费概念板块"约定），过滤 industry 行业板块
+                if str(item.get("board_type") or "").strip() not in ("", "concept"):
                     continue
                 code = normalize_code(
                     item.get("code")
