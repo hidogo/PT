@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.38（2026-10-21）（前一版 v0.37 未存档；再前 v0.36i 存档 36ca6c6）
-# 部署核对：日志首行 `buysell_core init version=v0.38 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.41（2026-10-21）（前一版 v0.40 存档 836c2f9；v0.39 存档 1fa9150）
+# 部署核对：日志首行 `buysell_core init version=v0.41 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -14,6 +14,10 @@
 #                B 跟风确认(首触300s窗口内 同板块身位更低未封板成员 1m surge>=1.5% 达2家)；
 #                C 排序加分/CX标注/持有提示；D 竞价唯一(同身位竞品不及预期)+开盘上攻冲板+跟风确认
 #                +现价<涨停价 -> 涨停价扫板(预算20%, 避免买不到)；已封板/一字不扫。
+#          v0.39 预期文件补股票名列（CSV/JSONL 贯通）+ 预期源对接 ShareData 共享目录
+#          v0.40 from-jsonl 自动兜底并入 ShareData 预期源（含可用性闸门防空文件抢占）
+#          v0.41 情绪温度消费统一全市场红盘比口径（_market_red_ratio 全量分片/独立 market 预算）
+#                + emotion 档位接入仓位上限（冰点/偏冷40%、回暖/发酵80%、高潮/过热taper，冲突取保守）
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -35,7 +39,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.38"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
+STRATEGY_VERSION = "v0.41"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
 
 
 # ---------- 参数 ----------

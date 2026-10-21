@@ -2782,5 +2782,13 @@ ns['get_trading_day'] = lambda: datetime.date(2026, 10, 19)
 st = ns['_dyn_unq_state']()
 ok('T93 跨日重置', st['day'] == '2026-10-19' and st['uniq'] == {} and st['swept'] == {})
 
+# T94 版本号一致性：文件内 STRATEGY_VERSION == 头部「当前版本」== 部署核对（每次版本更新必须同步）
+ver = ns['STRATEGY_VERSION']
+_head = open(SRC, 'r', encoding='utf-8').read().splitlines()
+_cur = next((l for l in _head if l.startswith('# 当前版本：')), '')
+_dep = next((l for l in _head if l.startswith('# 部署核对：')), '')
+ok('T94 头部当前版本同步', ('%s（' % ver) in _cur)
+ok('T94 部署核对同步', ('version=%s' % ver) in _dep)
+
 print('ALL DONE')
 
