@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.41（2026-10-21）（前一版 v0.40 存档 836c2f9；v0.39 存档 1fa9150）
-# 部署核对：日志首行 `buysell_core init version=v0.41 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.42（2026-10-21）（前一版 v0.41a 存档 0582c56；v0.41 存档 15839a2）
+# 部署核对：日志首行 `buysell_core init version=v0.42 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -18,6 +18,9 @@
 #          v0.40 from-jsonl 自动兜底并入 ShareData 预期源（含可用性闸门防空文件抢占）
 #          v0.41 情绪温度消费统一全市场红盘比口径（_market_red_ratio 全量分片/独立 market 预算）
 #                + emotion 档位接入仓位上限（冰点/偏冷40%、回暖/发酵80%、高潮/过热taper，冲突取保守）
+#          v0.42 一字板竞价终态精确判定（docs/29）：真一字=开=涨停价且卖1=0(total_offerqty==0)才标 one_word；
+#                + 竞价终态封单基准回填(seal_base，_exp_one_word 首帧即判) + 09:30 首帧补标(防 09:25 漏标)；
+#                卖1>0 打 [seal] playable(非真一字, 可参与) 日志；1帧内封涨停放行（不扩大拦截）
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -39,7 +42,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.41"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
+STRATEGY_VERSION = "v0.42"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
 
 
 # ---------- 参数 ----------
@@ -438,6 +441,7 @@ def initialize(context):
     g.spot = {}; g.last_ma5 = {}
     _get_ds()  # DataHub singleton warmup (kept out of g)
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
+    g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
     g.bs_cache = {}     # sec -> (ts, board_strength)
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
@@ -538,6 +542,12 @@ def handle_data(context, data):
     _set_now(context)
     g.bar_counter += 1
     refresh_spot(context)
+    if not getattr(g, 'one_word_marked_open', False):
+        g.one_word_marked_open = True
+        try:
+            _mark_one_word_open()   # v0.42 09:30 首帧补标真一字（防 09:25 快照缺失漏标，开盘即拦截；不重置只累加）
+        except Exception:
+            pass
     if not getattr(g, 'l2_probed', False):
         try:
             _l2_probe(context)   # L2 探针兜底：盘中重启/开盘后拉起也会跑一次
@@ -551,7 +561,7 @@ def handle_data(context, data):
         _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set()
+        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -1048,6 +1058,7 @@ def _mark_one_word_open():
             s = g.spot.get(sec) or {}
             up = float(s.get('up_px') or 0.0)
             op = float(s.get('open_px') or 0.0)
+            d = None
             if op <= 0 or up <= 0:   # 快照未回填(09:25)：批量补一次快照
                 if sn is None:
                     sn = _get_snapshot_many(cands, 300)
@@ -1058,9 +1069,29 @@ def _mark_one_word_open():
                     up = float(d.get('up_px') or 0.0)
             if up <= 0 or op < up * 0.998:
                 continue
+            # v0.42 竞价终态盘口：涨停股买单全在涨停价(买1)，total_bidqty(手)≈封单量；
+            #   total_offerqty==0 等价卖1=0（真一字，不排单）；卖1>0 非真一字 -> playable 可参与。
+            if d is not None:
+                s2 = g.spot.setdefault(sec, {})
+                if s2.get('total_offerqty') is None and d.get('total_offerqty') is not None:
+                    s2['total_offerqty'] = d['total_offerqty']
+                if s2.get('total_bidqty') is None and d.get('total_bidqty') is not None:
+                    s2['total_bidqty'] = d['total_bidqty']
+                s = s2
+            _tq = s.get('total_offerqty')
+            _tb = s.get('total_bidqty')
             if _sealed_now(sec):
                 g.one_word_open.add(sec)
-                log.info('[seal] %s 一字板(开=涨停价且无卖盘) -> 买入不排队' % _sn(sec))
+                # 竞价终态封单基准回填（买1=涨停价封单≈total_bidqty 手；金额口径对齐 _seal_metrics）：
+                # _exp_one_word 首帧即可判 CX/CS，不必空等 L2 base_init
+                if float(g.seal_base.get(sec, 0.0) or 0.0) <= 0 and _tb is not None:
+                    try:
+                        g.seal_base[sec] = float(_tb) * 100.0 * up
+                    except Exception:
+                        pass
+                log.info('[seal] %s 一字板(开=涨停价且无卖盘) sell1=%s buy1=%s -> 买入不排队' % (_sn(sec), _tq, _tb))
+            else:
+                log.info('[seal] %s 开=涨停价 sell1=%s buy1=%s -> playable(非真一字, 可参与)' % (_sn(sec), _tq, _tb))
         except Exception:
             continue
 
@@ -4093,7 +4124,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set()
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False
     _mark_one_word_open()
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})

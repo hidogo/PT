@@ -2790,5 +2790,78 @@ _dep = next((l for l in _head if l.startswith('# 部署核对：')), '')
 ok('T94 头部当前版本同步', ('%s（' % ver) in _cur)
 ok('T94 部署核对同步', ('version=%s' % ver) in _dep)
 
+# T95 一字板竞价终态精确判定（v0.42，docs/29）：真一字=开=涨停价且卖1=0 才标 one_word；卖1>0 playable 不标；
+#   快照缺失->09:30 首帧补标 / 真一字 meet 拦截 / 非真一字 meet 放行 / 1帧内封涨停放行、持续5s后拦截
+def _ow_ns():
+    ns = fresh()
+    g = ns['g']
+    g.watch = ['600001.XSHG', '600002.XSHG']
+    g.pool_static = []; g.selfwatch = []; g.zt_lianban = {}; g.exp_file = {}
+    g.one_word_open = set(); g.seal_base = {}; g.seal_bid_base = {}
+    return ns
+
+# T95a 真一字（竞价终态 卖1=0 且买1有排单量）-> 标 one_word + 封单基准回填 + 不排队日志
+ns = _ow_ns(); g = ns['g']
+g.spot['600001.XSHG'] = {'open_px': 11.0, 'up_px': 11.0, 'last_px': 11.0, 'preclose_px': 10.0,
+                         'total_offerqty': 0, 'total_bidqty': 5000}
+_rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['_mark_one_word_open']()
+ok('T95 真一字(卖1=0) 标 one_word', '600001.XSHG' in g.one_word_open)
+ok('T95 真一字 封单基准回填', abs(g.seal_base.get('600001.XSHG', 0.0) - 5000 * 100 * 11.0) < 1e-6)
+ok('T95 真一字 不排队日志', any('买入不排队' in m for m in _rec))
+
+# T95b 卖1>0（非真一字）-> 不标 + playable 日志，不误标不回填
+ns = _ow_ns(); g = ns['g']
+g.spot['600002.XSHG'] = {'open_px': 11.0, 'up_px': 11.0, 'last_px': 11.0, 'preclose_px': 10.0,
+                         'total_offerqty': 300, 'total_bidqty': 8000}
+_rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['_mark_one_word_open']()
+ok('T95 卖1>0 不标(playable)', '600002.XSHG' not in g.one_word_open)
+ok('T95 卖1>0 不回填封单', g.seal_base.get('600002.XSHG') is None)
+ok('T95 卖1>0 打 playable 日志', any('playable' in m and '600002.XSHG' in m for m in _rec))
+
+# T95c 09:25 快照缺失(open 未回填) 不误标 -> 09:30 首帧(spot 回填) 补标成功
+ns = _ow_ns(); g = ns['g']
+g.watch = ['600003.XSHG']
+g.spot['600003.XSHG'] = {'last_px': 13.0}
+ns['get_snapshot'] = lambda codes: {}
+ns['_mark_one_word_open']()
+ok('T95 快照缺失不误标', '600003.XSHG' not in g.one_word_open)
+g.spot['600003.XSHG'] = {'open_px': 13.0, 'up_px': 13.0, 'last_px': 13.0, 'preclose_px': 11.82,
+                         'total_offerqty': 0, 'total_bidqty': 2000}
+ns['_mark_one_word_open']()
+ok('T95 09:30 首帧补标成功', '600003.XSHG' in g.one_word_open)
+
+# T95d 真一字 meet 候选 -> place_expected_order 拦截（不排队）
+ns = _ow_ns(); g = ns['g']
+g.watch = ['600004.XSHG']
+g.one_word_open = {'600004.XSHG'}
+g.spot['600004.XSHG'] = {'open_px': 20.0, 'up_px': 20.0, 'last_px': 20.0, 'preclose_px': 18.18,
+                         'total_offerqty': 0, 'total_bidqty': 1000, 'wavg_px': 19.0}
+g.exp_file = {'600004.XSHG': {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'meet',
+                              'expected_auction_change_pct': 3.0, 'yesterday_open_pct': 2.0,
+                              'seal_amount_t0': 0.0, 'board_name': 't', 'reason': ''}}
+r = ns['place_expected_order'](ns['_ctx'], '600004.XSHG', note='exp_rt CM intraday')
+ok('T95 真一字 meet 拦截不排单', r is False)
+
+# T95e 非真一字 meet 候选（开盘=涨停价但卖1>0，可参与）-> 放行
+ns = _ow_ns(); g = ns['g']
+g.watch = ['600005.XSHG']
+g.spot['600005.XSHG'] = {'open_px': 10.0, 'up_px': 11.0, 'last_px': 10.5, 'preclose_px': 10.0,
+                         'total_offerqty': 500, 'total_bidqty': 3000, 'wavg_px': 10.2}
+g.exp_file = {'600005.XSHG': {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'meet',
+                              'expected_auction_change_pct': 3.0, 'yesterday_open_pct': 2.0,
+                              'seal_amount_t0': 0.0, 'board_name': 't', 'reason': ''}}
+r = ns['place_expected_order'](ns['_ctx'], '600005.XSHG', note='exp_rt CM intraday')
+ok('T95 非真一字 meet 放行', r is True)
+
+# T95f 1帧内封涨停：5s 门槛未满 -> 放行；持续 5s -> 拦截
+ns = _ow_ns(); g = ns['g']
+g.spot['600006.XSHG'] = {'last_px': 12.0, 'up_px': 12.0, 'total_offerqty': 0, 'total_bidqty': 4000}
+g.sealed_since = {}
+ok('T95 1帧内封涨停 首帧放行', ns['_sealed_at_limit']('600006.XSHG') is False)
+g.sealed_since['600006.XSHG'] = time.time() - 6.0
+ok('T95 封死持续5s后 拦截', ns['_sealed_at_limit']('600006.XSHG') is True)
+
 print('ALL DONE')
 
