@@ -2445,7 +2445,7 @@ class _SigLog:
 ns['log'] = _SigLog()
 ns['_signal']('600001.XSHG', 'BUY', 200, 15.58, 'board', 'exp_rt CX', ent='E1', status='SENT')
 _sl = [x for x in _logs if x.startswith('[signal] ')][0]
-ok('T90 signal 行格式', _re.match(r'^\[signal\] 600001\.XSHG side=BUY qty=200 limit=15\.58 mode=board note=exp_rt CX score=66\.5 ent=E1 status=SENT$', _sl) is not None)
+ok('T90 signal 行格式', _re.match(r'^\[signal\] 600001\.XSHG side=BUY qty=200 limit=15\.58 mode=board note=exp_rt CX score=66\.5 ent=E1 status=SENT(?: lag=\S+ det=\S+)? ?$', _sl) is not None)
 ns2 = fresh(); ns2['score_now'] = lambda sec: 50.0
 _logs2 = []
 class _SigLog2:
@@ -2862,6 +2862,29 @@ g.sealed_since = {}
 ok('T95 1帧内封涨停 首帧放行', ns['_sealed_at_limit']('600006.XSHG') is False)
 g.sealed_since['600006.XSHG'] = time.time() - 6.0
 ok('T95 封死持续5s后 拦截', ns['_sealed_at_limit']('600006.XSHG') is True)
+
+# T96 买卖理由与灵敏度日志（v0.43，docs/30）：_signal 补 lag=检测->下单时延 + det=检测源:首触毫秒
+ns = fresh(); g = ns['g']
+g.first_zt = {'600001.XSHG': {'ts': time.time() - 1.2, 'src': 'tx', 'ms': '20261021100000240'}}
+_rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['_signal']('600001.XSHG', 'buy', 100, 10.0, 'board', 'note=test', '', 'SIM')
+ok('T96 signal 补 lag+det', any('[signal]' in m and 'lag=' in m and 'det=tx:' in m for m in _rec))
+ok('T96 灵敏度采样入 rt_stats', (g.rt_stats or {}).get(('buy', 'board'), {}).get('n') == 1)
+
+# T96b 无 first_zt -> lag 为空且不采样（不强造数据）
+ns = fresh(); g = ns['g']
+_rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['_signal']('600002.XSHG', 'sell', 100, 10.0, 'sell', 'P1_green_open', '', 'SIM')
+ok('T96 无首触不采样', (getattr(g, 'rt_stats', None) or {}) == {})
+
+# T96c place_order [may-order] 带 lag（买卖理由 note + 灵敏度同行）
+ns = fresh(); g = ns['g']
+g.first_zt = {'600003.XSHG': {'ts': time.time() - 2.5, 'src': 'snap', 'ms': '0'}}
+g.spot['600003.XSHG'] = {'last_px': 10.0, 'up_px': 11.0, 'preclose_px': 10.0, 'open_px': 10.0, 'total_offerqty': 500}
+g.exp_file = {}
+_rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
+ns['place_order'](ns['_ctx'], '600003.XSHG', 'buy', note='core_buy px=10.0', mode='chase')
+ok('T96 [may-order] 带 lag', any('[may-order]' in m and 'lag=' in m and 'core_buy' in m for m in _rec))
 
 print('ALL DONE')
 

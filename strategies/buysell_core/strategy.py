@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.42（2026-10-21）（前一版 v0.41a 存档 0582c56；v0.41 存档 15839a2）
-# 部署核对：日志首行 `buysell_core init version=v0.42 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.43（2026-10-21）（前一版 v0.42 存档 6c42b27）
+# 部署核对：日志首行 `buysell_core init version=v0.43 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -21,6 +21,8 @@
 #          v0.42 一字板竞价终态精确判定（docs/29）：真一字=开=涨停价且卖1=0(total_offerqty==0)才标 one_word；
 #                + 竞价终态封单基准回填(seal_base，_exp_one_word 首帧即判) + 09:30 首帧补标(防 09:25 漏标)；
 #                卖1>0 打 [seal] playable(非真一字, 可参与) 日志；1帧内封涨停放行（不扩大拦截）
+#          v0.43 买卖操作理由与灵敏度日志固化（docs/30）：_signal 结构化行补 lag=检测->下单时延 + det=检测源:首触毫秒；
+#                [may-order]/[exp-order]/order sent 同补 lag；after_trading_end 打 [rt-summary] 日结（按 side/mode）
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -42,7 +44,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.42"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
+STRATEGY_VERSION = "v0.43"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
 
 
 # ---------- 参数 ----------
@@ -442,6 +444,7 @@ def initialize(context):
     _get_ds()  # DataHub singleton warmup (kept out of g)
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
+    g.rt_stats = {}   # v0.43 灵敏度日结采样（检测->下单时延，after_trading_end 打 [rt-summary]）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
     g.bs_cache = {}     # sec -> (ts, board_strength)
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
@@ -561,7 +564,7 @@ def handle_data(context, data):
         _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False
+        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -4124,7 +4127,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}
     _mark_one_word_open()
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})
@@ -4242,6 +4245,35 @@ def _calc_buy_qty(context, sec, price, ratio):
     return int(budget / lot) * 100
 
 
+def _rt_lag_info(sec):
+    # v0.43 灵敏度：检测参考(first_zt 首触/涨停首笔) -> 当前下单时延；返回 ('lag=..s det=src:ms', lag值或None)
+    try:
+        now = time.time()
+        ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
+        t = ft.get('ts')
+        if not t:
+            return '', None
+        lag = max(now - float(t), 0.0)
+        src = ft.get('src') or '-'
+        ms = ft.get('ms') or '-'
+        return ('lag=%.1fs det=%s:%s' % (lag, src, ms), lag)
+    except Exception:
+        return '', None
+
+
+def _acc_rt(side, mode, lag):
+    # v0.43 灵敏度日结采样（after_trading_end 汇总打 [rt-summary]）
+    try:
+        st = getattr(g, 'rt_stats', None)
+        if not isinstance(st, dict):
+            st = {}; g.rt_stats = st
+        key = (str(side), str(mode))
+        d = st.setdefault(key, {'n': 0, 'lag': 0.0, 'max': 0.0})
+        d['n'] += 1; d['lag'] += lag; d['max'] = max(d['max'], lag)
+    except Exception:
+        pass
+
+
 def _signal(sec, side, qty, limit, mode, note='', ent='', status=''):
     # v0.36i 统一买卖信号结构化行（供 log_collector 按日入库与信号->回报对账）；纯日志，PT 沙盒安全
     try:
@@ -4250,14 +4282,18 @@ def _signal(sec, side, qty, limit, mode, note='', ent='', status=''):
             sc = float(score_now(sec) or 0.0)
         except Exception:
             sc = 0.0
-        log.info('[signal] %s side=%s qty=%s limit=%s mode=%s note=%s score=%.1f ent=%s status=%s' % (
-            _sn(sec), side, qty, limit, mode, note, sc, ent, status))
+        _lag, _lv = _rt_lag_info(sec)
+        if _lv is not None:
+            _acc_rt(side, mode, _lv)   # v0.43 灵敏度采样
+        log.info('[signal] %s side=%s qty=%s limit=%s mode=%s note=%s score=%.1f ent=%s status=%s %s' % (
+            _sn(sec), side, qty, limit, mode, note, sc, ent, status, _lag))
     except Exception:
         pass
 
 
 def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None):
     positions = context.portfolio.positions
+    _lag, _lv = _rt_lag_info(sec)   # v0.43 灵敏度（检测->下单时延）
     if side == 'buy':
         if _mid_board_avoid(sec):   # v0.34 连板中位股统一兜底闸（覆盖弹性套利等入口，幂等）
             log.info('[mid-avoid] %s 连板中位股规避(order)' % _sn(sec)); return
@@ -4278,19 +4314,20 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
     if not qty or qty <= 0:
         log.warn('place_order skip qty<=0 %s' % _sn(sec)); return
     if not BLS['DO_ORDER']:
-        log.info('[may-order] %s %s qty=%s limit=%s %s (DO_ORDER=False)' % (_sn(sec), side, qty, limit, note))
+        log.info('[may-order] %s %s qty=%s limit=%s %s %s (DO_ORDER=False)' % (_sn(sec), side, qty, limit, note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent='', status='SIM')
         return
     try:
         ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0, 'ts': time.time()}
-        log.info('order sent %s %s qty=%s limit=%s ent=%s %s' % (_sn(sec), side, qty, limit, ent, note))
+        log.info('order sent %s %s qty=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, limit, ent, note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
     except Exception as e:
         log.error('order fail %s: %r' % (_sn(sec), e))
 
 
 def place_expected_order(context, sec, note=''):
+    _lag, _lv = _rt_lag_info(sec)   # v0.43 灵敏度（检测->下单时延）
     # 预期买入独立下单门控（EXPECT_ORDER）：仅此路径可在 DO_ORDER=False 时发真实单（模拟盘小额测试）
     if _mid_board_avoid(sec):   # v0.34 连板中位股统一兜底闸
         log.info('[mid-avoid] %s 连板中位股规避(exp-order)' % _sn(sec)); return False
@@ -4318,13 +4355,13 @@ def place_expected_order(context, sec, note=''):
         try:
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit}
-            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, note))
+            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s %s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, note, _lag))
             _signal(sec, 'BUY', qty, limit, mode, note, ent=ent, status='SENT')
             return True
         except Exception as e:
             log.error('exp order fail %s: %r' % (_sn(sec), e))
             return False
-    log.info('[exp-order] %s buy qty=%s limit=%s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, note))
+    log.info('[exp-order] %s buy qty=%s limit=%s %s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, note, _lag))
     _signal(sec, 'BUY', qty, limit, mode, note, ent='', status='SIM')
     return True
 
@@ -4438,4 +4475,14 @@ def _save_state():
 
 def after_trading_end(context, data):
     _save_state()
+    # v0.43 灵敏度日结：检测->下单时延按 (side, mode) 汇总
+    try:
+        _st = getattr(g, 'rt_stats', None)
+        if isinstance(_st, dict) and _st:
+            for (_side, _mode), _d in sorted(_st.items()):
+                if _d.get('n'):
+                    log.info('[rt-summary] side=%s mode=%s n=%d avg=%.1fs max=%.1fs' % (_side, _mode, _d['n'], _d['lag'] / _d['n'], _d['max']))
+            g.rt_stats = {}
+    except Exception:
+        pass
     log.info('buysell_core end bought=%s sold=%s' % (_snl(g.daily.get('bought')), _snl(g.daily.get('sold'))))

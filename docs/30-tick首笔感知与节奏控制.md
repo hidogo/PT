@@ -50,3 +50,10 @@
 - 自测：T46 逐笔解析/涨停价过滤/09:30 过滤/异常兜底 + T47 帧推送优先（188 PASS / 0 FAIL）；双编译 py310+PT3.7 通过。
 - 补充（2026-10-19 二次验证）：帧内推送优先已接入（data.transaction -> 0 额外调用，get_individual_transaction 仅兜底）；
   订阅模式/亚秒级能力完整验证矩阵见 docs/37。
+
+## 灵敏度与买卖理由日志（v0.43）
+- 结构化信号行 `[signal]` 追加灵敏度字段：`lag=检测->下单时延(秒) det=检测源:首触毫秒`（源=tx/snap，无 L2 首触不强造数据）。
+- 人类可读行同步补 lag：`[may-order]`（买入/卖出，note 即操作理由）、`[exp-order]`、`order sent`。
+- 买卖操作理由已在各行 note 记录（买入：core_buy/first_board_buy/ma_pullback/elastic_arb/elastic_top/dyn_sweep/exp_rt 状态+原因；卖出：P1_green_open/P2E_exp_miss/P3_stop_loss/P4_exp_*/P5_score_clear/P6_score_half/TICK_break_sell/TICK_seal_low 等）。
+- 日结：`after_trading_end` 打 `[rt-summary] side=.. mode=.. n=.. avg=..s max=..s`（按 买卖×模式 汇总当日检测->下单时延）。
+- 自测：T96（_signal 补 lag+det / 无首触不采样 / [may-order] 带 lag）+ T90 正则同步更新；全量 PASS / 0 FAIL。
