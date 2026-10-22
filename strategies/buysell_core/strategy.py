@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.59（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.59 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.60（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.60 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.59"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.60"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -203,6 +203,7 @@ BLS = {
     'elastic_top_surge_top_n': 5,     # v0.36e 弹性候选 surge 只算前 N（批量快照按涨幅粗排后）
     'elastic_top_member_cap': 20,     # v0.36e 概念板块强度/开盘涨幅成员样本上限（对齐旧 [:20]）
     'frame_snap_batch': 100,          # v0.36e 帧内合并快照成员批上限（概念板块并集分帧续算）
+    'board_concept_unified': True,    # v0.60 板块口径统一开关：True=全链路 THS 概念口径；False=回退 API 双轨
     # v0.36b 新爆发板块确认因子：T日开盘板块涨幅 明显强于 自身平均5日强度（docs/36 §9）
     'elastic_top_breakout_min_open': 1.0,   # 开盘板块涨幅自身下限 %
     'elastic_top_breakout_min_boost': 2.0,  # 开盘涨幅 - 5日均强度 的最小增强 %
@@ -1408,8 +1409,8 @@ def _board_strength_by_code(board_code):
         return 0.0
 
 
-def _board_member_changes(sec):
-    # 板块成员实时涨跌列表(缓存60s)：所属板块代码->成员批量快照涨跌。
+def _board_member_changes_api(sec):
+    # 板块成员实时涨跌列表（API 兜底，v0.60）：所属板块代码->成员批量快照涨跌。
     # 注：不做 get_sort_msg(该券商签名不适配会刷 ERROR)，统一走板块代码取成员。
     b = _board_code_of(sec)
     if not b:
@@ -1423,14 +1424,76 @@ def _board_member_changes(sec):
         return []
 
 
-def _board_strength(sec):
-    # 板块强度：所属板块成员实时涨跌均值（缓存60s）
+def _board_member_changes(sec):
+    # 板块成员实时涨跌列表（v0.60 统一 THS 概念口径）：所属概念板块中强度最强板块成员批量快照涨跌；
+    # 文件未加载/开关关闭回退 API（旧链 _board_code_of/_fetch_board_chgs）
+    try:
+        if not _concept_active():
+            return _board_member_changes_api(sec)
+    except Exception:
+        return _board_member_changes_api(sec)
+    b = _concept_strong_board(sec)
+    if b is None:
+        return _board_member_changes_api(sec)
+    mem = _board_members_file(b, int(BLS.get('elastic_top_member_cap', 20)))
+    if not mem:
+        return []
+    snap = _concept_snap_for(b, mem)
+    chgs = []
+    for m in mem:
+        try:
+            d = snap.get(m) or {}
+            pre = float(d.get('preclose_px') or 0.0)
+            px = float(d.get('last_px') or 0.0)
+            if pre > 0 and px > 0:
+                chgs.append(px / pre - 1.0)
+        except Exception:
+            continue
+    return chgs
+
+
+def _board_strength_api(sec):
+    # 板块强度（API 兜底，v0.60）：所属板块成员实时涨跌均值（缓存随 _board_refresh_ttl）
     b = _board_code_of(sec)
     return _board_strength_by_code(b) if b else 0.0
 
 
+def _concept_strong_board(sec):
+    # v0.60 所属概念板块中强度最强板块（文件 THS 概念口径，聚合取最强）；未激活 -> None（调用方回退 API）
+    try:
+        if not _concept_active():
+            return None
+    except Exception:
+        return None
+    best_b = None; best_st = None
+    for b in _concept_boards_of(sec):
+        try:
+            st = _concept_board_strength(b)
+        except Exception:
+            continue
+        if best_b is None or st > best_st:
+            best_b, best_st = b, st
+    return best_b
+
+
+def _board_strength_by_concept(sec):
+    # v0.60 板块强度（统一 THS 概念口径）：所属概念板块强度取最强；未激活回退 API
+    try:
+        if not _concept_active():
+            return _board_strength_api(sec)
+    except Exception:
+        return _board_strength_api(sec)
+    b = _concept_strong_board(sec)
+    return _concept_board_strength(b) if b else 0.0
+
+
+def _board_strength(sec):
+    # 板块强度（v0.60 统一 THS 概念口径；文件未加载/开关关闭回退 API）
+    return _board_strength_by_concept(sec)
+
+
 def _compute_board_rank(boards):
-    # 各板块强度排序，取强度前 N（v0.23 打首板/弹性套利板块目标）
+    # 各板块强度排序，取强度前 N（API 兜底，v0.60；概念口径见 _compute_concept_board_rank）
     sts = []
     for b in boards:
         try:
@@ -1441,19 +1504,58 @@ def _compute_board_rank(boards):
     return {b for _, b in sts[:int(BLS.get('board_rank_top_n', 3))]}
 
 
+def _compute_concept_board_rank(boards):
+    # v0.60 概念口径强度排序取前 N：文件成员 + 共享账本/单板预算缓存（_concept_board_strength）
+    sts = []
+    for b in boards:
+        try:
+            sts.append((_concept_board_strength(b), b))
+        except Exception:
+            continue
+    sts.sort(key=lambda kv: kv[0], reverse=True)
+    return {b for _, b in sts[:int(BLS.get('board_rank_top_n', 3))]}
+
+
+def _board_rank_cand_src(secs):
+    # v0.60 排名候选源：概念激活时统一 _elastic_top_cand_src（池∪T-1涨停名单），
+    # 与 _new_top_board_scan 共用 csnap_led 合并快照账本（共享 key 零额外 RPC）
+    try:
+        if _concept_active():
+            src = _elastic_top_cand_src()
+            if src:
+                return src
+    except Exception:
+        pass
+    return [s for s in (secs or []) if s]
+
+
 def _board_rank_top3_set(secs):
-    # 候选所属板块集合 -> 强度前三板块代码集合；按候选板块集合缓存（60s，随板块强度刷新）
+    # 候选所属板块 -> 强度前三板块（v0.60 统一 THS 概念口径，候选源 _elastic_top_cand_src 共享账本）；
+    # 文件未加载/开关关闭回退 API（旧链 _board_code_of/_board_strength_by_code）
     secs = [s for s in (secs or []) if s]
     if not secs:
         return set()
-    boards = sorted({b for b in (_board_code_of(s) for s in secs) if b})
+    if not _concept_active():
+        boards = sorted({b for b in (_board_code_of(s) for s in secs) if b})
+        if not boards:
+            return set()
+        try:
+            dh = _get_ds()
+            token = '|'.join(boards)
+            v = dh.cached(('board_rank', token), '_', _board_refresh_ttl(),
+                          lambda: _compute_board_rank(boards), single=True)
+            return v if v is not None else set()
+        except Exception:
+            return set()
+    src = _board_rank_cand_src(secs)
+    boards = sorted({b for s in src for b in _concept_boards_of(s) if b})
     if not boards:
         return set()
     try:
         dh = _get_ds()
         token = '|'.join(boards)
-        v = dh.cached(('board_rank', token), '_', _board_refresh_ttl(),
-                      lambda: _compute_board_rank(boards), single=True)   # v0.36 同源只留最新一条
+        v = dh.cached(('board_rank_c', token), '_', _board_refresh_ttl(),
+                      lambda: _compute_concept_board_rank(boards), single=True)
         return v if v is not None else set()
     except Exception:
         return set()
@@ -1499,12 +1601,18 @@ def _board_rank_top1(secs):
 
 
 def _board_rank_top3(sec, secs):
-    # sec 所属板块是否在候选板块强度前三（打首板/弹性套利板块目标门控）
+    # sec 所属板块是否在候选板块强度前三（v0.60 概念口径：任一所属概念板块在强度前三；
+    # 文件未加载/开关关闭回退 API 首板块判定）
     try:
-        b = _board_code_of(sec)
-        if not b:
+        if not _concept_active():
+            b = _board_code_of(sec)
+            if not b:
+                return False
+            return b in _board_rank_top3_set(secs)
+        top3 = _board_rank_top3_set(secs)
+        if not top3:
             return False
-        return b in _board_rank_top3_set(secs)
+        return any(b in top3 for b in _concept_boards_of(sec))
     except Exception:
         return False
 
@@ -1524,7 +1632,8 @@ def _near_limit_cands(secs):
     return out
 
 def _red_ratio(sec):
-    # 板块红盘比：所属板块成员中上涨占比 up/(up+dn)，缓存60s；无成员返回0.5(中性)
+    # 板块红盘比（v0.60 统一 THS 概念口径）：最强概念板块成员 up/(up+dn)；
+    # 未激活回退 API；无成员返回0.5(中性)
     chgs = _board_member_changes(sec)
     up = sum(1 for x in chgs if x > 0)
     dn = sum(1 for x in chgs if x < 0)
@@ -2554,7 +2663,8 @@ def _load_boards():
             g.boards[nm] = list(dict.fromkeys(g.boards[nm]))
         for code in g.stock_boards:
             g.stock_boards[code] = list(dict.fromkeys(g.stock_boards[code]))
-        log.info('[boards] loaded %s -> boards=%d stocks=%d' % (cand, len(g.boards), len(g.stock_boards)))
+        log.info('[boards] loaded %s -> boards=%d stocks=%d unified=%s' % (
+            cand, len(g.boards), len(g.stock_boards), bool(BLS.get('board_concept_unified', True))))
         return len(g.boards)
     return 0
 
@@ -3521,7 +3631,7 @@ def _elastic_yizi_scan():
     from collections import Counter
     cnt = Counter()
     for sec in yizi:
-        for b in _boards_of(sec):
+        for b in _concept_boards_of(sec):   # v0.60 统一 THS 概念口径（未加载回退 API）
             cnt[b] += 1
     strong = {b: n for b, n in cnt.items() if n >= int(BLS.get('elastic_arb_min_yizi', 2))}
     c.update(day=day, ts=now, strong=strong)
@@ -3530,8 +3640,8 @@ def _elastic_yizi_scan():
 
 
 def _elastic_in_strong_board(sec, strong):
-    # 候选属于任一强板块
-    for b in _boards_of(sec):
+    # 候选属于任一强板块（v0.60 统一 THS 概念口径；未加载回退 API）
+    for b in _concept_boards_of(sec):
         if b in strong:
             return True
     return False
@@ -3705,7 +3815,15 @@ def _fetch_board_open_gain(board_code):
     return (sum(gains) / len(gains)) * 100.0 if gains else 0.0
 
 
-# ================= v0.36e 概念板块口径（仅弹性套利链路：文件 THS 概念 -> 未加载回退 API） =================
+# ================= v0.36e 概念板块口径（文件 THS 概念 -> 未加载回退 API；v0.60 起全链路统一口径） =================
+def _concept_active():
+    # v0.60 概念口径开关：board_concept_unified 关闭 或 板块映射文件未加载 -> 回退 API
+    try:
+        return bool(BLS.get('board_concept_unified', True)) and bool(getattr(g, 'boards', None))
+    except Exception:
+        return False
+
+
 def _concept_boards_of(sec):
     # 概念板块归属（v0.36e）：优先文件 g.stock_boards（board_type=concept，THS 概念口径）；
     # 文件未加载回退 API _boards_of（best-effort）
@@ -3782,23 +3900,38 @@ def _concept_snap_union(boards):
     return led['snap'], ratio
 
 
-def _concept_board_strength(board, snap=None):
-    # 概念板块强度（v0.36e）：文件已加载 -> 成员=_board_members_file、快照=同帧合并 snap/单板批量；
-    # 文件未加载 -> 回退 API _board_strength_by_code（预算/缓存同旧链）
+def _concept_snap_for(board, mem):
+    # v0.60 概念快照统一入口：共享合并账本（csnap_led）新鲜且覆盖该板块时零额外 RPC，
+    # 否则单板批量走预算缓存（_board_refresh_ttl，budget=board 与 API 旧链同节奏，防 score_now 高频触发批量）
     try:
-        if not getattr(g, 'boards', None):
+        led = getattr(g, 'csnap_led', None)
+        if led and (time.time() - float(led.get('ts') or 0.0)) < float(BLS.get('board_rank_ttl_fast', 3.0)):
+            if str(board) in (str(led.get('key') or '')).split('|'):
+                return led.get('snap') or {}
+    except Exception:
+        pass
+    try:
+        dh = _get_ds()
+        v = dh.cached(('cbsnap', str(board)), '_', _board_refresh_ttl(),
+                      lambda: _get_snapshot_many(mem, len(mem)) or {}, budget='board', stale_ok=True)
+        return v if v is not None else {}
+    except Exception:
+        return {}
+
+
+def _concept_board_strength(board, snap=None):
+    # 概念板块强度（v0.60 统一口径）：文件已加载 -> 成员=_board_members_file、快照=同帧合并 snap 优先，
+    # 账本非新鲜 -> 单板预算缓存（_concept_snap_for）；文件未加载 -> 回退 API _board_strength_by_code。
+    try:
+        if not _concept_active():
             return _board_strength_by_code(board)
     except Exception:
         return _board_strength_by_code(board)
     mem = _board_members_file(board, int(BLS.get('elastic_top_member_cap', 20)))
     if not mem:
         return 0.0
-    if not snap:
-        led = getattr(g, 'csnap_led', None)
-        if led and (time.time() - float(led.get('ts') or 0.0)) < float(BLS.get('board_rank_ttl_fast', 3.0)):
-            snap = led.get('snap') or {}
-        else:
-            snap = _get_snapshot_many(mem, len(mem)) or {}
+    if snap is None:
+        snap = _concept_snap_for(board, mem)
     chgs = []
     for m in mem:
         try:

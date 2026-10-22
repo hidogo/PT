@@ -3828,5 +3828,51 @@ _n['_p2e_core_sell_check'] = lambda sec: (False, '')
 _n['tick_sell_manager'](_n['_ctx'])
 ok('T113s tick 链 P7a 清仓', len(_out) == 1 and 'P7a_vol_break' in _out[0][1] and '600200.XSHG' in (_n['g'].p7a_sold or set()))
 
+# --- T114 v0.60 板块口径统一：文件 THS 概念 -> 全链路消费；开关关闭/未加载回退 API ---
+_n = fresh()
+_g = _n['g']
+_g.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
+_g.boards = {'机器人': ['600001.XSHG', '600002.XSHG'], '算力': ['600001.XSHG', '600003.XSHG']}
+_g.board_type = {'机器人': 'concept', '算力': 'concept'}
+_g.stock_boards = {'600001.XSHG': ['机器人', '算力'], '600002.XSHG': ['机器人'], '600003.XSHG': ['算力']}
+def _sn114(secs):
+    out = {}
+    for c in secs:
+        chg = {'600001.XSHG': 0.01, '600002.XSHG': 0.01, '600003.XSHG': 0.03}.get(c, 0.0)
+        out[c] = {'preclose_px': 10.0, 'last_px': 10.0 * (1 + chg)}
+    return out
+_n['get_snapshot'] = lambda secs: _sn114(secs)
+_n['_elastic_top_cand_src'] = lambda: ['600001.XSHG', '600002.XSHG', '600003.XSHG']
+# 机器人=+1%（2成员均值），算力=+2%（600001 1% + 600003 3% 均值2%）-> 算力最强
+ok('T114 概念强度取最强板块(算力2%)', abs(_n['_board_strength_by_concept']('600001.XSHG') - 2.0) < 1e-6)
+ok('T114 _board_strength 统一概念口径', abs(_n['_board_strength']('600001.XSHG') - 2.0) < 1e-6)
+ok('T114 单板块股强度(机器人1%)', abs(_n['_board_strength']('600002.XSHG') - 1.0) < 1e-6)
+# 排名门控：算力(2%)/机器人(1%) 均入前三（共2板块）；600001 任一所属概念在 top3 -> 通过
+top3 = _n['_board_rank_top3_set'](['600001.XSHG'])
+ok('T114 概念top3含算力', '算力' in top3 and '机器人' in top3)
+ok('T114 rank门控概念口径通过', _n['_board_rank_top3']('600001.XSHG', ['600001.XSHG']))
+# 红盘比：算力 2涨0跌 -> 1.0
+ok('T114 红盘比最强板块口径', abs(_n['_red_ratio']('600001.XSHG') - 1.0) < 1e-9)
+# 弹性一字强板块归属走概念
+ok('T114 elastic强板块概念口径', _n['_elastic_in_strong_board']('600001.XSHG', {'算力': 2}))
+ok('T114 非强板块归属不入', not _n['_elastic_in_strong_board']('600002.XSHG', {'算力': 2}))
+# 共享账本：先建 csnap_led（top1 合并快照），rank 强度读账本 -> 不产生单板 cbsnap 缓存
+_dh = _n['_get_ds'](); _dh.cache.clear()
+_n['_concept_board_rank_top1'](['600001.XSHG'])
+_n['_board_rank_top3_set'](['600001.XSHG'])
+ok('T114 rank与top1共享合并账本', ('cbsnap', '算力') not in _dh.cache and ('cbsnap', '机器人') not in _dh.cache)
+# 开关关闭 -> 回退 API（即使文件已加载）
+_n2 = fresh()
+_n2['g'].boards = {'机器人': ['600001.XSHG']}
+_n2['g'].board_type = {'机器人': 'concept'}
+_n2['g'].stock_boards = {'600001.XSHG': ['机器人']}
+_n2['BLS']['board_concept_unified'] = False
+_n2['_board_strength_api'] = lambda sec: 7.0
+ok('T114 开关关闭回退API强度', _n2['_board_strength']('600001.XSHG') == 7.0)
+# 未加载 -> 回退 API（g.boards 空）
+_n3 = fresh()
+_n3['_board_strength_api'] = lambda sec: 8.0
+ok('T114 未加载回退API强度', _n3['_board_strength']('600001.XSHG') == 8.0)
+
 print('ALL DONE')
 

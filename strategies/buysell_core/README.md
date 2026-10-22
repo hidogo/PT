@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.59（2026-10-22）
+- 当前版本：v0.60（2026-10-22）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.59 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.60 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,17 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.60（2026-10-22）板块口径统一：全链路 THS 概念文件（docs/33）
+- 统一口径开关 `board_concept_unified=True`：残留 5 处 API 双轨全切文件 THS 概念（`boards_latest.csv`），关闭即回退旧 API 双轨。
+- `_board_rank_top3`/`_board_rank_top3_set` 概念化：候选源统一 `_elastic_top_cand_src`（池∪T-1涨停名单）共享 `csnap_led`
+  合并快照账本（首板/回封/弹性套利板块目标、tick 扩板）。
+- `_board_strength` 概念化：所属概念板块强度取最强（`_board_strength_by_concept`/`_concept_strong_board`）——打分板块分、
+  板块走弱扣分、持仓 P7b 板块强/弱、地位评估 board 分类全走概念口径。
+- `_red_ratio` 概念化：最强概念板块成员红盘比；`_elastic_yizi_scan`/`_elastic_in_strong_board` 一字板归属切 `_concept_boards_of`。
+- 灵敏度保持：10:00 前 3s 同频；`_concept_snap_for` 账本新鲜零额外 RPC、否则单板预算缓存（budget=board 同旧链节奏）；共享账本同源 key 零额外批量。
+- 验证：T114 新增 11 项（最强聚合/排名门控/红盘比/elastic归属/共享账本/开关关闭/未加载回退）。全量 655 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.60` 与 `[boards] loaded ... unified=True`。
 
 ### v0.59（2026-10-22）持仓卖出闭环：地位评估 + P7a/P7b/P7c（docs/33）
 - 持仓地位评估 `_hold_stand`（15s 节流缓存）：role（leader/follower/mid/outside）+ active（主动/跟风/中性）+

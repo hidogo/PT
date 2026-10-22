@@ -422,6 +422,36 @@
   回封取消/主动不标/窗口外、地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
 
+## v0.60 板块口径统一：残留链路全切 THS 概念文件（2026-10-22）
+
+> 背景：v0.36e 弹性套利链路已走文件 THS 概念口径（boards_latest.csv），但残留 5 处 API 双轨
+> （get_stock_blocks/get_industry_stocks）：板块强度前三门控、评分板块分、板块红盘比、弹性一字归属。
+> 本次按「口径统一 + 灵敏度保持」原则全部切到文件概念口径，未加载/开关关闭回退 API。
+
+### 改动点
+- 开关 `board_concept_unified=True`（默认开；False 一键回退旧 API 双轨），`[boards] loaded` 日志标注 unified 状态。
+- `_board_rank_top3_set`/`_board_rank_top3`：候选板块集改 `_concept_boards_of`（全列表），强度改 `_concept_board_strength`；
+  候选源统一 `_elastic_top_cand_src`（池∪T-1涨停名单）-> 与 `_new_top_board_scan` 同 key 共享 `csnap_led` 合并快照账本（零额外 RPC）。
+  消费点：首板/回封/弹性套利板块目标门控、tick 扩板。
+- `_board_strength`：新增 `_board_strength_by_concept`（所属概念板块强度取最强，聚合决策已确认）+ `_concept_strong_board`；
+  打分 `_board_bonus`/板块走弱扣分/dump_scores/P7b 板块强/地位 board 分类全走概念。
+- `_red_ratio`：最强概念板块成员 up/(up+dn)；`_elastic_yizi_scan`/`_elastic_in_strong_board` 一字板归属切 `_concept_boards_of`。
+- `_concept_snap_for` 统一快照入口：共享账本（csnap_led 新鲜且覆盖该板块）零额外 RPC；否则单板批量预算缓存
+  （budget=board，`_board_refresh_ttl` 与 API 旧链同节奏，防 score_now 高频触发批量）。
+
+### 灵敏度/预算
+- 10:00 前 3s 同频保持（`_board_refresh_ttl` 不动）；首板/回封门控用「账本新鲜读共享 snap、否则单板批量」双路径，
+  冷启动每候选板 1 次批量（与旧 API 路径同构），账本整轮完成后同帧 0 额外 RPC。
+- `frame_board_limit_fast=24` 覆盖候选板块并集分帧续算；`get_stock_blocks`/`get_industry_stocks` 主链归零（仅兜底保留），blocks 预算释放。
+- 共享账本验证：T114 断言 top1 建账后 rank_top3 强度读账本、不产生单板 cbsnap 缓存。
+
+### 自测/边界
+- T114 新增 11 项（最强聚合/单板块强度/概念top3/rank门控/红盘比/elastic归属/共享账本/开关关闭回退/未加载回退）。
+  全量 655 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
+- 边界：概念成员 cap 20 与 API 成员数不可比，跨日对比以文件口径为准（5日均值已文件化）；boards_latest.csv 低频，
+  文件 mtime 超 3 日日志告警（不自动回退，防盘中口径跳变）；未在文件内的标的（非池/涨停名单）无概念归属 -> rank 门控不通过（文件为准）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.60` 与 `[boards] loaded ... unified=True`。
+
 ## v0.58 P2E 竞价核卖（同题材中位崩塌传导 + 自身大不及）（2026-10-22）
 
 > 背景：P2E 原逻辑只对文件 `expected_status ∈ (confirmed_miss, degraded)` 清仓（无竞价幅度、无题材传导、9:30 后才有卖出链）。
