@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.60（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.60 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.61（2026-10-23）
+# 部署核对：日志首行 `buysell_core init version=v0.61 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.60"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.61"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
 
 
 def _warn(msg):
@@ -58,7 +58,7 @@ BLS = {
     'limit_down_bse': 0.30,        # 北交所 30cm
     'sell_pending_timeout': 120.0, # 卖单挂起超时无回报 -> 视为丢失, 放行重试(对齐AXquant order_lost)
     'seal_fail_ratio': 0.333,       # 封单衰退：<= 基准*(1/3) -> 破
-    'firstzt_min_seal': 50000.0,      # 首此涨停上报最小封单额(元)，过滤假封
+    'firstzt_min_seal': 200000.0,      # 首此涨停上报最小封单额(元)，过滤假封
     'firstzt_min_bids': 5,            # 首此涨停上报最小买一挂单量(手)
     # v0.49 炸板应对收紧 + 回封打板（docs/33）
     'break_sell_bid_level': 3,        # 炸板卖出限价：L2 买N档价（默认买3）

@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.60（2026-10-22）
+- 当前版本：v0.61（2026-10-23）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.60 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.61 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,12 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.61（2026-10-23）首此涨停封单门槛上调（firstzt_min_seal 5万->20万）
+- `firstzt_min_seal` 50000 -> 200000（元）：首此涨停上报/回封确认的最小封单额，过滤小封单假封；
+  仅影响 first_zt 触板跟踪与快照兜底（5366/5383），首板买入门 `first_board_seal_min`(50000) 独立未动。
+- 验证：全量 655 PASS / 0 FAIL；py3.10 编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.61`。
 
 ### v0.60（2026-10-22）板块口径统一：全链路 THS 概念文件（docs/33）
 - 统一口径开关 `board_concept_unified=True`：残留 5 处 API 双轨全切文件 THS 概念（`boards_latest.csv`），关闭即回退旧 API 双轨。

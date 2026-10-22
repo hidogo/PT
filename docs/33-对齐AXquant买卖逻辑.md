@@ -422,6 +422,14 @@
   回封取消/主动不标/窗口外、地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
 
+## v0.61 首此涨停封单门槛上调（2026-10-23）
+
+- `firstzt_min_seal` 50000 -> 200000（元）：首此涨停上报最小封单额（5366 快照兜底 / 5383 回封确认），
+  过滤小封单假封；`firstzt_min_bids`(5) 不变。
+- 首板买入门 `first_board_seal_min`(50000) 独立配置、本次不动（买侧语义与上报侧分离）。
+- 自测：全量 655 PASS / 0 FAIL；py3.10 编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.61`。
+
 ## v0.60 板块口径统一：残留链路全切 THS 概念文件（2026-10-22）
 
 > 背景：v0.36e 弹性套利链路已走文件 THS 概念口径（boards_latest.csv），但残留 5 处 API 双轨
