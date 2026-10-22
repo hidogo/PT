@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.48（2026-10-22）（前一版 v0.43 存档 1eea218）
-# 部署核对：日志首行 `buysell_core init version=v0.48 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.49（2026-10-22）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.49 ...`（init 打印 STRATEGY_VERSION）
+#          v0.49 炸板应对收紧 + 回封打板（docs/33）：A 炸板卖出改买N档限价(默认买3+0.95下限保护)；
+#                B 唯一身位连板封单容忍(seal_fail_ratio_unique) + 二次炸板减半(仅唯一身位后排助攻/人气龙头)；
+#                C 炸板减去早盘触涨停分(+6, 回封复位恢复)；D 回封打板(前排首板/2板 10:00前炸板回封, 大单占比>=10%)
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -35,6 +38,9 @@
 #          v0.48 修复 v0.47 实锤问题（docs/33）：A business_amount 单位非'元'——按 shares/lots/yuan 换算元
 #                (默认股x价)，探针输出最大单笔元值；B tick_board_scan 并入强度前三成员仅限首板窗口
 #                (_min_age<=first_board_minute) + 成员上限 20->10（午后帧预算归零）
+#          v0.49 炸板应对收紧 + 回封打板（docs/33）：A 炸板卖出改买N档限价(默认买3+0.95下限保护)；
+#                B 唯一身位连板封单容忍(seal_fail_ratio_unique) + 二次炸板减半(仅唯一身位后排助攻/人气龙头)；
+#                C 炸板减去早盘触涨停分(+6, 回封复位恢复)；D 回封打板(前排首板/2板 10:00前炸板回封, 大单占比>=10%)
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -56,7 +62,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.48"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.49"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -109,6 +115,16 @@ BLS = {
     'seal_fail_ratio': 0.333,       # 封单衰退：<= 基准*(1/3) -> 破
     'firstzt_min_seal': 50000.0,      # 首此涨停上报最小封单额(元)，过滤假封
     'firstzt_min_bids': 5,            # 首此涨停上报最小买一挂单量(手)
+    # v0.49 炸板应对收紧 + 回封打板（docs/33）
+    'break_sell_bid_level': 3,        # 炸板卖出限价：L2 买N档价（默认买3）
+    'break_sell_floor_ratio': 0.95,   # 炸板卖出限价下限（现价*0.95，防过度杀价）
+    'seal_fail_ratio_unique': 0.25,   # 唯一身位连板封单衰竭容忍度（更小=更容忍）
+    'break2_half_ratio': 0.5,         # 二次炸板减半（仅唯一身位+后排助攻/人气龙头）
+    'reboard_buy_enabled': True,      # 回封打板总开关（前排首板/2板 10:00前炸板回封）
+    'reboard_until_minute': 30,       # 回封打板生命周期：09:30-10:00
+    'reboard_max_lianban': 2,         # 回封仅限首板或2板
+    'reboard_seal_min': 50000.0,      # 回封封单下限(元)（与大单加持二选一）
+    'reboard_l2_big_min': 0.10,       # 回封要求大单占比>=10%实时成交量
     # 预期文件：AXquant 预期三态 csv（docs/25）
     'expectation_base': 'data/expectation_',
     'expectation_suffix': '.csv',
@@ -513,6 +529,8 @@ def initialize(context):
     g.dyn_unq = None    # v0.38 盘中动态唯一+跟风+扫板状态（按日重置，随 g 持久化）
     g.break_sold = set()  # sec -> 炸板事件卖出首触发标记（v0.26，跨重启持久化）
     g.seal_sold = set()   # sec -> 封单大减事件卖出首触发标记（v0.26）
+    g.break2_sold = set() # sec -> 二次炸板减半卖出标记（v0.49，跨重启持久化）
+    g.reboard_fired = False  # 回封打板每日全局 1 次标记（v0.49）
     g.sealed_since = {}   # sec -> 封死状态持续计时起点（v0.26b，5s 新鲜度确认）
     g.zt_lianban = {}   # sec -> T-1 涨停/连板名单（AXquant limit_up_boards 导出, upload_file）
     g.exp_file = {}     # sec -> 预期文件条目（AXquant 竞价终态）
@@ -604,7 +622,7 @@ def handle_data(context, data):
         _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
+        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -728,7 +746,7 @@ def _static_bonus(sec):
     b = 0.0
     if _auction_beat_history(sec):
         b += BONUS['auction_beat_history']
-    if _touched_limit_early(sec):
+    if _touched_limit_early(sec) and not _broken_now(sec):   # v0.49 炸板减去涨停分(+6), 回封复位后恢复
         b += BONUS['touched_limit_up_early']
     if _volume_ratio(sec) < 0.6:
         b += BONUS['volume_ratio_shrink']
@@ -1258,6 +1276,25 @@ def _exp_one_word(sec):
     log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d -> CM" % (_sn(sec), seal, base, ratio, bids))
     return CM, ["seal_within"]
 
+
+
+def _unique_stand(sec):
+    # v0.49 唯一身位（人气龙头/后排助攻）：复盘 unique_high 或 动态唯一+跟风确认
+    try:
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        if zt.get('unique_high'):
+            return True
+        return _dyn_unq_confirmed(sec)
+    except Exception:
+        return False
+
+
+def _broken_now(sec):
+    # v0.49 炸板中（break 未复位）——供打分扣涨停分
+    try:
+        return bool((g.first_zt.get(sec) or {}).get('break'))
+    except Exception:
+        return False
 
 
 def _auction_beat_history(sec):
@@ -2934,6 +2971,64 @@ def _try_first_board_buy(context, sec, rank_secs=None):
     _save_state()
 
 
+def _try_reboard_buy(context):
+    # v0.49 回封打板：前排首板/2板 10:00前炸板后回封，大单占比>=10% -> 打板参与（每日全局1次, 只打第一个回封前排）
+    if not BLS.get('reboard_buy_enabled', True):
+        return
+    if _min_age() > int(BLS.get('reboard_until_minute', 30)):
+        return
+    if getattr(g, 'reboard_fired', False):
+        return                                   # 每日全局 1 次
+    if len(g.daily['bought']) >= BLS['daily_max_buy']:
+        return
+    cands = []
+    for sec, ft in (getattr(g, 'first_zt', None) or {}).items():
+        if not isinstance(ft, dict):
+            continue
+        if int(ft.get('break_cnt') or 0) < 1:
+            continue
+        if ft.get('break'):
+            continue                             # 需已回封（未处于破板状态）
+        s0 = g.spot.get(sec) or {}
+        last = float(s0.get('last_px') or 0.0); u0 = float(s0.get('up_px') or 0.0)
+        if last <= 0 or u0 <= 0 or last < u0 * 0.998:
+            continue
+        if _is_one_word_open(sec) or sec in context.portfolio.positions:
+            continue
+        if _mid_board_avoid(sec):
+            continue
+        if _limitup_days(sec) > int(BLS.get('reboard_max_lianban', 2)):
+            continue                             # 仅首板或2板
+        cands.append((float(ft.get('reboard_ts') or 0), sec))
+    if not cands:
+        return
+    cands.sort(key=lambda x: x[0])               # 只打第一个回封
+    _ts, sec = cands[0]
+    if BLS.get('board_rank_enabled', True):
+        rs = _near_limit_cands(_pool())
+        if not _board_rank_top3(sec, rs or [sec]):
+            log.info('[reboard] %s 非前排(强度前三) -> skip' % _sn(sec)); return
+    amt, _cnt = _seal_metrics(sec)
+    seal_min = float(BLS.get('reboard_seal_min', 50000.0))
+    big_r = _l2_big_ratio(sec)
+    big_ok = _l2_big_ok(sec) and big_r >= float(BLS.get('reboard_l2_big_min', 0.10))
+    if not big_ok:
+        log.info('[reboard] %s 大单占比=%.2f%%<%s%% -> skip' % (_sn(sec), big_r * 100.0 if big_r >= 0 else 0.0, float(BLS.get('reboard_l2_big_min', 0.10)) * 100.0)); return
+    if seal_min > 0 and amt > 0 and amt < seal_min:
+        log.info('[reboard] %s 封单不足 seal=%.0f<%.0f -> skip' % (_sn(sec), amt, seal_min)); return
+    if _block_sealed_buy(sec):
+        return
+    limit = _order_limit(sec, 'buy', 'board')
+    if not limit:
+        log.info('[reboard] %s sealed -> skip board queue' % _sn(sec)); return
+    place_order(context, sec, 'buy', note='reboard_buy break_cnt=%d l2_big=%.2f%% px=%.2f limit=%.2f' % (
+        int((g.first_zt.get(sec) or {}).get('break_cnt') or 0), big_r * 100.0 if big_r >= 0 else 0.0, last_px(sec) or 0.0, limit), mode='board',
+        ratio=BLS.get('board_buy_budget_ratio', 0.20))
+    g.daily['bought'].append(sec); g.buy_log[sec] = time.time()
+    g.reboard_fired = True
+    _save_state()
+
+
 def _try_first_board_buy_1m(context):
     # 1m 兜底（回测/丢 tick）：对池内逼近涨停的首板候选补一次首板闸门评估
     if not BLS.get('first_board_buy_enabled', True):
@@ -3690,14 +3785,14 @@ def _sell_inflight(sec):
     return True
 
 
-def _do_sell(context, sec, qty, note, urgent=False):
+def _do_sell(context, sec, qty, note, urgent=False, mode=None):
     # 统一卖出入口：sold_log 冷却 + 在途挂单守卫(_sell_inflight)；urgent(核卖)限价用跌停地板价保成交
     if qty <= 0:
         return
     if not isinstance(getattr(g, 'sold_log', None), dict):
         g.sold_log = {}
     g.sold_log[sec] = time.time()
-    place_order(context, sec, 'sell', qty=qty, note=note, mode=('sell_urgent' if urgent else 'sell'))
+    place_order(context, sec, 'sell', qty=qty, note=note, mode=mode or ('sell_urgent' if urgent else 'sell'))
 
 def _audit_pos_fields(sec, p):
     # 一次性(1h节流)打印该持仓可用字段，定位实盘可卖数量真实字段名（不猜字段）
@@ -3839,10 +3934,20 @@ def tick_sell_manager(context):
         ft = g.first_zt.get(sec) or {}
         # \u70b8\u677f\u5356\u51fa\uff1a\u6da8\u505c\u9996\u89e6\u540e\u6389\u51fa\u6da8\u505c\u4ef7\uff08break \u9996\u89e6\u53d1 -> \u5356\uff0c\u73b0\u4ef7\u9650\u4ef7\u9632\u8fc7\u5ea6\u6740\u4ef7\uff09
         if BLS.get('break_sell_enabled', True) and ft.get('break'):
-            if sec not in (getattr(g, 'break_sold', None) or set()):
-                _do_sell(context, sec, amt, 'TICK_break_sell held=%.0fs' % (now - float(ft.get('break_ts') or now)))
-                _mark_sold_event(sec, 'break')
-                continue
+            _bc = int(ft.get('break_cnt') or 0)
+            if _bc >= 2 and _unique_stand(sec):
+                if sec not in (getattr(g, 'break2_sold', None) or set()):
+                    _half = int(amt * float(BLS.get('break2_half_ratio', 0.5)))
+                    _half = int(_half // 100) * 100
+                    _do_sell(context, sec, _half if _half >= 100 else amt,
+                             'TICK_break2_half_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                    _mark_sold_event(sec, 'break2')
+                    continue
+            else:
+                if sec not in (getattr(g, 'break_sold', None) or set()):
+                    _do_sell(context, sec, amt, 'TICK_break_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                    _mark_sold_event(sec, 'break')
+                    continue
         # \u5c01\u5355\u5927\u51cf\u5356\u51fa\uff1a\u5c01\u5355<=\u9996\u5c01*seal_fail_ratio \u6216\u59d4\u6258\u7b14\u6570\u8870\u7aed\uff08seal_low \u9996\u89e6\u53d1\uff0c\u9632\u70b8\u677f\u63d0\u524d\u8d70\uff09
         if BLS.get('seal_low_sell_enabled', True) and ft.get('seal_low'):
             if sec not in (getattr(g, 'seal_sold', None) or set()):
@@ -3870,7 +3975,7 @@ def tick_sell_manager(context):
 def _mark_sold_event(sec, kind):
     # \u4e8b\u4ef6\u5356\u51fa\u9996\u89e6\u53d1\u6807\u8bb0\uff08\u8de8\u91cd\u542f\u6301\u4e45\u5316\uff0c\u9632\u540c\u65e5\u91cd\u542f\u540e\u5bf9\u5df2\u70b8\u677f/\u5df2\u8870\u7aed\u6807\u7684\u91cd\u590d\u5356\uff09
     try:
-        key = 'break_sold' if kind == 'break' else 'seal_sold'
+        key = 'break_sold' if kind == 'break' else ('break2_sold' if kind == 'break2' else 'seal_sold')
         st = getattr(g, key, None)
         if not isinstance(st, set):
             st = set(); setattr(g, key, st)
@@ -4200,10 +4305,19 @@ def tick_data(context, data):
             if last < u - 1e-9:                 # 破板
                 if not ft.get('break'):
                     ft['break'] = True; ft['break_ts'] = time.time()
-                    log.info('[firstzt] %s price=%.2f -> BREAK seal=%.0f held=%.0fs' % (_sn(sec), last, seal, time.time() - ft.get('ts', time.time())))
+                    ft['break_cnt'] = int(ft.get('break_cnt') or 0) + 1
+                    log.info('[firstzt] %s price=%.2f -> BREAK#%d seal=%.0f held=%.0fs' % (_sn(sec), last, int(ft.get('break_cnt') or 0), seal, time.time() - ft.get('ts', time.time())))
                 continue
-            fs = ft.get('first_seal') or 0.0    # 封单衰竭（相对首封）
-            if fs > 0 and seal < fs * float(BLS.get('seal_fail_ratio', 0.333)):
+            if ft.get('break') and last >= u - 1e-9 and seal >= float(BLS.get('firstzt_min_seal', 0.0)):
+                ft['break'] = False
+                if not ft.get('reboard_ts'):
+                    ft['reboard_ts'] = time.time()
+                log.info('[firstzt] %s 回封 reboard_ts=%.0f break_cnt=%d seal=%.0f' % (_sn(sec), float(ft.get('reboard_ts') or 0), int(ft.get('break_cnt') or 0), seal))
+            fs = ft.get('first_seal') or 0.0
+            _sfr = float(BLS.get('seal_fail_ratio', 0.333))
+            if _unique_stand(sec):   # v0.49 唯一身位连板更容忍（后排助攻/人气龙头）
+                _sfr = float(BLS.get('seal_fail_ratio_unique', 0.25))    # 封单衰竭（相对首封）
+            if fs > 0 and seal < fs * _sfr:
                 if not ft.get('seal_low'):
                     ft['seal_low'] = True
                     log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW' % (_sn(sec), seal, fs, seal / fs, bids))
@@ -4214,6 +4328,11 @@ def tick_data(context, data):
         tick_sell_manager(context)
     except Exception as e:
         _warn('tick sell fail: %r' % e)
+    # v0.49 回封打板：3s 帧末评估（前排首板/2板 10:00前炸板回封 + 大单占比>=10%）
+    try:
+        _try_reboard_buy(context)
+    except Exception as e:
+        _warn('reboard buy fail: %r' % e)
 
     # v0.13：3s 帧末统一评估预期买入（竞价超预期/快速上攻/封单超预期 -> 立买；走弱 -> 放弃）
     if BLS.get('tick_exp_enabled', True):
@@ -4294,7 +4413,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
     _mark_one_word_open()
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})
@@ -4336,6 +4455,20 @@ def _order_limit(sec, side, mode):
             floor = _limit_down_price(sec)
             if floor and floor > 0:
                 return _round_price(floor)
+        if mode == 'sell_break':   # v0.49 炸板卖出：L2 买N档限价（默认买3），缺失回退现价；0.95 下限防过度杀价
+            try:
+                gp = _gear(sec)
+                _lv = int(BLS.get('break_sell_bid_level', 3))
+                b = (gp.get('bid_grp') or {}).get(_lv) or []
+                if isinstance(b, (list, tuple)) and len(b) >= 1 and float(b[0] or 0) > 0:
+                    bid = float(b[0])
+                    floor = px * float(BLS.get('break_sell_floor_ratio', 0.95))
+                    if bid < floor:
+                        bid = floor
+                    return _round_price(bid)
+            except Exception:
+                pass
+            return _round_price(px)
         return _round_price(px)
     if mode == 'board':
         if _sealed_at_limit(sec):
@@ -4606,12 +4739,16 @@ def load_state():
             g.first_zt = dict(st.get('first_zt') or {})
             g.break_sold = set(st.get('break_sold') or [])
             g.seal_sold = set(st.get('seal_sold') or [])
+            g.break2_sold = set(st.get('break2_sold') or [])
+            g.reboard_fired = bool(st.get('reboard_fired'))
             g.dyn_unq = st.get('dyn_unq')
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
             g.first_zt = getattr(g, 'first_zt', None) or {}
             g.break_sold = set()
             g.seal_sold = set()
+            g.break2_sold = set()
+            g.reboard_fired = False
             g.dyn_unq = None
     except Exception:
         g.buy_log = {}; g.sold_log = {}
@@ -4635,6 +4772,8 @@ def _save_state():
                          'first_zt_day': _today,
                          'break_sold': sorted(getattr(g, 'break_sold', None) or []),
                          'seal_sold': sorted(getattr(g, 'seal_sold', None) or []),
+                         'break2_sold': sorted(getattr(g, 'break2_sold', None) or []),
+                         'reboard_fired': bool(getattr(g, 'reboard_fired', False)),
                          'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {})}, f, protocol=2)
     except Exception as e:
         _warn('save_state fail %r' % e)

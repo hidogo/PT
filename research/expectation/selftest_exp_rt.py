@@ -1286,7 +1286,7 @@ ns['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_c
 ns['_save_state'] = lambda *a, **k: None
 ns['_sell_inflight'] = lambda sec: False
 out = []
-ns['_do_sell'] = lambda c, sec, qty, note, urgent=False: out.append((sec, note, urgent))
+ns['_do_sell'] = lambda c, sec, qty, note, urgent=False, mode=None: out.append((sec, note, urgent))
 ns['tick_sell_manager'](ns['_CTX'])
 ok('T59 炸板首触发卖(现价)', len(out) == 1 and 'TICK_break_sell' in out[0][1] and out[0][2] is False)
 ok('T59 炸板标记', '600001.XSHG' in ns['g'].break_sold)
@@ -1309,7 +1309,7 @@ ns2['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_
 ns2['_save_state'] = lambda *a, **k: None
 ns2['_sell_inflight'] = lambda sec: False
 out2 = []
-ns2['_do_sell'] = lambda c, sec, qty, note, urgent=False: out2.append((sec, note))
+ns2['_do_sell'] = lambda c, sec, qty, note, urgent=False, mode=None: out2.append((sec, note))
 ns2['tick_sell_manager'](ns2['_CTX'])
 ok('T59 封单大减卖', len(out2) == 1 and 'TICK_seal_low_sell' in out2[0][1])
 ok('T59 封单标记', '600001.XSHG' in ns2['g'].seal_sold)
@@ -1329,7 +1329,7 @@ ns3['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_
 ns3['_save_state'] = lambda *a, **k: None
 ns3['_sell_inflight'] = lambda sec: False
 out3 = []
-ns3['_do_sell'] = lambda c, sec, qty, note, urgent=False: out3.append((sec, note, urgent))
+ns3['_do_sell'] = lambda c, sec, qty, note, urgent=False, mode=None: out3.append((sec, note, urgent))
 ns3['tick_sell_manager'](ns3['_CTX'])
 ok('T59 P3 止损 tick 3s 触发(核卖)', len(out3) == 1 and 'P3_stop_loss_tick' in out3[0][1] and out3[0][2] is True)
 
@@ -3024,6 +3024,107 @@ g.tick_targets_cache = None
 g.now_dt = datetime.datetime(2026,10,16,10,5,0)   # _min_age=35>10 窗口外
 out2 = ns['_tick_targets']()
 ok('T104 窗口外(10:05) 不并入板块成员', '600002.XSHG' not in out2 and '600003.XSHG' not in out2)
+
+# T105 v0.49 炸板应对收紧：买3价卖出 / 炸板扣涨停分 / 唯一身位容忍 / 二次炸板减半
+# a) 炸板卖出买3档限价 + 0.95 下限保护
+ns = fresh(); g = ns['g']
+g.spot['600001.XSHG'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 11.0}
+ns['_gear'] = lambda sec: {'bid_grp': {1: [11.0, 0, 0], 3: [10.8, 100, 2]}}
+ok('T105 炸板卖买3价限价=10.8', abs(ns['_order_limit']('600001.XSHG', 'sell', 'sell_break') - 10.8) < 1e-9)
+ns['_gear'] = lambda sec: {'bid_grp': {1: [11.0, 0, 0], 3: [10.3, 100, 2]}}
+ok('T105 买3<0.95下限 -> 用下限10.45', abs(ns['_order_limit']('600001.XSHG', 'sell', 'sell_break') - 10.45) < 1e-9)
+ns['_gear'] = lambda sec: {'bid_grp': {1: [11.0, 0, 0]}}
+ok('T105 买3缺失 -> 回退现价11.0', abs(ns['_order_limit']('600001.XSHG', 'sell', 'sell_break') - 11.0) < 1e-9)
+
+# b) 炸板减去涨停分（_touched_limit_early +6 取消）
+ns = fresh(); g = ns['g']
+g.first_zt = {}; g.spot['600001.XSHG'] = {'last_px': 10.98, 'preclose_px': 10.0, 'up_px': 11.0}
+g.now_dt = datetime.datetime(2026, 10, 16, 9, 40, 0)
+ns['_auction_beat_history'] = lambda sec: False
+ns['_volume_ratio'] = lambda sec: 1.0
+ns['_is_100day_high'] = lambda sec: False
+ns['_board_bonus'] = lambda sec: 0.0
+ns['_tags'] = lambda sec: []
+ok('T105 未炸板 touched_limit_up_early +6', abs(ns['_static_bonus']('600001.XSHG') - 6.0) < 1e-9)
+g.first_zt['600001.XSHG'] = {'break': True}
+ok('T105 炸板减去涨停分(+6=0)', abs(ns['_static_bonus']('600001.XSHG') - 0.0) < 1e-9)
+
+# c) 唯一身位判定
+ns = fresh(); g = ns['g']
+g.zt_lianban = {'600001.XSHG': {'unique_high': True}}
+ok('T105 unique_high 唯一身位', ns['_unique_stand']('600001.XSHG') is True)
+g.zt_lianban = {'600001.XSHG': {'unique_high': False}}
+ns['_dyn_unq_confirmed'] = lambda sec: True
+ok('T105 动态唯一+跟风确认 唯一身位', ns['_unique_stand']('600001.XSHG') is True)
+ns['_dyn_unq_confirmed'] = lambda sec: False
+ok('T105 非唯一身位', ns['_unique_stand']('600001.XSHG') is False)
+ok('T105 唯一容忍阈值0.25 < 默认0.333', ns['BLS']['seal_fail_ratio_unique'] < ns['BLS']['seal_fail_ratio'])
+
+# d) 二次炸板减半（仅唯一身位）
+def _tick_sell_ns(break_cnt, unique, break_sold_has=False):
+    ns = fresh(); g = ns['g']
+    g.first_zt = {'600001.XSHG': {'break': True, 'break_cnt': break_cnt,
+                                  'break_ts': time.time(), 'ts': time.time()}}
+    g.break_sold = set(['600001.XSHG']) if break_sold_has else set()
+    g.break2_sold = set(); g.sold_log = {}
+    g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0}
+    g.exp_file = {}
+    ns['_sellable_source'] = lambda: {'600001.XSHG': object()}
+    ns['_sellable'] = lambda raw, pos: 1000
+    ns['_norm_sec'] = lambda c: c
+    ns['last_px'] = lambda sec: 10.9
+    ns['_hold_exp_init'] = lambda sec, force=False: None
+    ns['_sell_inflight'] = lambda sec: False
+    ns['_unique_stand'] = lambda sec: unique
+    ns['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+    ns['_auction_change'] = lambda sec: 5.0
+    ns['my_cost'] = lambda raw, pos: 10.0
+    ns['_do_sell'] = lambda context, sec, qty, note, urgent=False, mode=None:         ns['_calls'].append((sec, qty, mode))
+    ns['_mark_sold_event'] = lambda sec, kind: ns['_ev'].append(kind)
+    ns['_calls'] = []; ns['_ev'] = []
+    return ns
+
+ns = _tick_sell_ns(1, False)
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T105 首次炸板全卖(mode=sell_break)', len(ns['_calls']) == 1 and ns['_calls'][0][1] == 1000 and ns['_calls'][0][2] == 'sell_break')
+ns = _tick_sell_ns(2, True)
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T105 二次炸板唯一身位 -> 减半500', len(ns['_calls']) == 1 and ns['_calls'][0][1] == 500)
+ns = _tick_sell_ns(2, False, break_sold_has=True)
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T105 二次炸板非唯一+已break_sold -> 不重复卖', len(ns['_calls']) == 0)
+
+# T106 v0.49 回封打板：前排首板 10:00前炸板回封 + 大单占比>=10%
+def _reboard_ns(big_r, big_ok, fired=False):
+    ns = fresh(); g = ns['g']
+    g.spot['600001.XSHG'] = {'last_px': 10.98, 'preclose_px': 10.0, 'up_px': 11.0, 'turnover': 100000000.0}
+    g.first_zt = {'600001.XSHG': {'break': False, 'break_cnt': 1, 'reboard_ts': time.time(), 'first_seal': 100000.0}}
+    g.reboard_fired = fired
+    g.daily = {'bought': []}
+    g.now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+    ns['_is_one_word_open'] = lambda sec: False
+    ns['_mid_board_avoid'] = lambda sec: False
+    ns['_limitup_days'] = lambda sec: 1
+    ns['_board_rank_top3'] = lambda sec, rs: True
+    ns['_near_limit_cands'] = lambda secs: ['600001.XSHG']
+    ns['_pool'] = lambda: ['600001.XSHG']
+    ns['_seal_metrics'] = lambda sec: (200000.0, 500)
+    ns['_l2_big_ratio'] = lambda sec: big_r
+    ns['_l2_big_ok'] = lambda sec: big_ok
+    ns['_block_sealed_buy'] = lambda sec: False
+    ns['_order_limit'] = lambda sec, side, mode: 11.0
+    ns['_buy_pos_ok'] = lambda context, sec, qty, limit: True
+    return ns
+
+ns = _reboard_ns(0.27, True)
+ns['_try_reboard_buy'](ns['_CTX'])
+ok('T106 大单27% 回封打板触发', ns['g'].reboard_fired is True and '600001.XSHG' in ns['g'].daily['bought'])
+ns = _reboard_ns(0.05, False)
+ns['_try_reboard_buy'](ns['_CTX'])
+ok('T106 大单5%<10% 不触发', ns['g'].reboard_fired is False and '600001.XSHG' not in ns['g'].daily['bought'])
+ns = _reboard_ns(0.27, True, fired=True)
+ns['_try_reboard_buy'](ns['_CTX'])
+ok('T106 当日已 fired 不触发', '600001.XSHG' not in ns['g'].daily['bought'])
 
 print('ALL DONE')
 

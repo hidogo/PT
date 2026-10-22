@@ -378,3 +378,20 @@
 >    `tick_board_member_cap` 20->10（午后并入无交易价值，帧预算归零）。
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
+
+## v0.49 炸板应对收紧 + 回封打板（2026-10-22）
+
+> A) 炸板卖出改买N档限价：`_order_limit` 新增 `sell_break` 模式——取 L2 `bid_grp[break_sell_bid_level(3)]` 档价，
+>    缺失回退现价；`break_sell_floor_ratio(0.95)` 下限保护（防炸板瞬间买3被砸深时过度杀价）。
+> B) 唯一身位连板封单容忍 + 二次炸板减半：唯一身位判定=`_unique_stand`（复盘 `unique_high` 或动态唯一+跟风确认）；
+>    seal_low 阈值唯一身位用 `seal_fail_ratio_unique(0.25)`（默认 0.333）；`break_cnt` 计数——首次炸板全卖，
+>    二次炸板且唯一身位（后排助攻/人气龙头）减半 `break2_half_ratio(0.5)`，非唯一维持清仓语义；
+>    `break` 支持回封复位（`last>=涨停价x0.998` 且封单达标 -> break=False，break_cnt/reboard_ts 保留）。
+> C) 炸板减去涨停分：`_static_bonus` 的 `touched_limit_up_early(+6)` 加 `not _broken_now(sec)` 条件，
+>    炸板即取消，回封复位后恢复。
+> D) 回封打板 `_try_reboard_buy`：前排（板块强度前三）首板/2板 10:00 前炸板后回封，且 L2 大单占比>=10%
+>    （`reboard_l2_big_min`）-> 涨停价打板参与；封单下限 `reboard_seal_min(50000)`；每日全局 1 次
+>    （`g.reboard_fired`，跨重启持久化），只打第一个回封的前排候选；非持仓/非一字/非中位股规避。
+- 自测：T105（买3限价+下限/扣涨停分/唯一身位/二次炸板减半）+ T106（回封打板触发/大单不足/已fired）+ T24 mock 签名适配。
+  全量 548 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.49` 与 `[firstzt] BREAK#N / 回封 / TICK_break2_half_sell` 日志。
