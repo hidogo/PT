@@ -357,3 +357,13 @@
 - 权威优先不变：复盘 `role_detail=mid_consecutive_limit_up` 仍规避；`unique_high_board_consecutive` 仍放行（不依赖兜底）。
 - 自测：T73 系列（板块唯一 3 板+跟风放行 / 并列最高规避 / 全市场唯一高标放行 / 板块有更高身位时 3 板规避 / role_detail 权威优先）。全量 346 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py；zt_lianban CSV 需含 `reason` 列（export_lianban.py 已导出）。
+
+## v0.46-v0.47 首板收紧与灵敏度（2026-10-22）
+
+> v0.46：`_try_first_board_buy` 补首板封单下限（L2 买一挂单金额 >= first_board_seal_min，防假封秒炸）；
+> `_dyn_unq_auction_eval` 跳过中位股（与 `_mid_board_avoid` 统一口径，`dyn_unq_mid_skip`）。
+> v0.47：A) L2 大单占比加分（逐笔 business_amount 按 trade_index 去重累计，占比>=10% 加分5分/封单豁免）；
+> B) 强度前三板块成员并入 tick 目标集（`tick_board_scan`）+ scan_interval 4->1 + [scan] 窗口探针；
+> C) 预封扫板=封单下限 或 大单加持 二者满足其一。
+- 自测：T99/T100/T101/T102/T103。全量 527 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py。

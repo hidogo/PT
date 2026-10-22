@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.46（2026-10-22）（前一版 v0.43 存档 1eea218）
-# 部署核对：日志首行 `buysell_core init version=v0.46 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.47（2026-10-22）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.47 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -29,6 +29,9 @@
 #                修复 qty<=0 skip 分支与 except 二次崩溃导致 tick_data 链路中断）
 #          v0.46 首板封单下限 + 唯一预判身位统一（docs/33）：_try_first_board_buy 补 first_board_seal_min
 #                (L2 买一挂单金额, 防假封秒炸)；_dyn_unq_auction_eval 跳过中位股(与 _mid_board_avoid 统一口径)
+#          v0.47 灵敏度收紧（docs/33）：A L2 大单占比加分（逐笔 business_amount 按 trade_index 去重累计，
+#                >=10% 加分5分/封单豁免）；B 强度前三板块成员并入 tick 目标集 + scan_interval 4->1 + [scan] 探针；
+#                C 预封扫板=封单下限 或 大单加持 二者满足其一
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -50,7 +53,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.46"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.47"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -106,7 +109,7 @@ BLS = {
     # 预期文件：AXquant 预期三态 csv（docs/25）
     'expectation_base': 'data/expectation_',
     'expectation_suffix': '.csv',
-    'scan_interval': 4,             # 每 N 根 bar 触发一次全市场扫描
+    'scan_interval': 1,             # 每 N 根 bar 触发一次全市场扫描（v0.47 收紧 4->1）
     'score_sell_clear': 30, 'score_sell_half': 50,
     # 止损按板块
     'stop_loss_pct': 0.05, 'stop_loss_chinext': 0.07, 'stop_loss_star': 0.08, 'stop_loss_bse': 0.10,
@@ -152,6 +155,13 @@ BLS = {
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 50000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
     'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
+    'l2_big_enabled': True,            # v0.47 L2 大单占比（近涨停候选逐笔累计）
+    'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
+    'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
+    'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
+    'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
+    'tick_board_scan': True,           # v0.47 B1: tick 目标并入强度前三板块成员
+    'tick_board_member_cap': 20,       # 每板块并入成员上限
     'first_board_bids_min': 5,         # 首板打板最小买一挂单量(手)
     # v0.19 弹性套利 elastic_arb（AXquant Phase 1）
     'elastic_arb_enabled': True,       # 弹性套利总开关
@@ -371,13 +381,16 @@ class DataHub(object):
                 out[sec] = ms
             else:
                 miss.append(sec)
-        if miss:
-            raw = self._tx_pull_raw(miss) or {}
-            fields = raw.get('fields') or []
-            for sec in miss:
-                ms = _parse_tx_zt_ms(sec, raw.get(sec) or [], fields)
-                if ms is not None:
-                    out[sec] = ms
+        raw = self._tx_pull_raw(secs) or {}   # v0.47 全量拉（含帧推送命中, 供大单累计; 帧内缓存 0 额外 RPC）
+        fields = raw.get('fields') or []
+        for sec in miss:
+            ms = _parse_tx_zt_ms(sec, raw.get(sec) or [], fields)
+            if ms is not None:
+                out[sec] = ms
+        try:
+            _tx_big_feed(secs, fields, raw)   # v0.47 L2 大单累计（同帧 raw）
+        except Exception:
+            pass
         return out
 
     def _tx_pull_raw(self, secs):
@@ -467,6 +480,7 @@ def initialize(context):
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
     g.rt_stats = {}   # v0.43 灵敏度日结采样（检测->下单时延，after_trading_end 打 [rt-summary]）
+    g.l2_big = {}; g.l2_big_probed = set()   # v0.47 L2 大单累计（按日重置）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
     g.bs_cache = {}     # sec -> (ts, board_strength)
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
@@ -586,7 +600,7 @@ def handle_data(context, data):
         _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}
+        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -693,6 +707,7 @@ def score_now(sec):
     vp = _vwap_penalty(sec)
     ei = _external_internal(sec)
     raw = base + bonus - penalty + atk - vp + ei
+    raw += _l2_big_bonus_pts(sec)   # v0.47 L2 大单占比>=10% 加分
     raw = max(0.0, min(92.0, raw))
     if _is_debug(sec):
         log.info('score %s base=%.0f bonus=%.0f penalty=%.0f atk=%.0f vp=%.0f ei=%.0f -> %.1f' % (
@@ -1874,7 +1889,9 @@ def _sync_watch(context):
         watch = _scan_market()
         if watch:
             g.watch = list(dict.fromkeys(watch))
-        log.info('market_scan bar=%s pool=%d watch=%d' % (_hhmm(), len(g.pool_all or []), len(g.watch)))
+        log.info('market_scan bar=%s pool=%d watch=%d off=%d cap=%d' % (
+            _hhmm(), len(g.pool_all or []), len(g.watch),
+            getattr(g, 'scan_offset', 0), int(BLS.get('scan_batch', 300))))
     except Exception as e:
         _warn('market_scan fail: %r' % e)
 
@@ -2890,8 +2907,10 @@ def _try_first_board_buy(context, sec, rank_secs=None):
         return                       # 一字/封死涨停不排队（防御）
     amt, _cnt = _seal_metrics(sec)   # v0.46 首板封单下限（L2 买一挂单金额, 防假封秒炸）
     seal_min = float(BLS.get('first_board_seal_min', 50000.0))
-    if seal_min > 0 and amt > 0 and amt < seal_min:
-        log.info('[firstboard] %s 封单不足 seal=%.0f<%.0f -> skip' % (_sn(sec), amt, seal_min))
+    _big_r = _l2_big_ratio(sec)   # v0.47 大单加持：占比>=10% 豁免封单下限（预封扫板）
+    if seal_min > 0 and amt > 0 and amt < seal_min and not _l2_big_ok(sec):
+        log.info('[firstboard] %s 封单不足 seal=%.0f<%.0f 且无大单加持(big=%.2f%%) -> skip' % (
+            _sn(sec), amt, seal_min, _big_r * 100.0 if _big_r >= 0 else 0.0))
         return
     s = g.spot.get(sec) or {}
     up = float(s.get('up_px') or 0.0)
@@ -3923,6 +3942,17 @@ def _tick_targets():
     cap = int(BLS.get('tick_watch_cap', 15))
     watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static][:cap]
     out = pos + uni + static + watch
+    if BLS.get('tick_board_scan', True):   # v0.47 B1: 强度前三板块成员并入（首板目标直连）
+        try:
+            top3 = _board_rank_top3_set(_pool() or out)
+            if top3:
+                _cap_m = int(BLS.get('tick_board_member_cap', 20))
+                for _b in top3:
+                    for _m in _board_members_file(_b, _cap_m):
+                        if _m and _m not in out and _m not in pos:
+                            out.append(_m)
+        except Exception:
+            pass
     try:
         g.tick_targets_cache = {'tok': tok, 'secs': out}
     except Exception:
@@ -3965,6 +3995,89 @@ def _parse_tx_zt_ms(sec, rows, fields):
         except Exception:
             continue
     return best
+
+
+def _tx_big_feed(secs, fields, raw):
+    # v0.47 L2 大单累计：逐笔 business_amount 按 trade_index 去重（防跨帧重复），累计当日大单金额
+    if not BLS.get('l2_big_enabled', True) or not raw:
+        return
+    try:
+        min_amt = float(BLS.get('l2_big_amt_min', 1000000.0))
+    except Exception:
+        return
+    if min_amt <= 0:
+        return
+    def _idx(name, default):
+        return fields.index(name) if name in fields else default
+    i_a = _idx('business_amount', -1); i_t = _idx('trade_index', -1)
+    if i_a < 0:
+        return
+    acc = getattr(g, 'l2_big', None)
+    if acc is None:
+        acc = {}; g.l2_big = acc
+    probed = getattr(g, 'l2_big_probed', None)
+    if probed is None:
+        probed = set(); g.l2_big_probed = probed
+    _cap = int(BLS.get('l2_big_seen_cap', 20000))
+    for sec in secs:
+        rows = raw.get(sec) or []
+        if not rows:
+            continue
+        a = acc.setdefault(sec, {'amt': 0.0, 'seen': set()})
+        seen = a['seen']
+        if len(seen) >= _cap:
+            continue
+        for row in rows:
+            try:
+                if i_t >= 0:
+                    ti = row[i_t]
+                    if ti in seen:
+                        continue
+                    seen.add(ti)
+                va = float(row[i_a])
+                if va >= min_amt:
+                    a['amt'] += va
+            except Exception:
+                continue
+        if sec not in probed:
+            probed.add(sec)
+            r = _l2_big_ratio(sec)
+            log.info('[l2-big] %s 累计大单=%.0f 占比=%.2f%% (阈值=%.0f)' % (
+                _sn(sec), a['amt'], r * 100.0 if r >= 0 else -1.0, min_amt))
+
+
+def _l2_big_ratio(sec):
+    # v0.47 L2 大单占比 = Σ大单金额/当日成交额（快照 turnover/amount 元）；无数据/单位异常 -> -1
+    try:
+        acc = (getattr(g, 'l2_big', None) or {}).get(sec)
+        if not acc or not acc.get('amt'):
+            return -1.0
+        s = g.spot.get(sec) or {}
+        to = float(s.get('turnover') or s.get('amount') or 0.0)
+        if to <= 0:
+            return -1.0
+        r = acc['amt'] / to
+        if r > 1.0:
+            return -1.0        # 单位异常保护（大单额>总成交额 -> 不授分）
+        return r
+    except Exception:
+        return -1.0
+
+
+def _l2_big_ok(sec):
+    # v0.47 大单加持：占比 >= l2_big_ratio_min
+    try:
+        return _l2_big_ratio(sec) >= float(BLS.get('l2_big_ratio_min', 0.10))
+    except Exception:
+        return False
+
+
+def _l2_big_bonus_pts(sec):
+    # v0.47 大单占比达标加分（score_now 统一加成）
+    try:
+        return float(BLS.get('l2_big_bonus', 5.0)) if _l2_big_ok(sec) else 0.0
+    except Exception:
+        return 0.0
 
 
 def _tx_first_zt_ms(sec):
@@ -4166,7 +4279,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
     _mark_one_word_open()
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})

@@ -1090,7 +1090,7 @@ ns['get_individual_transaction'] = _tx
 frame = {'600002.XSHG': {'transaction': {'business_time': int(_DAY + '093004000'), 'hq_px': 12.2}}}
 out = ns['g'].ds.tx_zt_batch(['600001.XSHG', '600002.XSHG'], frame)
 ok('T51 帧推送优先', out.get('600002.XSHG') == int(_DAY + '093004000'))
-ok('T51 批量一次拉取(仅缺者)', _tx_calls == [['600001.XSHG']])
+ok('T51 批量一次拉取(全候选, 供大单累计)', _tx_calls == [['600001.XSHG', '600002.XSHG']])
 ok('T51 批量解析命中', out.get('600001.XSHG') == int(_DAY + '093003000'))
 out2 = ns['g'].ds.tx_zt_batch(['600001.XSHG', '600002.XSHG'], frame)
 ok('T51 同帧二次消费不重复拉', len(_tx_calls) == 1 and out2.get('600001.XSHG') == int(_DAY + '093003000'))
@@ -2947,6 +2947,46 @@ g.exp_file['600002.XSHG']['expected_status'] = 'pending_meet'
 g.dyn_unq = None
 ns['_dyn_unq_auction_eval']()
 ok('T100 首板 meet 不标唯一', ns['g'].dyn_unq['auction'].get('600002.XSHG', {}).get('unique') is False)
+
+# T101 v0.47 L2 大单累计去重 + 占比加分
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 10000000.0}
+_fields = ['business_time', 'hq_px', 'business_amount', 'trade_index']
+_rows = [[99000000, 10.0, 500000, 1], [99001000, 10.5, 1500000, 2],
+         [99002000, 11.0, 1200000, 3], [99003000, 11.0, 2000000, 2]]  # 重复 trade_index=2 去重
+ns['_tx_big_feed'](['600001.XSHG'], _fields, {'600001.XSHG': _rows})
+ok('T101 大单去重累计=270万', abs(g.l2_big['600001.XSHG']['amt'] - 2700000.0) < 1e-6)
+ok('T101 占比=27%>=10% -> 加分5', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+g.spot['600001.XSHG']['turnover'] = 50000000.0
+ok('T101 占比降至5.4% -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+g.l2_big['600001.XSHG'] = {'amt': 0.0, 'seen': set()}
+ok('T101 无大单 -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+ok('T101 无数据 -> 不加分不抛', ns['_l2_big_ratio']('600002.XSHG') < 0 and ns['_l2_big_bonus_pts']('600002.XSHG') == 0.0)
+
+# T102 v0.47 预封扫板：封单下限 或 大单加持 二者满足其一
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (3000.0, 1)
+ok('T102 封单不足+无大单 -> skip', _fb_calls(ns) == [])
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (3000.0, 1)
+ns['_l2_big_ratio'] = lambda sec: 0.27
+ns['_l2_big_ok'] = lambda sec: True
+ok('T102 封单不足+大单加持 -> 预封扫板放行', len(_fb_calls(ns)) == 1)
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (200000.0, 500)
+ok('T102 封单达标 -> 打板', len(_fb_calls(ns)) == 1)
+
+# T103 v0.47 B: 强度前三板块成员并入 tick 目标集 + scan_interval 收紧
+ns = fresh(); g = ns['g']
+g.watch = ['600001.XSHG']; g.pool_static = []
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG', '600003.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A'], '600003.XSHG': ['概念A']}
+ns['_board_rank_top3_set'] = lambda secs: {'概念A'}
+out = ns['_tick_targets']()
+ok('T103 强度前三板块成员并入 tick 目标', '600002.XSHG' in out and '600003.XSHG' in out)
+ok('T103 scan_interval 收紧=1', ns['BLS']['scan_interval'] == 1)
 
 print('ALL DONE')
 
