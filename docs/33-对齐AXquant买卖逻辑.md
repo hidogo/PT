@@ -381,6 +381,40 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.58 P2E 竞价核卖（同题材中位崩塌传导 + 自身大不及）（2026-10-22）
+
+> 背景：P2E 原逻辑只对文件 `expected_status ∈ (confirmed_miss, degraded)` 清仓（无竞价幅度、无题材传导、9:30 后才有卖出链）。
+> 本次按确认方案收紧：触发时点提前到 9:24:50（9:15-9:25 钩子），新增同题材中位崩塌传导（题材层面冰点），
+> 并对自身大不及加竞价幅度门槛，唯一高身位豁免交盘中监控。
+
+### 触发条件
+- A（题材传导，`p2e_theme_sell_enabled=True`）：持仓所属题材（`_zt_themes_of`）存在中位股（T-1 `board_cnt ∈ [2,5]`），
+  中位股最弱竞价 `_auction_change(mid) <= p2e_theme_drop_min`（默认 -2.0），且 9:24:45 自身确认
+  （基准有效：`竞价 < 基准`；基准无效：`竞价 < 0` 绿开）。
+- B（自身大不及）：文件 `expected_status ∈ (confirmed_miss, degraded)`（`exp_sell_on_pending_miss=False` 时 pending_miss 不卖）
+  + 自身竞价 `_auction_change <= p2e_auction_drop_min`（默认 -2.0）。
+- 豁免：唯一高身位（`_unique_stand`：静态 unique_high / 动态唯一确认）不核卖，容忍度交盘中监控。
+- 范围守卫：仅持仓 + `_sellable>0` + 非在途（`_sell_inflight`）+ sold_log 冷却外 + 条目 `side ∈ (sell, hold)`（排除 buy）。
+- 反证守卫：文件悲观但实时 `_confirm_expected == CX`（云端竞价超预期）-> 不核卖，转实时分时三态。
+
+### 时点与双保险
+- `run_interval(seconds=3, interval_timer_ranges='09:15-09:25')` 钩子 `p2e_auction_core_sell`：
+  - 09:24:45 前为预热段：只打启动日志不评估不触发（避免早期撮合价写入 `g.auction_c` 污染确认段快照）。
+  - 09:24:45-09:25:30 确认段：首次进入清空 `g.auction_c` + 幂等重读 `_load_expectation()`（命中 9:20 上传当日文件），
+    对持仓评估 `_p2e_core_sell_check`；命中即 `_do_sell(..., 'P2E_*', urgent=True)` 跌停地板价 -> 9:25 集合竞价按开盘价撮合。
+- 9:30 后 `sell_manager`（1m）/`tick_sell_manager`（3s）共用同一 `_p2e_core_sell_check` 兜底，
+  与钩子通过 sold_log 冷却 + 在途守卫双保险去重（不重复下单）。
+
+### 统一判定
+- `_p2e_core_sell_check(sec)` 返回 `(hit, note)`：三入口（钩子/1m/3s）共用，防逻辑漂移。
+  卖出理由带股票名与竞价幅度，日志 `[P2E] ...` 记录触发。
+
+### 自测
+- T14/T69/T69b 更新为幅度门控（-2%）；T112 新增 12 项：A 触发、中位 -1.5% 不触发、基准有效命中、唯一高身位豁免、
+  预热段不触发/确认段触发、B 触发、实时反证 CX 不核卖、pending_miss 默认不卖、side=buy 排除、卖出冷却去重、tick 兜底同条件。
+- 全量 626 PASS / 0 FAIL；py3.10 编译通过（新增代码无 3.8+ 语法，兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.58`。
+
 ## v0.53 持仓监控全覆盖 + exp_day 持久化（2026-10-22）
 
 > 背景：此前持仓卖出只 P1/P2E/P3 与炸板/封单事件走 3s tick，P4 预期三态/P5 评分清仓/P6 评分半仓仅 1m 评估，

@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.57（2026-10-22）（前一版 v0.56 工作区未提交；上一提交 a0a3c5d 为 v0.53）
+- 当前版本：v0.58（2026-10-22）（上一提交 3e218fa 为 v0.54-v0.57 批量存档）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.57 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.58 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,22 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.58（2026-10-22）P2E 竞价核卖（同题材中位崩塌传导 + 自身大不及；docs/33）
+- 触发 A（题材传导）：持仓 `_zt_themes_of` 非空 -> 所属题材存在中位股（T-1 `board_cnt` 2-5）-> 中位股最弱竞价
+  `<= p2e_theme_drop_min`（-2%，用户从 -5 修正）且 9:24:45 自身确认（基准有效：竞价<基准；基准无效：绿开<0）。
+- 触发 B（自身大不及）：文件 `expected_status ∈ (confirmed_miss, degraded)`（pending_miss 默认不卖）+ 自身竞价
+  `<= p2e_auction_drop_min`（-2%）。v0.33 反证守卫保留（实时 `_confirm_expected == CX` 不核卖）。
+- 豁免：唯一高身位（`_unique_stand`）不核卖，交盘中监控；范围仅持仓 + `_sellable>0` + 非在途 +
+  sold_log 冷却外 + 条目 `side ∈ (sell, hold)`。
+- 时点：新增 `run_interval(seconds=3, interval_timer_ranges='09:15-09:25')` 钩子 `p2e_auction_core_sell`：
+  09:24:45 前预热只日志不触发（避免早期撮合价污染 `g.auction_c`）；09:24:45-09:25:30 确认段评估触发
+  （先 `_load_expectation()` 命中 9:20 上传当日文件 + 刷新竞价缓存）；9:30 后 `sell_manager`/`tick_sell_manager`
+  同 `_p2e_core_sell_check` 兜底双保险（sold_log 冷却 + 在途守卫去重）。卖出走 `_do_sell(..., urgent=True)` 跌停地板价 -> 9:25 撮合。
+- 配置：BLS `p2e_sell_enabled / p2e_theme_sell_enabled / p2e_theme_drop_min / p2e_auction_drop_min / p2e_confirm_at`。
+- 验证：T14/T69/T69b 更新（幅度门控 -2%）；T112 新增 12 项（A 触发/-1.5% 不触发/基准有效/唯一豁免/预热不触发-确认段触发/B 触发/
+  反证/pending_miss/side=buy 排除/冷却去重/tick 兜底）。全量 626 PASS / 0 FAIL；py3.10 编译通过（新增代码无 3.8+ 语法，兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.58`。
 
 ### v0.57（2026-10-22）新题材发酵审查修复（docs/42）
 - 修复1（阻塞）：`_dyn_theme_ferment` 不再调 `_is_first_board`（`c not in zt` 即首板），

@@ -219,14 +219,14 @@ ok('T13 board-uncapped non-elastic chase', ns['_order_limit']('600000.XSHG','buy
 ns['g'].spot['300999.SZ'] = {'last_px':14.0,'preclose_px':10.0,'up_px':14.0,'wavg_px':11.0,'trade_status':'OPEN'}
 ok('T13 300 board exempt from elastic cap', ns['_order_limit']('300999.SZ','buy','board') == 14.0)
 
-# T14 P2E 竞价核卖：预期 confirmed_miss -> 清仓（DO_ORDER=True 发卖单）
+# T14 P2E 竞价核卖：预期 confirmed_miss + 自身竞价大低开(-3% <= -2%) -> 清仓（DO_ORDER=True 发卖单）
 ns = fresh()
 ctx = ns['_ctx']
 ns['g'].exp_file = {}
 ctx.portfolio.positions = {'600050.XSHG': _t.SimpleNamespace(amount=1000, cost_basis=10.0)}
 ns['g'].exp_file['600050.XSHG'] = {'side':'sell','expected_status':'confirmed_miss'}
 ns['g'].spot['600050.XSHG'] = {'last_px':10.5,'preclose_px':10.0,'up_px':11.0,'wavg_px':10.5,'trade_status':'OPEN'}
-ns['_auction_change'] = lambda c: 5.0
+ns['_auction_change'] = lambda c: -3.0
 ns['get_stop_loss_pct'] = lambda sec: 0.05
 ns['BLS']['DO_ORDER'] = True
 ns['sell_manager'](ctx)
@@ -1762,11 +1762,11 @@ def _sell_setup(exp_row, ac, intrady=None, confirm=None, open_px=None, oneword=F
     return n, rec
 
 # T69 P2E 文件悲观(confirmed_miss) + 实时竞价超预期反证(CX) -> 不核卖
-_n69, _r69 = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=5.0, intrady='CM', confirm='CX')
+_n69, _r69 = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=-3.0, intrady='CM', confirm='CX')
 _n69['sell_manager'](_n69['_ctx'])
 ok('T69 文件confirmed_miss但实时超预期(CX)反证 -> 不核卖', _r69 == [])
 # T69b 文件 confirmed_miss + 实时未反证(PM) -> 仍核卖（对齐 AXquant）
-_n69b, _r69b = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=5.0, intrady='CM', confirm='PM')
+_n69b, _r69b = _sell_setup({'side': 'sell', 'expected_status': 'confirmed_miss'}, ac=-3.0, intrady='CM', confirm='PM')
 _n69b['sell_manager'](_n69b['_ctx'])
 ok('T69b 文件confirmed_miss未反证 -> 核卖', any('P2E_exp_miss' in n for _, _, _, n in _r69b))
 
@@ -3589,6 +3589,113 @@ ns, out = _tick_sell_ns(entry_type='normal', auction_status=ns['AW'], intraday_s
 ns['_is_one_word_open'] = lambda sec: False
 ns['tick_sell_manager'](ns['_CTX'])
 ok('T111 P6 评分半仓 -> P6_score_half_tick 卖500', len(out) == 1 and 'P6_score_half_tick' in out[0][1] and out[0][2] == 500)
+
+# --- v0.58 P2E 竞价核卖：同题材中位崩塌传导(A) + 自身大不及(B)（docs/33） ---
+def _p2e_ns(ac_map=None, est='pending_meet', side='hold', confirm=None, zt=None, unique=False, t0=9000.0):
+    n = fresh(); n['time'] = _FakeTime(t0)
+    ctx = n['_ctx']; g = n['g']
+    g.first_zt = {}   # tick_sell_manager 需 dict（fresh 默认 None）
+    ctx.portfolio.positions = {'600100.XSHG': types.SimpleNamespace(amount=1000, cost_basis=10.0)}
+    g.exp_file['600100.XSHG'] = {'side': side, 'expected_status': est}
+    g.spot['600100.XSHG'] = {'last_px': 10.5, 'preclose_px': 10.0, 'up_px': 12.0,
+                             'wavg_px': 10.5, 'trade_status': 'OPEN', 'open_px': 10.0}
+    if ac_map:
+        n['_auction_change'] = lambda c: ac_map.get(c, 0.0)
+    else:
+        n['_auction_change'] = lambda c: -3.0
+    if isinstance(confirm, str):
+        _CMAP = {'CX': n['CX'], 'PM': n['PM'], 'CS': n['CS'], 'CM': n['CM']}
+        confirm = _CMAP.get(confirm, confirm)
+    if confirm is not None:
+        n['_confirm_expected'] = lambda c: (confirm, 5.0)
+    if zt:
+        g.zt_lianban = {k: dict(v) for k, v in zt.items()}   # 深拷贝防 _ZT112 共享 dict 跨用例泄漏
+        n['_build_zt_theme_index']()
+    if unique:
+        g.zt_lianban.setdefault('600100.XSHG', {})['unique_high'] = True
+    n['get_positions'] = lambda: {'600100.XSHG': {'enable_amount': 1000, 'cost_basis': 10.0}}
+    n['_sellable_source'] = lambda: n['get_positions']()
+    n['_sellable'] = lambda raw, p: 1000
+    n['last_px'] = lambda sec: 10.5
+    n['my_cost'] = lambda raw, p: 10.0
+    n['_hold_exp_init'] = lambda sec, force=False: None
+    n['_sell_inflight'] = lambda sec: False
+    n['get_stop_loss_pct'] = lambda sec: 0.05
+    n['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+    n['score_now'] = lambda sec: 80.0
+    n['_eval_intraday'] = lambda sec, au: (n['CM'], ['mock'])
+    n['_eval_auction'] = lambda sec: (n['CM'], ['mock'])
+    n['_hist_1d'] = lambda sec: None
+    n['_save_state'] = lambda *a, **k: None
+    _out = []
+    n['place_order'] = lambda c, sec, side, qty=None, note='', mode='chase': _out.append((sec, side, qty, note))
+    return n, _out
+
+_ZT112 = {'600100.XSHG': {'board_cnt': 0, 'themes': '机器人'},
+          '600101.XSHG': {'board_cnt': 3, 'themes': '机器人'}}
+
+# T112 A 触发：同题材中位(3板)最弱竞价 -3% <= -2% + 非唯一 -> 核卖（传 P2E_theme_mid_break）
+_n112, _r112 = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112)
+_n112['sell_manager'](_n112['_ctx'])
+ok('T112 中位崩塌 A 触发 -> P2E_theme_mid_break', len(_r112) == 1 and 'P2E_theme_mid_break' in _r112[0][3])
+
+# T112b A 不触发：中位 -1.5% > -2% 阈值 -> 不卖
+_n112b, _r112b = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -1.5}, est='pending_meet', zt=_ZT112)
+_n112b['sell_manager'](_n112b['_ctx'])
+ok('T112b 中位 -1.5% 不达阈值 -> 不卖', len(_r112b) == 0)
+
+# T112c A 触发：中位基准有效(expected 3%)且 ac=-3% < 基准 -> 命中
+_n112c, _r112c = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112)
+_n112c['g'].exp_file['600101.XSHG'] = {'expected_auction_change_pct': 3.0, 'has_expected_auction': True}
+_n112c['sell_manager'](_n112c['_ctx'])
+ok('T112c 中位基准有效且低于基准 -> A 触发', len(_r112c) == 1 and 'P2E_theme_mid_break' in _r112c[0][3])
+
+# T112d 唯一高身位豁免：中位 -3% 但持仓为唯一高度板 -> 不核卖（交盘中监控）
+_n112d, _r112d = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112, unique=True)
+_n112d['sell_manager'](_n112d['_ctx'])
+ok('T112d 唯一高身位豁免 -> 不核卖', len(_r112d) == 0)
+
+# T112e 钩子节奏：预热段(09:24:30)不触发 / 确认段(09:24:48)触发
+_n112e, _r112e = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112)
+_n112e['_load_expectation'] = lambda: 0
+_ctxE = _n112e['_ctx']
+_ctxE.blotter.current_dt = datetime.datetime(2026, 10, 16, 9, 24, 30)
+_n112e['p2e_auction_core_sell'](_ctxE)
+ok('T112e 预热段(09:24:30)不触发', len(_r112e) == 0)
+_ctxE.blotter.current_dt = datetime.datetime(2026, 10, 16, 9, 24, 48)
+_n112e['p2e_auction_core_sell'](_ctxE)
+ok('T112e 确认段(09:24:48)触发', len(_r112e) == 1 and 'P2E_theme_mid_break' in _r112e[0][3])
+
+# T112f B 触发：自身大不及（confirmed_miss + ac=-3% <= -2%）-> P2E_exp_miss
+_n112f, _r112f = _p2e_ns(ac_map={'600100.XSHG': -3.0}, est='confirmed_miss', side='hold')
+_n112f['sell_manager'](_n112f['_ctx'])
+ok('T112f 自身大不及 -> P2E_exp_miss', len(_r112f) == 1 and 'P2E_exp_miss' in _r112f[0][3])
+
+# T112g 实时反证守卫：ac=-3% 达幅度但云端竞价超预期(CX) -> 不核卖
+_n112g, _r112g = _p2e_ns(ac_map={'600100.XSHG': -3.0}, est='confirmed_miss', side='hold', confirm='CX')
+_n112g['sell_manager'](_n112g['_ctx'])
+ok('T112g 实时反证(CX) -> 不核卖', len(_r112g) == 0)
+
+# T112h pending_miss 默认不卖（弱 miss 只暂缓）
+_n112h, _r112h = _p2e_ns(ac_map={'600100.XSHG': -3.0}, est='pending_miss', side='hold')
+_n112h['sell_manager'](_n112h['_ctx'])
+ok('T112h pending_miss 默认不核卖', len(_r112h) == 0)
+
+# T112i side=buy 排除（买入预期条目不参与核卖）
+_n112i, _r112i = _p2e_ns(ac_map={'600100.XSHG': -3.0}, est='confirmed_miss', side='buy')
+_n112i['sell_manager'](_n112i['_ctx'])
+ok('T112i side=buy 不参与核卖', len(_r112i) == 0)
+
+# T112j 卖出冷却去重：sold_log 冷却内第二次不叠单
+_n112j, _r112j = _p2e_ns(ac_map={'600100.XSHG': -3.0}, est='confirmed_miss', side='hold')
+_n112j['sell_manager'](_n112j['_ctx'])
+_n112j['sell_manager'](_n112j['_ctx'])
+ok('T112j P2E 卖出冷却去重', len(_r112j) == 1)
+
+# T112k tick 兜底同条件：3s tick_sell_manager 走同一 _p2e_core_sell_check（A 路径）
+_n112k, _r112k = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112)
+_n112k['tick_sell_manager'](_n112k['_ctx'])
+ok('T112k tick 兜底 A 触发', len(_r112k) == 1 and 'P2E_theme_mid_break' in _r112k[0][3])
 
 print('ALL DONE')
 

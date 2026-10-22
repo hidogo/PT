@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.57（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.57 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.58（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.58 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.57"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.58"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -81,6 +81,12 @@ BLS = {
     'stop_loss_pct': 0.05, 'stop_loss_chinext': 0.07, 'stop_loss_star': 0.08, 'stop_loss_bse': 0.10,
     'elastic_max_buy_pct': 0.10,      # 弹性追高 300/688 买入价前收*1.10 上限（打板豁免）
     'exp_sell_on_pending_miss': False, # P2E 竞价核卖：pending_miss 默认只记录暂缓，confirmed_miss/degraded 才卖
+    # v0.58 P2E 竞价核卖（docs/33）：同题材中位崩塌传导 + 自身大不及（9:24:45 确认段评估触发）
+    'p2e_sell_enabled': True,          # v0.58 P2E 竞价核卖总开关（钩子 + 卖出链统一判定 _p2e_core_sell_check）
+    'p2e_theme_sell_enabled': True,    # 同题材中位崩塌传导子开关（A 路径）
+    'p2e_theme_drop_min': -2.0,        # 中位股最弱竞价涨幅阈值 %（昨日涨停中位，今日默认 -2%）
+    'p2e_auction_drop_min': -2.0,      # 自身大不及竞价涨幅阈值 %（文件 miss + 今日竞价绿开幅度）
+    'p2e_confirm_at': '09:24:45',      # 9:15-9:25 钩子确认段起点（此前预热只日志不触发）
     'single_stock_cap': 0.30,          # 单支市值上限：买入后该股市值 <= 总资产×30%（AXquant single_stock_cap）
     'ordinary_buy_ratio': 0.10,        # 普通买入单笔=总资产×10%（AXquant ordinary_buy_ratio=1/10，替代硬编码0.3）
     'board_buy_budget_ratio': 0.20,    # 打板买入单笔=总资产×20%（AXquant board_buy_budget_ratio）
@@ -512,6 +518,7 @@ def initialize(context):
     run_daily(context, auction_pre_confirm, time='09:25')
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, mid_probe, time='11:00')
+    run_interval(context, p2e_auction_core_sell, seconds=3, interval_timer_ranges='09:15-09:25')   # v0.58 P2E 竞价核卖（9:24:45 确认段）
     log.info('buysell_core init version=%s universe=%s DO_ORDER=%s EXPECT_ORDER=%s' % (STRATEGY_VERSION, _snl(BLS['universe']), BLS['DO_ORDER'], BLS.get('EXPECT_ORDER', False)))
 
 
@@ -1735,6 +1742,17 @@ def _hhmm():
         except Exception:
             pass
     return time.strftime('%H:%M')
+
+
+def _hhmmss():
+    # 秒级时钟（HH:MM:SS），供 P2E 竞价核卖确认段窗口判定（_hhmm 仅到分钟）
+    nd = getattr(g, 'now_dt', None)
+    if nd is not None:
+        try:
+            return nd.strftime('%H:%M:%S')
+        except Exception:
+            pass
+    return time.strftime('%H:%M:%S')
 
 
 def _min_age():
@@ -4189,6 +4207,110 @@ def _audit_sell_skip(sec, why, now=None):
     except Exception:
         pass
 
+def _p2e_core_sell_check(sec):
+    # v0.58 P2E 竞价核卖统一判定（钩子 + 9:30 后 sell_manager/tick_sell_manager 共用，防逻辑漂移），返回 (hit, note)。
+    #   触发 A：持仓所属题材存在中位股(T-1 board_cnt 2-5)，中位股最弱竞价 <= p2e_theme_drop_min(-2%)
+    #           且自身确认（基准有效: 竞价<基准；基准无效: 绿开<0）。
+    #   触发 B：文件 expected_status ∈ (confirmed_miss, degraded)（pending_miss 默认不卖）+
+    #           自身竞价 <= p2e_auction_drop_min(-2%)。
+    #   豁免：唯一高身位（交盘中监控，不核卖）；v0.33 反证守卫（实时 CX 不核卖）；side 仅 sell/hold。
+    if not BLS.get('p2e_sell_enabled', True):
+        return False, ''
+    en = g.exp_file.get(sec) or {}
+    if str(en.get('side') or '') not in ('sell', 'hold'):
+        return False, ''
+    _au = _auction_change(sec)
+    # A：同题材中位股最弱竞价
+    _mid = None
+    if BLS.get('p2e_theme_sell_enabled', True):
+        try:
+            for _nm in _zt_themes_of(sec):
+                for _c in ((getattr(g, 'zt_theme', {}) or {}).get(_nm) or {}).get('members') or []:
+                    _rec = (getattr(g, 'zt_lianban', {}) or {}).get(_c) or {}
+                    _bc = int(_rec.get('board_cnt') or 0)
+                    if not (2 <= _bc <= 5):
+                        continue
+                    _acm = _auction_change(_c)
+                    if _mid is None or _acm < _mid[0]:
+                        _mid = (_acm, _c, _auction_benchmark(_c))
+        except Exception:
+            _mid = None
+    _hitA = False; _noteA = ''
+    if _mid is not None:
+        _dm = float(BLS.get('p2e_theme_drop_min', -2.0))
+        if _mid[0] <= _dm:
+            _bmv, _bmok = _mid[2]
+            if (_bmok and _mid[0] < _bmv) or (not _bmok and _mid[0] < 0):
+                _hitA = True
+                _noteA = 'P2E_theme_mid_break mid=%s ac=%.1f%%' % (_sn(_mid[1]), _mid[0])
+    # B：自身大不及（文件 miss/degraded + 今日竞价大低开）
+    _est = str(en.get('expected_status') or '')
+    _ma = ('confirmed_miss', 'degraded')
+    if BLS.get('exp_sell_on_pending_miss', False):
+        _ma = _ma + ('pending_miss',)
+    _hitB = bool(_est and _est in _ma and _au <= float(BLS.get('p2e_auction_drop_min', -2.0)))
+    if _hitB:
+        try:   # v0.33 反证守卫：文件悲观但云端实时竞价超预期(CX) -> 不核卖，转实时分时三态
+            _rev, _ra = _confirm_expected(sec)
+            if _rev == CX:
+                _hold_arb_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
+                _hitB = False
+        except Exception:
+            pass
+    # 唯一高身位豁免（有容忍度交到盘中监控）
+    if (_hitA or _hitB) and _unique_stand(sec):
+        _hold_arb_log(sec, '唯一高身位豁免 P2E 竞价核卖 -> 交盘中监控')
+        return False, ''
+    if _hitA:
+        return True, _noteA
+    if _hitB:
+        return True, 'P2E_exp_miss %s ac=%.1f%%' % (_est, _au)
+    return False, ''
+
+
+def p2e_auction_core_sell(context):
+    # v0.58 P2E 竞价核卖：09:15-09:25 钩子（run_interval 3s）。09:24:45 前预热只日志不触发
+    # （避免早期撮合价污染 g.auction_c）；09:24:45-09:25:30 确认段评估触发（先重读当日预期文件 +
+    # 刷新竞价缓存）；9:30 后 sell_manager/tick_sell_manager 同条件兜底（sold_log 冷却 + 在途守卫去重）。
+    _set_now(context)
+    if not BLS.get('p2e_sell_enabled', True):
+        return
+    _hms = _hhmmss()
+    _confirm_at = str(BLS.get('p2e_confirm_at', '09:24:45'))
+    if not (_confirm_at <= _hms < '09:25:30'):
+        if not getattr(g, 'p2e_warm_logged', False):
+            g.p2e_warm_logged = True
+            log.info('[P2E] 竞价核卖监控启动 预热段 09:15-%s 不触发（确认段 %s-09:25 评估）' % (_confirm_at, _confirm_at))
+        return
+    if getattr(g, 'p2e_fresh_day', None) != str(get_trading_day()):
+        g.auction_c = {}      # 用 9:24:45+ 实时竞价重算（预热不评估，缓存干净）
+        g.p2e_fresh_day = str(get_trading_day())
+        try:
+            _load_expectation()   # 幂等重读：命中 9:20 上传的当日文件
+        except Exception:
+            pass
+    positions = _sellable_source() or context.portfolio.positions
+    if not positions:
+        return
+    _sl = float(BLS.get('sell_cold_secs', 30.0))
+    for _raw in list(positions.keys()):
+        sec = _norm_sec(_raw) or _raw
+        amt = _sellable(_raw, positions)
+        if amt <= 0:
+            continue
+        if _sell_inflight(sec):
+            continue
+        if isinstance(getattr(g, 'sold_log', None), dict) and (time.time() - g.sold_log.get(sec, 0)) < _sl:
+            continue
+        try:
+            _hit, _note = _p2e_core_sell_check(sec)
+        except Exception as _e:
+            _warn('p2e check fail %s: %r' % (_sn(sec), _e)); continue
+        if _hit:
+            log.info('[P2E] %s 竞价核卖 %s hms=%s' % (_sn(sec), _note, _hms))
+            _do_sell(context, sec, amt, _note, urgent=True)
+
+
 def sell_manager(context):
     positions = _sellable_source() or context.portfolio.positions
     sl = float(BLS.get('sell_cold_secs', 30.0))
@@ -4217,22 +4339,10 @@ def sell_manager(context):
         rp = _role_tolerance(sec)
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open drop=%.1f%%' % _auction_change(sec), urgent=True); continue
-        # P2E 竞价核卖（v0.15 对齐 AXquant _sell_expectation_miss：预期已确认 miss/degraded -> 清仓）
-        _e2 = g.exp_file.get(sec) or {}
-        _est = str(_e2.get('expected_status') or '')
-        _ma = ('confirmed_miss', 'degraded')
-        if BLS.get('exp_sell_on_pending_miss', False):
-            _ma = _ma + ('pending_miss',)
-        if _est and _est in _ma:
-            # v0.33 防冲突：文件悲观(miss/degraded) 但云端实时竞价超预期反证 -> 不核卖，转实时分时三态
-            try:
-                _rev, _ra = _confirm_expected(sec)
-                if _rev == CX:
-                    _hold_arb_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
-                    continue
-            except Exception:
-                pass
-            _do_sell(context, sec, amt, 'P2E_exp_miss ' + _est, urgent=True); continue
+        # P2E 竞价核卖（v0.58 docs/33 统一判定）：自身大不及(文件 miss/degraded + 竞价大低开) / 同题材中位崩塌传导
+        _hit2, _note2 = _p2e_core_sell_check(sec)
+        if _hit2:
+            _do_sell(context, sec, amt, _note2, urgent=True); continue
         if cost > 0:
             pnl_pct = px / cost - 1.0
             if pnl_pct <= -get_stop_loss_pct(sec) * rp['stop_adj']:
@@ -4323,13 +4433,9 @@ def tick_sell_manager(context):
         rp = _role_tolerance(sec)
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open_tick drop=%.1f%%' % _auction_change(sec), urgent=True); continue
-        _e2 = g.exp_file.get(sec) or {}
-        _est = str(_e2.get('expected_status') or '')
-        _ma = ('confirmed_miss', 'degraded')
-        if BLS.get('exp_sell_on_pending_miss', False):
-            _ma = _ma + ('pending_miss',)
-        if _est and _est in _ma:
-            _do_sell(context, sec, amt, 'P2E_exp_miss_tick ' + _est, urgent=True); continue
+        _hit2, _note2 = _p2e_core_sell_check(sec)
+        if _hit2:
+            _do_sell(context, sec, amt, _note2, urgent=True); continue
         cost = my_cost(_raw, positions)
         if cost > 0:
             pnl = px / cost - 1.0
