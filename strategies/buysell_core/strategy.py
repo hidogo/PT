@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.50（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.50 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.51（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.51 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.50"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.51"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -123,6 +123,7 @@ BLS = {
     'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
     'l2_big_amt_unit': 'shares',         # v0.48 business_amount 单位: shares(股)/lots(手)/yuan(元)
     'l2_big_dir_enabled': True,         # v0.50 大单净量口径: 买-卖 方向分计（False 回退 v0.47 全大单）
+    'l2_big_dir_map': {'0': 'sell', '1': 'buy', '2': 'un', '3': 'un'},  # v0.51 方向映射按官方字典校准(0=卖/1=买/2=借入/3=出借->不计净量)，可配置纠偏
     'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
     'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
     'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
@@ -446,7 +447,7 @@ def initialize(context):
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
     g.rt_stats = {}   # v0.43 灵敏度日结采样（检测->下单时延，after_trading_end 打 [rt-summary]）
-    g.l2_big = {}; g.l2_big_probed = set()   # v0.47 L2 大单累计（按日重置）
+    g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}   # v0.47 L2 大单累计 / v0.51 方向取值分布（均按日重置）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
     g.bs_cache = {}     # sec -> (ts, board_strength)
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
@@ -568,7 +569,7 @@ def handle_data(context, data):
         _load_selfwatch(); _sync_pool_static()
     if g.exp_day != str(get_trading_day()):
         g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
+        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -4054,16 +4055,20 @@ def _parse_tx_zt_ms(sec, rows, fields):
 
 
 def _tx_dir(v):
-    # v0.50 逐笔成交方向多态解析：数值 1/2、'B'/'buy'/'买' -> 买；'S'/'sell'/'卖' -> 卖；其它/缺失 -> None(未知)
+    # v0.51 方向映射按官方字典校准（l2_big_dir_map 可配置纠偏）：0=卖、1=买、2=借入/3=出借->不计净量；'B'/'buy'/'买'/'S'/'sell'/'卖' 字符串兼容
     try:
         if v is None:
             return None
         sv = str(v).strip().lower()
         if sv in ('', 'none'):
             return None
-        if sv in ('1', 'b', 'buy', '\u4e70'):
+        _m = BLS.get('l2_big_dir_map') or {}
+        if sv in _m:
+            _r = _m[sv]
+            return _r if _r in ('buy', 'sell') else None
+        if sv in ('b', 'buy', '买'):
             return 'buy'
-        if sv in ('2', 's', 'sell', '\u5356'):
+        if sv in ('s', 'sell', '卖'):
             return 'sell'
     except Exception:
         pass
@@ -4096,6 +4101,9 @@ def _tx_big_feed(secs, fields, raw):
     probed = getattr(g, 'l2_big_probed', None)
     if probed is None:
         probed = set(); g.l2_big_probed = probed
+    dist = getattr(g, 'l2_dir_dist', None)
+    if dist is None:
+        dist = {}; g.l2_dir_dist = dist
     _cap = int(BLS.get('l2_big_seen_cap', 20000))
     for sec in secs:
         rows = raw.get(sec) or []
@@ -4122,6 +4130,9 @@ def _tx_big_feed(secs, fields, raw):
                     a['amt'] += yuan
                     if yuan > a.get('max', 0.0):
                         a['max'] = yuan
+                    if dir_on and i_d >= 0:
+                        _rk = str(row[i_d]).strip().lower()
+                        dist[_rk] = dist.get(_rk, 0) + 1
                     if dir_on:
                         _d = _tx_dir(row[i_d]) if i_d >= 0 else None
                         if _d == 'buy':
@@ -4136,9 +4147,10 @@ def _tx_big_feed(secs, fields, raw):
             probed.add(sec)
             r = _l2_big_ratio(sec)
             if dir_on:
-                log.info('[l2-big] %s 大单买=%.0f 卖=%.0f 净=%.0f 占比=%.2f%% 未知=%.0f 最大单笔=%.0f元 (阈值=%.0f unit=%s)' % (
+                _dd = '{%s}' % ', '.join('%s:%d' % (k, dist[k]) for k in sorted(dist)) if dist else '{}'
+                log.info('[l2-big] %s 大单买=%.0f 卖=%.0f 净=%.0f 占比=%.2f%% 未知=%.0f 最大单笔=%.0f元 分布=%s (阈值=%.0f unit=%s)' % (
                     _sn(sec), a.get('buy', 0.0), a.get('sell', 0.0), a.get('buy', 0.0) - a.get('sell', 0.0),
-                    r * 100.0 if r >= 0 else -1.0, a.get('un', 0.0), a.get('max', 0.0), min_amt, unit))
+                    r * 100.0 if r >= 0 else -1.0, a.get('un', 0.0), a.get('max', 0.0), _dd, min_amt, unit))
                 if a.get('amt', 0.0) > 0 and a.get('buy', 0.0) <= 0 and a.get('sell', 0.0) <= 0:
                     w = getattr(g, 'l2_big_dir_warn', None)
                     if w is None:
@@ -4406,7 +4418,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set()
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}
     _mark_one_word_open()
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})
@@ -4734,6 +4746,8 @@ def load_state():
             g.seal_sold = set(st.get('seal_sold') or [])
             g.break2_sold = set(st.get('break2_sold') or [])
             g.reboard_fired = bool(st.get('reboard_fired'))
+            g.l2_big = {k: dict(v, seen=set(v.get('seen') or [])) for k, v in (st.get('l2_big') or {}).items()}
+            g.l2_dir_dist = dict(st.get('l2_dir_dist') or {})
             g.dyn_unq = st.get('dyn_unq')
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
@@ -4743,6 +4757,7 @@ def load_state():
             g.break2_sold = set()
             g.reboard_fired = False
             g.dyn_unq = None
+            g.l2_big = {}; g.l2_dir_dist = {}
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = {'bought': [], 'sold': []}; g.state_day = None
@@ -4767,7 +4782,9 @@ def _save_state():
                          'seal_sold': sorted(getattr(g, 'seal_sold', None) or []),
                          'break2_sold': sorted(getattr(g, 'break2_sold', None) or []),
                          'reboard_fired': bool(getattr(g, 'reboard_fired', False)),
-                         'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {})}, f, protocol=2)
+                         'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {}),
+                         'l2_big': dict(getattr(g, 'l2_big', None) or {}),
+                         'l2_dir_dist': dict(getattr(g, 'l2_dir_dist', None) or {})}, f, protocol=2)
     except Exception as e:
         _warn('save_state fail %r' % e)
 
@@ -4782,6 +4799,12 @@ def after_trading_end(context, data):
                 if _d.get('n'):
                     log.info('[rt-summary] side=%s mode=%s n=%d avg=%.1fs max=%.1fs' % (_side, _mode, _d['n'], _d['lag'] / _d['n'], _d['max']))
             g.rt_stats = {}
+    except Exception:
+        pass
+    try:
+        _dd = getattr(g, 'l2_dir_dist', None)
+        if isinstance(_dd, dict) and _dd:
+            log.info('[l2-dir] 当日大单方向取值分布=%s' % ({k: v for k, v in sorted(_dd.items())},))
     except Exception:
         pass
     log.info('buysell_core end bought=%s sold=%s' % (_snl(g.daily.get('bought')), _snl(g.daily.get('sold'))))

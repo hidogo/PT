@@ -3155,9 +3155,41 @@ ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
     [99000000, 10.0, 1000000, 1, 'buy'], [99001000, 10.0, 1000000, 2, 'sell']]})
 ok('T107 dir_enabled=False 全大单口径 占比20%加分', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
 ns = fresh()
-ok('T107 _tx_dir 数值1=买 2=卖', ns['_tx_dir'](1) == 'buy' and ns['_tx_dir'](2) == 'sell')
+ok('T107 _tx_dir 官方字典 0=卖 1=买', ns['_tx_dir'](0) == 'sell' and ns['_tx_dir'](1) == 'buy')
+ok('T107 _tx_dir 借入2/出借3 不计净量', ns['_tx_dir'](2) is None and ns['_tx_dir'](3) is None)
 ok('T107 _tx_dir B=买 s=卖', ns['_tx_dir']('B') == 'buy' and ns['_tx_dir']('s') == 'sell')
 ok('T107 _tx_dir 未知x=None None=None', ns['_tx_dir']('x') is None and ns['_tx_dir'](None) is None)
+
+# T108 v0.51 实盘 0/1 方向识别 + 分布计数 + 跨重启持久化
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+_f = ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction']
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
+    [99000000, 10.0, 2000000, 1, 0],   # 2000万 卖(0)
+    [99001000, 10.0, 3000000, 2, 1],   # 3000万 买(1)
+    [99002000, 10.0, 1500000, 3, 2],   # 1500万 借入(2)->un
+    [99003000, 10.0, 1500000, 4, 3]    # 1500万 出借(3)->un
+]})
+ok('T108 实盘 0=卖 1=买 2/3=借入出借->un', abs(g.l2_big['600001.XSHG']['buy'] - 30000000.0) < 1e-6
+   and abs(g.l2_big['600001.XSHG']['sell'] - 20000000.0) < 1e-6
+   and abs(g.l2_big['600001.XSHG']['un'] - 30000000.0) < 1e-6)
+ok('T108 净量=1000万 占比10%达标加分', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+ok('T108 方向取值分布计数', g.l2_dir_dist == {'0': 1, '1': 1, '2': 1, '3': 1})
+g.state_day = '2026-10-16'
+g.l2_big['600002.XSHG'] = {'amt': 7000000.0, 'buy': 5000000.0, 'sell': 1000000.0, 'un': 1000000.0, 'seen': {10, 20}, 'max': 5000000.0}
+ns['_save_state']()
+g.l2_big = {}; g.l2_dir_dist = {}
+ns['load_state']()
+ok('T108 同日重启恢复 l2_big 累计', abs(g.l2_big['600002.XSHG']['buy'] - 5000000.0) < 1e-6
+   and g.l2_big['600002.XSHG']['seen'] == {10, 20})
+ok('T108 同日重启恢复 dir_dist', g.l2_dir_dist == {'0': 1, '1': 1, '2': 1, '3': 1})
+_st = pickle.load(open(ns['_TMP'] + '/buysell_core_state.pkl', 'rb'))
+_st['day'] = '2026-10-15'
+pickle.dump(_st, open(ns['_TMP'] + '/buysell_core_state.pkl', 'wb'))
+g.l2_big = {'X': 1}; g.l2_dir_dist = {'9': 1}
+ns['load_state']()
+ok('T108 跨日重置 l2_big/dir_dist', g.l2_big == {} and g.l2_dir_dist == {})
 
 print('ALL DONE')
 
