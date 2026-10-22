@@ -197,9 +197,10 @@
 云端逐只批量行情调用获取 T-1 涨停/连板名单成本高（受研究目录容量 / 上传次数 / 50M 限制约束）。改为：本地 AXquant 已产出的涨停池快照（`docs/review/limit_up_boards_<date>.json`，含连板数 `continue_day_cnt`）→ 走现有 expectation 上传链路传到研究目录 → 云端直接读。省掉云端逐只批量行情调用，也绕开上传次数/容量的担忧。
 
 ### 本地导出（新增 `research/expectation/export_lianban.py`）
-- 数据契约列（表头）：`date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason`
+- 数据契约列（表头）：`date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes`
 - 代码后缀映射：AXquant `.SH→.XSHG / .SZ→.XSHE / .BJ→.XBJ`（与 expectation 同名同映射）。
 - 字段来源：AXquant `payload.pool.item[]` = `thscode/ticker/name/continue_day_cnt(连板数)/limit_up_time/seal_money/price_change_ratio_pct/is_st/limit_up_reason`；同报文另含 `ladder/break_pool/summary`。
+- 题材/概念梯队列（v0.38）：`theme`=主题材（题材内最高板优先、家数次之）、`theme_count`=题材涨停家数、`theme_max_board`=题材最高连板、`theme_rank`=梯队名次（家数+最高板排序）、`themes`=全部题材（`|` 连接）；优先读 AXquant `data/tmp/review_analysis_<date>.json` 的 `theme.buckets`，缺失时按 `reason` 标签本地聚合兜底。
 - 输出到待上传文件夹 `PTRADE_BRIDGE_DIR`（`data\ptrade_bridge\`）：
   - `zt_lianban_<date>.csv`（date=涨停数据日；收盘后跑即 T-1）；
   - `zt_lianban_latest.csv` 稳定指针 = 最近一份数据，云端直接读，避免云端额外算交易日历；
@@ -212,7 +213,8 @@
 ### 云端读 + 连板对齐（`strategies/buysell_core/strategy.py`）
 - `initialize` 初始化 `g.zt_lianban = {}`。
 - `_zt_lianban_paths()` 复用 `_research_roots()` 四层（研究根 / `upload_file/` / `data/` / `data/upload_file/`），优先 `zt_lianban_latest.csv`，其次 `zt_lianban_<当日>.csv`。
-- `_load_zt_lianban()` 解析为 `g.zt_lianban[code] = {date, board_cnt, limit_up_time, seal_money, chg_pct, is_st}`。
+- `_load_zt_lianban()` 解析为 `g.zt_lianban[code] = {date, board_cnt, limit_up_time, seal_money, chg_pct, is_st, unique_high, follower_count, theme, theme_count, theme_max_board, theme_rank, themes}`；缺列默认 theme=""、计数/名次 0；`g.zt_theme_authoritative` 标记文件是否带题材列，加载日志输出 `themed=N`。
+- 唯一身位兜底（v0.38）：文件缺 `unique_high` 列时，`_annotate_zt_uniqueness` 优先按 `theme` 分组（对齐 AXquant theme.buckets 口径），缺题材列才回退涨停原因首 token 分组。
 - `_limit_threshold(sec)`：主板10% / 创业板·科创板20% / 北交所30%（0.098 / 0.198 / 0.298）。
 - `_today_zt(sec)`：`last_px/pre_close - 1 >= 阈值` 视为今日续板。
 - `_limitup_days(sec)` 对齐口径：有权威 T-1 `board_cnt` → `max(0, board_cnt + (今日续板 ? 1 : 0))`；无权威记录 → 回退原 1d 历史近似。

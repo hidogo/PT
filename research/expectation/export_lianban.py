@@ -3,7 +3,14 @@
 """导涨停池/连板名单（AXquant limit_up_boards_*.json）为云端可读 CSV。
 
 数据契约（列）：
-  date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason
+  date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,
+  unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes
+
+题材/概念梯队列（2026-10-22 新增）：优先读 AXquant 分析 JSON
+data/tmp/review_analysis_<date>.json 的 theme.buckets（涨停原因归并后的题材，含家数/最高板）；
+缺失时用本文件涨停池 reason 按 +、/ 等分隔符本地聚合兜底。theme=该股主题材（题材内最高板
+优先、家数次之），theme_count/theme_max_board 为该题材涨停家数与最高连板，theme_rank 为
+题材按（家数、最高板）排序的梯队名次，themes=该股所属全部题材（| 分隔，按强度排序）。
 
 文件落到与预期 CSV 同一「待上传文件夹」PTRADE_BRIDGE_DIR（客户端定时上传会带上）：
   zt_lianban_<date>.csv   该日 T-1 涨停池（date=涨停池数据日, 收盘后为 T-1）
@@ -63,6 +70,77 @@ def _extract_pool_rows(payload: dict) -> list[dict]:
     return rows
 
 
+_TAG_SPLIT_RE = re.compile(r"[+＋、;；,，/]+")
+
+
+def _load_theme_buckets(date: str, lub_dir: str | None = None) -> dict:
+    """读 AXquant 分析 JSON 的 theme.buckets（题材归并结果），缺失/异常返回空。"""
+    ax_dir = lub_dir or _default_axquant_lub_dir()
+    analysis_dir = os.path.abspath(os.path.join(ax_dir, "..", "..", "data", "tmp"))
+    path = os.path.join(analysis_dir, "review_analysis_%s.json" % date)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        buckets = (data.get("theme") or {}).get("buckets") or {}
+        return buckets if isinstance(buckets, dict) else {}
+    except Exception:
+        return {}
+
+
+def _aggregate_theme_buckets(rows: list[dict]) -> dict:
+    """兜底：按涨停原因标签本地聚合题材（count/max_board/codes）。"""
+    buckets = {}
+    for r in rows:
+        for tag in _TAG_SPLIT_RE.split(r.get("reason") or ""):
+            tag = tag.strip()
+            if not tag:
+                continue
+            b = buckets.setdefault(tag, {"count": 0, "max_board": 0, "codes": []})
+            if r["code"] not in b["codes"]:
+                b["codes"].append(r["code"])
+            b["count"] = len(b["codes"])
+            b["max_board"] = max(b["max_board"], int(r.get("board_cnt") or 0))
+    return buckets
+
+
+def _normalize_bucket_codes(buckets: dict) -> dict:
+    """bucket codes 从 AXquant(.SZ/.SH/.BJ) 归一为 Ptrade(.XSHE/.XSHG/.XBJ)。"""
+    for b in buckets.values():
+        if isinstance(b, dict) and isinstance(b.get("codes"), list):
+            b["codes"] = [_code_ptrade(c) for c in b["codes"]]
+    return buckets
+
+
+def _theme_map(rows: list[dict], buckets: dict) -> dict:
+    """每股 -> 主题材 + 题材家数/最高板/梯队名次 + 全部题材。"""
+    ranked = sorted(
+        ((name, b) for name, b in buckets.items() if isinstance(b, dict)),
+        key=lambda kv: (int(kv[1].get("count") or 0), int(kv[1].get("max_board") or 0)),
+        reverse=True,
+    )
+    rank_of = {name: i + 1 for i, (name, _) in enumerate(ranked)}
+    out = {}
+    for r in rows:
+        hits = []
+        for name, b in ranked:
+            if r["code"] in (b.get("codes") or []):
+                hits.append((name, int(b.get("count") or 0),
+                             int(b.get("max_board") or 0), rank_of[name]))
+        if not hits:
+            out[r["code"]] = None
+            continue
+        hits.sort(key=lambda h: (h[2], h[1]), reverse=True)
+        primary = hits[0]
+        out[r["code"]] = {
+            "theme": primary[0],
+            "theme_count": primary[1],
+            "theme_max_board": primary[2],
+            "theme_rank": primary[3],
+            "themes": "|".join(h[0] for h in hits),
+        }
+    return out
+
+
 def _pool_missing(payload: dict, rows) -> int:
     # 分页完整性护栏：涨停池 item 数 < pagination.total 视为被截断(可能遗漏)，返回缺多少
     pg = ((payload or {}).get("pool") or {}).get("pagination") or {}
@@ -72,20 +150,29 @@ def _pool_missing(payload: dict, rows) -> int:
     return 0
 
 
-def build_csv(date: str, rows: list[dict], unq: dict | None = None) -> str:
+def build_csv(date: str, rows: list[dict], unq: dict | None = None,
+              themes: dict | None = None) -> str:
     # v0.37 追加权威唯一身位列（AXquant 同源收盘地位重算 derive_closing_board_status）：
     #   unique_high / follower_count，云端读列优先、缺列回退首 token 兜底。
+    # v0.38 追加题材/概念梯队列（theme/theme_count/theme_max_board/theme_rank/themes）。
     unq = unq or {}
-    head = "date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count"
+    themes = themes or {}
+    head = ("date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,"
+            "unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes")
     lines = [head]
     for r in rows:
         reason = r["reason"].replace(",", " ").replace("\n", " ").strip()
         u = unq.get(r["code"]) or {}
         uh = 1 if u.get("unique_high_board") else 0
         fc = int(u.get("follower_count") or 0)
-        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s,%d,%d" % (
+        th = themes.get(r["code"]) or {}
+        theme = str(th.get("theme") or "").replace(",", " ").replace("\n", " ").strip()
+        themes_all = str(th.get("themes") or "").replace(",", " ").replace("\n", " ").strip()
+        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s,%d,%d,%s,%d,%d,%d,%s" % (
             date, r["code"], r["name"].replace(",", " "), r["board_cnt"],
-            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason, uh, fc))
+            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason, uh, fc,
+            theme, int(th.get("theme_count") or 0), int(th.get("theme_max_board") or 0),
+            int(th.get("theme_rank") or 0), themes_all))
     return "\n".join(lines) + "\n"
 
 
@@ -132,7 +219,13 @@ def run(date: str | None = None, lub_dir: str | None = None, out_dir: str | None
         unq = {_code_ptrade(c): s for c, s in (_st or {}).items()}
     except Exception as e:
         print("[zt-lianban] 唯一身位重算跳过(回退云端首token): %r" % e)
-    content_b = build_csv(date, rows, unq).encode("utf-8")
+    buckets = _load_theme_buckets(date, lub_dir)
+    if not buckets:
+        buckets = _aggregate_theme_buckets(rows)
+        if buckets:
+            print("[zt-lianban] 分析 JSON 题材缺失，已用涨停原因本地聚合兜底")
+    themes = _theme_map(rows, _normalize_bucket_codes(buckets))
+    content_b = build_csv(date, rows, unq, themes).encode("utf-8")
     extra = [os.path.join(out_dir, alias)] if alias else []
     for fp in tuple([csv_path, latest]) + tuple(extra):
         try:

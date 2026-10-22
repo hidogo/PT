@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.53（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.53 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.57（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.57 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.53"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.57"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -222,6 +222,19 @@ BLS = {
     'dyn_sweep_enabled': True,          # 竞价唯一扫板 开关
     'dyn_sweep_window_minute': 15,      # 扫板窗口 09:30-09:45
     'dyn_sweep_budget_ratio': 0.20,     # 扫板单笔预算（=打板 20%）
+    # v0.55 盘中题材身位/跟风/强度动态修正（docs/41）：zt_lianban 题材梯队列静态锚 + 盘中重算
+    'zt_theme_dyn_enabled': True,       # 盘中动态题材状态总开关
+    'zt_theme_dyn_cache_sec': 15,       # 动态题材状态缓存刷新秒数
+    'zt_theme_leader_sort_bonus': 1.5,  # 题材动态龙头排序加分（_pool_exp_priority）
+    'zt_theme_rank_bonus_step': 0.3,    # 题材梯队名次排序加分步长（rank 越小加分越多）
+    # v0.56 盘中新题材发酵识别/消费（docs/42）：新首板助攻 -> 题材桶桥接 + 发酵状态机 + 前排闸门
+    'zt_theme_ferment_enabled': True,   # 盘中新题材发酵总开关
+    'zt_theme_ferment_window_min': 25,  # 发酵确认时间窗（分钟）
+    'zt_theme_ferment_assist_min': 2,   # 窗内新增首板助攻最少家数
+    'zt_theme_ferment_hot_assist': 5,   # 高潮阈值：助攻家数 >= 此值
+    'zt_theme_ferment_front_bonus': 0.8,  # 确认题材前排排序加分
+    'zt_theme_ferment_sort_bonus': 0.5,   # 确认题材成员排序加分
+    'zt_theme_ferment_seal_min': 50000.0, # 前排封单下限（0=关闭；无 L2 数据不拦截）
 }
 # 打分加减分配置（scoring.bonus.* / scoring.penalty.* 默认）
 BONUS = {
@@ -485,6 +498,14 @@ def initialize(context):
     g.reboard_fired = False  # 回封打板每日全局 1 次标记（v0.49）
     g.sealed_since = {}   # sec -> 封死状态持续计时起点（v0.26b，5s 新鲜度确认）
     g.zt_lianban = {}   # sec -> T-1 涨停/连板名单（AXquant limit_up_boards 导出, upload_file）
+    g.zt_theme_authoritative = False  # v0.38 文件带权威题材列（theme.buckets 同源）-> 兜底分组用题材
+    g.zt_theme = {}        # v0.55 静态锚：theme -> {members,max_board,count,rank}（themes 全量建组）
+    g.zt_themes_of = {}    # v0.55 code -> [theme names]（themes 全量，交叉题材不漏归）
+    g.zt_dyn_cache = {}    # v0.55 盘中动态题材状态缓存 {'ts','data'}
+    g.zt_new_cache = {}    # v0.56 新首板题材归属缓存 {'ts','data'}（THS 概念 -> 题材桶桥接）
+    g.zt_ferment_cache = {}  # v0.56 盘中新题材发酵状态缓存 {'ts','data'}
+    g.zt_ferment_stage = {}  # v0.56 发酵档位上一值（stage 变化才打日志）
+    g.zt_unmapped_n = 0    # v0.57 无概念映射新首板计数（变化才打日志）
     g.exp_file = {}     # sec -> 预期文件条目（AXquant 竞价终态）
     g.exp_fired = set() # sec -> 本日已触发(买/放弃)的预期买入（一次触发+跨重启去重）
     g.pending = {}      # sec -> 已发送委托（成交确认前的去重/回执）
@@ -561,7 +582,7 @@ def _maybe_roll_day():
     if getattr(g, 'exp_day', None) == day:
         return False
     g.exp_day = day
-    g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+    g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0
     return True
 
 
@@ -837,6 +858,8 @@ def _mid_board_avoid(sec):
         cnt = int(zt.get('board_cnt') or 0)
         if 2 <= cnt <= 5:
             if zt.get('unique_high'):
+                return False
+            if _dyn_theme_leader(sec):
                 return False
             return True
     return False
@@ -2010,12 +2033,19 @@ def _load_zt_lianban():
         hdr = [x.strip().lower() for x in rows[0]]
         has_unq = 'unique_high' in hdr
         has_flw = 'follower_count' in hdr
+        has_theme = 'theme' in hdr
         g.zt_unq_authoritative = has_unq    # v0.37 文件带权威唯一列（AXquant 同源预计算）-> 优先读列
+        g.zt_theme_authoritative = has_theme  # v0.38 文件带权威题材列（theme.buckets 同源）
+        themed = 0
         for r in rows[1:]:
             rec = dict(zip(hdr, r))
             code = (rec.get("code") or "").strip()
             if not code:
                 continue
+            theme = (rec.get("theme") or "").strip()
+            themes = (rec.get("themes") or "").strip()
+            if theme:
+                themed += 1
             g.zt_lianban[code] = {
                 "date": (rec.get("date") or "").strip(),
                 "board_cnt": int(_fnum(rec.get("board_cnt"))),
@@ -2026,9 +2056,16 @@ def _load_zt_lianban():
                 "reason": (rec.get("reason") or "").strip(),
                 "unique_high": bool(int(_fnum(rec.get("unique_high"))) or 0) if has_unq else False,
                 "follower_count": int(_fnum(rec.get("follower_count"))) if has_flw else 0,
+                "theme": theme,
+                "theme_count": int(_fnum(rec.get("theme_count"))) if has_theme else 0,
+                "theme_max_board": int(_fnum(rec.get("theme_max_board"))) if has_theme else 0,
+                "theme_rank": int(_fnum(rec.get("theme_rank"))) if has_theme else 0,
+                "themes": themes,
             }
         n_unq = _annotate_zt_uniqueness()   # v0.34b 兜底标注；v0.37 文件权威列优先
-        log.info("[zt-lianban] loaded %s -> %d unique_high=%d" % (fp, len(g.zt_lianban), n_unq))
+        _build_zt_theme_index()             # v0.55 静态锚：题材索引（themes 全量）
+        log.info("[zt-lianban] loaded %s -> %d unique_high=%d themed=%d"
+                 % (fp, len(g.zt_lianban), n_unq, themed))
         return len(g.zt_lianban)
     except Exception as e:
         log.info("[zt-lianban] skip(invalid) %s: %r" % (fp, e))
@@ -2048,11 +2085,19 @@ def _annotate_zt_uniqueness():
         return 0
     if getattr(g, 'zt_unq_authoritative', False):
         return sum(1 for rec in zt.values() if rec.get('unique_high'))
+    # v0.38：文件带权威题材列时按主题材分组（对齐 AXquant theme.buckets 口径）；
+    # 缺列仍回退涨停原因首 token 分组。
+    use_theme = bool(getattr(g, 'zt_theme_authoritative', False))
     groups = {}
     for code, rec in zt.items():
-        reason = str(rec.get('reason') or '')
-        toks = [t.strip() for t in reason.replace('+', ' ').replace('、', ' ').replace(',', ' ').replace('，', ' ').replace('/', ' ').replace('；', ' ').split() if t.strip()]
-        key = toks[0] if toks else ('__noboard__' + str(code))
+        if use_theme:
+            key = str(rec.get('theme') or '').strip()
+        else:
+            reason = str(rec.get('reason') or '')
+            toks = [t.strip() for t in reason.replace('+', ' ').replace('、', ' ').replace(',', ' ').replace('，', ' ').replace('/', ' ').replace('；', ' ').split() if t.strip()]
+            key = toks[0] if toks else ''
+        if not key:
+            key = '__noboard__' + str(code)
         groups.setdefault(key, []).append(code)
     heights = {c: max(1, int((zt[c] or {}).get('board_cnt') or 1)) for c in zt}
     gmax = max(heights.values(), default=1)
@@ -2072,6 +2117,354 @@ def _annotate_zt_uniqueness():
             if is_leader:
                 n_unq += 1
     return n_unq
+
+
+def _build_zt_theme_index():
+    # v0.55 静态锚（docs/41 §2.1）：按 themes 全量列表建题材索引，交叉题材不漏归；
+    # 无 themes 列时用单一 theme 字段兜底。theme_rank 取成员权威名次最大值。
+    g.zt_theme = {}
+    g.zt_themes_of = {}
+    zt = getattr(g, 'zt_lianban', {}) or {}
+    for code, rec in zt.items():
+        names = [t.strip() for t in str(rec.get('themes') or '').split('|') if t.strip()]
+        if not names:
+            single = str(rec.get('theme') or '').strip()
+            if single:
+                names = [single]
+        g.zt_themes_of[code] = names
+        for name in names:
+            b = g.zt_theme.setdefault(name, {'members': set(), 'max_board': 0, 'count': 0, 'rank': 0})
+            b['members'].add(code)
+    for name, b in g.zt_theme.items():
+        hs = [int(zt[c].get('board_cnt') or 0) for c in b['members']]
+        b['max_board'] = max(hs) if hs else 0
+        b['count'] = len(b['members'])
+        rk = [int(zt[c].get('theme_rank') or 0) for c in b['members']]
+        b['rank'] = max(rk) if rk else 0
+
+
+def _zt_themes_of(sec):
+    return list((getattr(g, 'zt_themes_of', {}) or {}).get(sec) or [])
+
+
+def _dyn_theme_status():
+    # v0.55 动态修正层（docs/41 §2.2）：T-1 题材索引 + 今日实时（_today_zt 续板 /
+    # _limitup_days 动态身位）重算每题材的存活最高身位、唯一龙头、存活跟风与实时家数；
+    # 15s 节流缓存（成员均来自 T-1 池，last_px/pre_close 读 g.spot 内存，开销小）。
+    if not BLS.get('zt_theme_dyn_enabled', True):
+        return {}
+    now = time.time()
+    cache = getattr(g, 'zt_dyn_cache', None) or {}
+    ttl = float(BLS.get('zt_theme_dyn_cache_sec', 15) or 15)
+    if cache and now - float(cache.get('ts') or 0) < ttl and cache.get('data'):
+        return cache['data']
+    zt = getattr(g, 'zt_lianban', {}) or {}
+    thememap = getattr(g, 'zt_theme', {}) or {}
+    out = {}
+    for name, b in thememap.items():
+        members = sorted(b['members'])
+        lvl_of = {}
+        for c in members:
+            rec = zt.get(c) or {}
+            if not rec or not rec.get('board_cnt'):
+                continue
+            lvl_of[c] = _limitup_days(c)
+        alive = [c for c in lvl_of if _today_zt(c)]
+        alive_lvls = [lvl_of[c] for c in alive]
+        mx = max(alive_lvls) if alive_lvls else 0   # 只统计存活者，龙头炸板后身位转授
+        top = [c for c in alive if lvl_of[c] == mx]
+        leader = top[0] if len(top) == 1 else ''
+        followers = [c for c in alive if c != leader and lvl_of[c] < mx]
+        out[name] = {
+            'members': members,
+            'max_board_static': int(b.get('max_board') or 0),
+            'max_board_dyn': mx,
+            'count_static': int(b.get('count') or 0),
+            'alive_count': len(alive),
+            'rank': int(b.get('rank') or 0),
+            'leader': leader,
+            'follower_count': len(followers),
+        }
+    if getattr(g, 'zt_dyn_cache', None) is None:
+        g.zt_dyn_cache = {}
+    g.zt_dyn_cache['ts'] = now
+    g.zt_dyn_cache['data'] = out
+    return out
+
+
+def _dyn_theme_leader(sec):
+    # v0.55 sec 是否为任一所属题材的当前唯一最高身位存活者（动态龙头，docs/41 §2.2/§3.2）。
+    # 盘中龙头炸板后唯一性可转移到同题材最高身位唯一存活者（静态 unique_high 失效时兜底）。
+    st = _dyn_theme_status()
+    for name in _zt_themes_of(sec):
+        d = st.get(name) or {}
+        if d.get('leader') == sec:
+            return True
+    # v0.56 新题材发酵前排：已确认/高潮题材的存活前排视为动态龙头（docs/42 §3，中位放行/排序共用）
+    fm = _dyn_theme_ferment()
+    for name in _new_themes_of(sec):
+        d = fm.get(name) or {}
+        if d.get('front') == sec and d.get('confirmed'):
+            return True
+    return False
+
+
+def _zt_theme_sort_bonus(code):
+    # v0.55/v0.56 题材强度/身位排序加分（_pool_exp_priority）：动态龙头 + 题材梯队名次 +
+    # 新题材发酵（确认成员/前排）；仅参与排序观察、不放大追高（docs/41 §3.4 / docs/42 §3）。
+    try:
+        st = _dyn_theme_status()
+        fm = _dyn_theme_ferment()
+        best = 0.0
+        for name in _zt_themes_of(code):
+            d = st.get(name) or {}
+            v = 0.0
+            if d.get('leader') == code:
+                v += float(BLS.get('zt_theme_leader_sort_bonus', 1.5) or 1.5)
+            rk = int(d.get('rank') or 0)
+            if rk > 0:
+                v += float(BLS.get('zt_theme_rank_bonus_step', 0.3) or 0.3) * (6 - min(rk, 6))
+            fd = fm.get(name) or {}
+            if fd.get('confirmed'):
+                if fd.get('front') == code:
+                    v += float(BLS.get('zt_theme_ferment_front_bonus', 0.8) or 0.8)
+                else:
+                    v += float(BLS.get('zt_theme_ferment_sort_bonus', 0.5) or 0.5)
+            best = max(best, v)
+        for name in _new_themes_of(code):
+            if name in _zt_themes_of(code):
+                continue
+            d = fm.get(name) or {}
+            if not d or not d.get('confirmed'):
+                continue
+            if d.get('front') == code:
+                best = max(best, float(BLS.get('zt_theme_ferment_front_bonus', 0.8) or 0.8))
+            else:
+                best = max(best, float(BLS.get('zt_theme_ferment_sort_bonus', 0.5) or 0.5))
+        return best
+    except Exception:
+        return 0.0
+
+
+def _new_themes_of(sec):
+    # v0.56 盘中新首板题材归属（docs/42 §2.2）：THS 概念 -> T-1 题材桶交集桥接；
+    # 无交集建临时桶 THS:<概念名>（收盘复盘回填权威桶）。15s 节流缓存。
+    sec = str(sec or '')
+    if not sec or not BLS.get('zt_theme_ferment_enabled', True):
+        return []
+    now = time.time()
+    cache = getattr(g, 'zt_new_cache', None) or {}
+    ttl = float(BLS.get('zt_theme_dyn_cache_sec', 15) or 15)
+    if cache and now - float(cache.get('ts') or 0) < ttl and cache.get('data') and sec in cache['data']:
+        return list(cache['data'].get(sec) or [])
+    thememap = getattr(g, 'zt_theme', {}) or {}
+    boards = getattr(g, 'boards', None) or {}
+    if not (getattr(g, 'stock_boards', None) or {}):
+        # v0.57 无概念映射文件时不落 API（避免 3s tick 帧阻塞）；发酵覆盖缺口单独计数
+        return []
+    out = []
+    for nm in _concept_boards_of(sec):
+        nm = str(nm or '').strip()
+        if not nm:
+            continue
+        hit = ''
+        for tname, tb in thememap.items():
+            members = set(tb.get('members') or [])
+            if not members:
+                continue
+            bm = set(boards.get(nm) or [])
+            if bm and (members & bm):
+                hit = tname
+                break
+        if hit:
+            if hit not in out:
+                out.append(hit)
+        else:
+            t = 'THS:' + nm
+            if t not in out:
+                out.append(t)
+    if getattr(g, 'zt_new_cache', None) is None:
+        g.zt_new_cache = {}
+    g.zt_new_cache.setdefault('data', {})[sec] = out
+    g.zt_new_cache['ts'] = now
+    return out
+
+
+def _merge_temp_themes(by_theme):
+    # v0.57 临时题材桶合并（docs/42 修复 5）：THS:* 桶若概念成员有交集或共享今日新首板，
+    # 合并为同一临时题材，避免同一逻辑新题材被拆成多个单成员桶永远达不到 assist_min。
+    temp_names = sorted([str(n) for n in by_theme if str(n).startswith('THS:')])
+    if len(temp_names) <= 1:
+        return
+    boards = getattr(g, 'boards', None) or {}
+    code_sets = {n: {r[2] for r in by_theme[n]} for n in temp_names}
+    parent = {n: n for n in temp_names}
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def _bmap(nm):
+        return set(boards.get(str(nm).split(':', 1)[1]) or [])
+    for i in range(len(temp_names)):
+        for j in range(i + 1, len(temp_names)):
+            a, b = temp_names[i], temp_names[j]
+            if (code_sets[a] & code_sets[b]) or (_bmap(a) & _bmap(b)):
+                parent[_find(a)] = _find(b)
+    groups = {}
+    for n in temp_names:
+        groups.setdefault(_find(n), []).append(n)
+    for names in groups.values():
+        if len(names) <= 1:
+            continue
+        merged = []
+        for n in names:
+            merged.extend(by_theme.pop(n))
+        by_code = {}
+        for r in merged:
+            cur = by_code.get(r[2])
+            if cur is None or (r[0], r[1]) > (cur[0], cur[1]):
+                by_code[r[2]] = r
+        merged = list(by_code.values())
+        best = sorted(names, key=lambda n: (-len(code_sets[n]), n))[0]
+        by_theme['THS:' + str(best).split(':', 1)[1]] = merged
+
+
+def _dyn_theme_ferment():
+    # v0.56 盘中新题材发酵状态机（docs/42 §2.3/§2.4）：以 g.first_zt 首触为源，
+    # 筛「今日新首板（T-1 不在池）+ 仍封板」；题材归属走 THS 概念桥接（_new_themes_of）。
+    # 窗内助攻家数 >= assist_min 且时间跨度 <= window -> confirmed；>= hot_assist -> hot。
+    # 前排=存量题材动态龙头（_dyn_theme_status）或全新题材最早触板存活者；龙头炸板可转授。
+    if not BLS.get('zt_theme_ferment_enabled', True):
+        return {}
+    now = time.time()
+    cache = getattr(g, 'zt_ferment_cache', None) or {}
+    ttl = float(BLS.get('zt_theme_dyn_cache_sec', 15) or 15)
+    if cache and now - float(cache.get('ts') or 0) < ttl and cache.get('data'):
+        return cache['data']
+    zt = getattr(g, 'zt_lianban', {}) or {}
+    base = _dyn_theme_status()
+    by_theme = {}
+    n_unmapped = 0
+    for c, ft in (getattr(g, 'first_zt', None) or {}).items():
+        c = str(c or '')
+        if not c or not isinstance(ft, dict) or c in zt:
+            continue
+        # v0.57 不再调 _is_first_board（c not in zt 即首板），避免 tick 决策路径触发 get_price
+        if not _today_zt(c):
+            continue
+        if _is_one_word_open(c):
+            continue                     # 一字板不参与助攻/前排竞争（对齐 _board_first_zt）
+        ms = _first_zt_ms(c)
+        if not ms:
+            continue
+        seal = float(ft.get('first_seal') or 0.0)
+        names = _new_themes_of(c)
+        if not names:
+            n_unmapped += 1
+            continue
+        for name in names:
+            by_theme.setdefault(name, []).append((ms, seal, c))
+    if n_unmapped != getattr(g, 'zt_unmapped_n', 0):
+        g.zt_unmapped_n = n_unmapped
+        log.info('[ferment] unmapped=%d' % n_unmapped)
+    _merge_temp_themes(by_theme)
+    win_ms = int(float(BLS.get('zt_theme_ferment_window_min', 25) or 25)) * 60 * 1000
+    assist_min = int(BLS.get('zt_theme_ferment_assist_min', 2) or 2)
+    hot_assist = int(BLS.get('zt_theme_ferment_hot_assist', 5) or 5)
+    seal_min = float(BLS.get('zt_theme_ferment_seal_min', 50000.0) or 0.0)
+    prev = getattr(g, 'zt_ferment_stage', None) or {}
+    out = {}
+    for name, rows in by_theme.items():
+        alive = [r for r in rows if _today_zt(r[2])]
+        if not alive:
+            continue
+        alive.sort(key=lambda r: (r[0], -(r[1])))
+        bd = base.get(name) or {}
+        leader = bd.get('leader') or ''
+        max_dyn = int(bd.get('max_board_dyn') or 0)
+        assist = len(alive)
+        span_ms = max(r[0] for r in alive) - min(r[0] for r in alive)
+        confirmed = assist >= assist_min and (len(alive) < 2 or span_ms <= win_ms)
+        stage = 'hot' if (confirmed and assist >= hot_assist) else ('confirmed' if confirmed else 'watch')
+        front = leader
+        front_ms = 0
+        seal_ok = True
+        if not front or not _today_zt(front):
+            # 存量龙头炸板/缺位 -> 存活最高（最早触板）转授；全新题材无存量时同样取最早
+            candidates = [r for r in alive if not _is_one_word_open(r[2])]
+            if candidates:
+                # v0.57 前排封单下限：first_seal<=0 视为无 L2 不拦截；全低于下限时不转授但标记弱
+                pool = candidates
+                if seal_min > 0:
+                    strong = [r for r in candidates if r[1] <= 0 or r[1] >= seal_min]
+                    if strong:
+                        pool = strong
+                    else:
+                        seal_ok = False
+                pool.sort(key=lambda r: (r[0], -(r[1])))
+                front = pool[0][2]
+                front_ms = pool[0][0]
+                if not leader and not max_dyn:
+                    max_dyn = 1
+        out[name] = {
+            'members': [r[2] for r in alive],
+            'assist_count': assist,
+            'confirmed': bool(confirmed),
+            'stage': stage,
+            'front': front,
+            'front_first_ms': front_ms,
+            'max_board_dyn': max(1, max_dyn),
+            'temp': bool(name.startswith('THS:')),
+            'span_ms': span_ms,
+            'seal_min': seal_min,
+            'seal_ok': bool(seal_ok),
+        }
+        if prev.get(name) != stage:
+            log.info('[ferment] %s assist=%d stage=%s front=%s span=%dms' % (
+                name, assist, stage, front, span_ms))
+        prev[name] = stage
+    if getattr(g, 'zt_ferment_stage', None) is None:
+        g.zt_ferment_stage = {}
+    g.zt_ferment_stage.update({k: v for k, v in prev.items() if k in out})
+    if getattr(g, 'zt_ferment_cache', None) is None:
+        g.zt_ferment_cache = {}
+    g.zt_ferment_cache['ts'] = now
+    g.zt_ferment_cache['data'] = out
+    return out
+
+
+def _ferment_front_gate(sec):
+    # v0.56/v0.57 新题材首板打板闸门（docs/42 §3）：存量题材的新首板助攻不抢前排（不做打板候选）；
+    # 全新题材前排 / 存量题材前排（含龙头炸板转授后的最早存活首板）放行走原闸门。
+    # 返回 True=放行, False=跳过, None=不适用（T-1 池成员或非新题材，走原逻辑）。
+    try:
+        if sec in (getattr(g, 'zt_lianban', {}) or {}):
+            return None
+        fm = _dyn_theme_ferment()
+        themes = _new_themes_of(sec)
+        if not themes:
+            return None
+        known = False
+        base = None
+        for name in themes:
+            d = fm.get(name) or {}
+            if not d:
+                # v0.57 冷缓存补齐：临时题材首个成员即前排放行；存量题材有存活龙头则助攻不放行
+                if name.startswith('THS:'):
+                    return True
+                if base is None:
+                    base = _dyn_theme_status()
+                leader = (base.get(name) or {}).get('leader') or ''
+                if leader and _today_zt(leader):
+                    return False
+                continue
+            known = True
+            if d.get('front') == sec:
+                return True
+        return False if known else None
+    except Exception:
+        return None
 
 
 def _sentiment_paths():
@@ -2650,6 +3043,7 @@ def _pool_exp_priority(code):
         sc = 0.0
     if _dyn_unq_confirmed(code):
         sc += float(BLS.get('dyn_unq_sort_bonus', 2.0))   # v0.38 动态唯一龙头确认排序加分
+    sc += _zt_theme_sort_bonus(code)                      # v0.55 题材强度/身位排序加分
     act = _first_zt_ms(code) or 1e18   # v0.37 毫秒归一（逐笔 ms 优先, 帧 ts 归一）
     return (-sc, act)
 
@@ -2898,6 +3292,9 @@ def _try_first_board_buy(context, sec, rank_secs=None):
         return                       # 除一字板
     if not _is_first_board(sec):
         return                       # 仅首板（T-1 无连板）
+    _fg = _ferment_front_gate(sec)   # v0.56 新题材发酵闸门：助攻非前排不抢首板
+    if _fg is False:
+        log.info('[ferment] %s 新题材助攻非前排 -> skip first_board' % _sn(sec)); return
     if _mid_board_avoid(sec):
         log.info('[mid-avoid] %s 连板中位股规避(first_board)' % _sn(sec)); return
     now = time.time()
@@ -4586,7 +4983,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0
     _mark_one_word_open()
     try:
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))   # v0.52 09:31 兜底重播种（覆盖重置窗口）

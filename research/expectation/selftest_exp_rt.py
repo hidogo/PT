@@ -2538,13 +2538,253 @@ ok('T92e 权威唯一高板读列', ns['g'].zt_lianban['003029.XSHE']['unique_hi
 ok('T92e 权威列中位规避', ns['_mid_board_avoid']('603278.XSHG') is True)
 ok('T92e 权威唯一高板放行', ns['_mid_board_avoid']('003029.XSHE') is False)
 
-# T92f export_lianban.build_csv 追加权威唯一列
+# T92f export_lianban.build_csv 追加权威唯一列 + 题材/概念梯队列
 import export_lianban as _el92
 _csv92 = _el92.build_csv('2026-10-20',
     [{'code': '003029.XSHE', 'name': '吉大正元', 'board_cnt': 4, 'limit_up_time': '09:25',
       'seal_money': 1.0, 'chg_pct': 10.0, 'is_st': 0, 'reason': '低空安全+密码'}],
-    {'003029.XSHE': {'unique_high_board': True, 'follower_count': 4}})
-ok('T92f build_csv 权威列', 'unique_high' in _csv92.split('\n')[0] and ',1,4\n' in _csv92 and '003029.XSHE' in _csv92)
+    {'003029.XSHE': {'unique_high_board': True, 'follower_count': 4}},
+    {'003029.XSHE': {'theme': '低空经济', 'theme_count': 3, 'theme_max_board': 4,
+                     'theme_rank': 2, 'themes': '低空经济|网络安全'}})
+_line92 = _csv92.split('\n')[1]
+ok('T92f build_csv 权威列+题材列',
+   'unique_high' in _csv92.split('\n')[0]
+   and 'theme_count' in _csv92.split('\n')[0]
+   and ',1,4,低空经济,3,4,2,低空经济|网络安全' in _line92
+   and '003029.XSHE' in _csv92)
+
+# T92g zt_lianban 题材/概念梯队列消费（v0.38）：列解析 + 缺 unique_high 时按主题材分组兜底
+ns = fresh()
+_lb93 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb93, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-20,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n'
+            '2026-10-20,603081.XSHG,京城股份,2,09:25,1.0,10.0,0,机器人集成+气体,机器人/自动化,16,5,1,机器人/自动化\n'
+            '2026-10-20,003029.XSHE,吉大正元,4,09:25,1.0,10.0,0,低空安全+密码,AI/数据要素/算力,10,5,2,AI/数据要素/算力\n')
+n92g = ns['_load_zt_lianban']()
+_grec = ns['g'].zt_lianban['603278.XSHG']
+ok('T92g 题材列加载', n92g == 3 and ns['g'].zt_theme_authoritative is True
+   and _grec['theme'] == '机器人/自动化' and _grec['theme_count'] == 16
+   and _grec['theme_max_board'] == 5 and _grec['theme_rank'] == 1
+   and '机器人/自动化' in _grec['themes'])
+ok('T92g 兜底题材分组授唯一', ns['g'].zt_lianban['603278.XSHG']['unique_high'] is True
+   and ns['g'].zt_lianban['603081.XSHG']['unique_high'] is False
+   and ns['g'].zt_lianban['603278.XSHG']['follower_count'] == 1)
+
+# T92h 盘中题材身位/跟风/强度动态消费（v0.55，docs/41）：索引建组 + 动态龙头/跟风 + 中位放行 + 转授
+ns = fresh()
+_lb94 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb94, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-20,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,0,0,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n'
+            '2026-10-20,603081.XSHG,京城股份,2,09:25,1.0,10.0,0,机器人集成+气体,0,0,机器人/自动化,16,5,1,机器人/自动化\n')
+ns['_load_zt_lianban']()
+ok('T92h 题材索引建组', ns['g'].zt_theme['机器人/自动化']['max_board'] == 5
+   and ns['g'].zt_theme['机器人/自动化']['count'] == 2
+   and '化工/新材料' in ns['g'].zt_themes_of['603278.XSHG'])
+ns['g'].spot['603278.XSHG'] = {'preclose_px': 10.0, 'last_px': 11.0}
+ns['g'].spot['603081.XSHG'] = {'preclose_px': 10.0, 'last_px': 11.0}
+ns['g'].zt_dyn_cache = {}
+_st94 = ns['_dyn_theme_status']()['机器人/自动化']
+ok('T92h 动态龙头+跟风', _st94['leader'] == '603278.XSHG' and _st94['follower_count'] == 1
+   and _st94['alive_count'] == 2 and _st94['max_board_dyn'] == 6)
+ok('T92h 中位放行(动态龙头)', ns['_mid_board_avoid']('603278.XSHG') is False
+   and ns['_mid_board_avoid']('603081.XSHG') is True)
+ok('T92h 排序加分', ns['_zt_theme_sort_bonus']('603278.XSHG') >= 1.5)
+ns['g'].spot['603278.XSHG'] = {'preclose_px': 10.0, 'last_px': 10.0}   # 大业炸板
+ns['g'].zt_dyn_cache = {}
+_st94b = ns['_dyn_theme_status']()['机器人/自动化']
+ok('T92h 龙头炸板转授', _st94b['leader'] == '603081.XSHG' and _st94b['follower_count'] == 0
+   and _st94b['alive_count'] == 1
+   and ns['_mid_board_avoid']('603081.XSHG') is False)
+
+# T92i 盘中新题材发酵识别/消费（v0.56，docs/42）：THS概念桥接 + 发酵确认 + 前排闸门 + 排序加分 + 高潮/窗口
+ns = fresh()
+g = ns['g']
+_lb95 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb95, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-21,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,1,1,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n')
+ns['_load_zt_lianban']()
+g.boards = {'机器人': ['603278.XSHG', '603081.XSHG', '603100.XSHG'],
+            '数据要素': ['600101.XSHG', '600102.XSHG', '600103.XSHG']}
+g.board_type = {'机器人': 'concept', '数据要素': 'concept'}
+g.stock_boards = {'603278.XSHG': ['机器人'], '603081.XSHG': ['机器人'],
+                  '603100.XSHG': ['机器人'], '600101.XSHG': ['数据要素'],
+                  '600102.XSHG': ['数据要素'], '600103.XSHG': ['数据要素']}
+for c in ('603278.XSHG', '603081.XSHG', '603100.XSHG', '600101.XSHG', '600102.XSHG', '600103.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {
+    '603081.XSHG': {'ts': time.time(), 'ms': 20261022093500000, 'first_seal': 80000.0, 'break': False},
+    '603100.XSHG': {'ts': time.time(), 'ms': 20261022094500000, 'first_seal': 60000.0, 'break': False},
+    '600101.XSHG': {'ts': time.time(), 'ms': 20261022094000000, 'first_seal': 90000.0, 'break': False},
+    '600102.XSHG': {'ts': time.time(), 'ms': 20261022095000000, 'first_seal': 70000.0, 'break': False},
+    '600103.XSHG': {'ts': time.time(), 'ms': 20261022095500000, 'first_seal': 50000.0, 'break': False},
+}
+ns['_is_first_board'] = lambda c: c not in g.zt_lianban
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+fm95 = ns['_dyn_theme_ferment']()
+_rob95 = fm95.get('机器人/自动化') or {}
+_tmp95 = fm95.get('THS:数据要素') or {}
+ok('T92i THS桥接+发酵确认', _rob95.get('confirmed') is True and _rob95.get('assist_count') == 2
+   and _rob95.get('front') == '603278.XSHG' and _rob95.get('stage') == 'confirmed')
+ok('T92i 全新题材临时桶+前排', _tmp95.get('confirmed') is True and _tmp95.get('temp') is True
+   and _tmp95.get('front') == '600101.XSHG' and _tmp95.get('stage') == 'confirmed')
+ok('T92i 存量龙头仍前排', ns['_dyn_theme_leader']('603278.XSHG') is True)
+ok('T92i 新题材前排动态龙头', ns['_dyn_theme_leader']('600101.XSHG') is True)
+ok('T92i 助攻非前排拦截', ns['_ferment_front_gate']('603081.XSHG') is False
+   and ns['_ferment_front_gate']('600102.XSHG') is False)
+ok('T92i T-1成员走原逻辑', ns['_ferment_front_gate']('603278.XSHG') is None)
+ok('T92i 全新题材前排放行', ns['_ferment_front_gate']('600101.XSHG') is True)
+ok('T92i 排序加分(存量龙头+发酵)', ns['_zt_theme_sort_bonus']('603278.XSHG') >= 1.5 + 0.8)
+ok('T92i 排序加分(新题材前排)', ns['_zt_theme_sort_bonus']('600101.XSHG') >= 0.8)
+ns['BLS']['zt_theme_ferment_hot_assist'] = 3
+g.zt_ferment_cache = {}
+fm95b = ns['_dyn_theme_ferment']()
+ok('T92i 高潮档位', (fm95b.get('THS:数据要素') or {}).get('stage') == 'hot')
+
+ns = fresh()
+g = ns['g']
+_lb95b = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb95b, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-21,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,1,1,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n')
+ns['_load_zt_lianban']()
+g.boards = {'机器人': ['603278.XSHG', '603081.XSHG']}
+g.board_type = {'机器人': 'concept'}
+g.stock_boards = {'603278.XSHG': ['机器人'], '603081.XSHG': ['机器人']}
+for c in ('603278.XSHG', '603081.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {
+    '603081.XSHG': {'ts': time.time(), 'ms': 20261022093500000, 'first_seal': 80000.0, 'break': False},
+}
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+fm95w = ns['_dyn_theme_ferment']()
+ok('T92i 单助攻未确认', (fm95w.get('机器人/自动化') or {}).get('confirmed') is False)
+ok('T92i 单助攻非前排', ns['_ferment_front_gate']('603081.XSHG') is False)
+
+ns = fresh()
+g = ns['g']
+_lb95c = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb95c, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-21,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,1,1,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n')
+ns['_load_zt_lianban']()
+g.boards = {'机器人': ['603278.XSHG', '603081.XSHG', '603100.XSHG']}
+g.board_type = {'机器人': 'concept'}
+g.stock_boards = {'603278.XSHG': ['机器人'], '603081.XSHG': ['机器人'], '603100.XSHG': ['机器人']}
+for c in ('603278.XSHG', '603081.XSHG', '603100.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {
+    '603081.XSHG': {'ts': time.time(), 'ms': 20261022093500000, 'first_seal': 80000.0, 'break': False},
+    '603100.XSHG': {'ts': time.time(), 'ms': 20261022101000000, 'first_seal': 60000.0, 'break': False},
+}
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+ns['BLS']['zt_theme_ferment_window_min'] = 25
+fm95s = ns['_dyn_theme_ferment']()
+ok('T92i 窗口超限不确认', (fm95s.get('机器人/自动化') or {}).get('confirmed') is False)
+
+# T92j v0.57 修复1：发酵路径不触发行情/板块 API（tick 决策零阻塞）
+ns = fresh()
+g = ns['g']
+_lb96 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb96, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-21,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,1,1,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n')
+ns['_load_zt_lianban']()
+g.boards = {'机器人': ['603278.XSHG', '603081.XSHG']}
+g.board_type = {'机器人': 'concept'}
+g.stock_boards = {'603278.XSHG': ['机器人'], '603081.XSHG': ['机器人']}
+for c in ('603278.XSHG', '603081.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {'603081.XSHG': {'ts': time.time(), 'ms': 20261022093500000, 'first_seal': 80000.0, 'break': False}}
+_calls96 = {'hist': 0, 'blocks': 0}
+ns['_hist_1d'] = lambda sec: _calls96.__setitem__('hist', _calls96['hist'] + 1) or None
+ns['_boards_of'] = lambda sec: _calls96.__setitem__('blocks', _calls96['blocks'] + 1) or []
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+fm96 = ns['_dyn_theme_ferment']()
+ok('T92j 发酵不触发hist/API', _calls96['hist'] == 0 and _calls96['blocks'] == 0
+   and (fm96.get('机器人/自动化') or {}).get('assist_count') == 1)
+ns = fresh()
+g = ns['g']
+_calls96b = {'blocks': 0}
+ns['_boards_of'] = lambda sec: _calls96b.__setitem__('blocks', _calls96b['blocks'] + 1) or []
+ok('T92j boards缺失不落API', ns['_new_themes_of']('603081.XSHG') == [] and _calls96b['blocks'] == 0)
+
+# T92k v0.57 修复3：发酵冷缓存闸门补齐（存量助攻拦截 / 临时前排放行）
+ns = fresh()
+g = ns['g']
+_lb97 = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+with io.open(_lb97, 'wt', encoding='utf-8') as f:
+    f.write('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes\n'
+            '2026-10-21,603278.XSHG,大业股份,5,09:30,2.58,10.0,0,人形机器人+橡胶骨架,1,1,机器人/自动化,16,5,1,机器人/自动化|化工/新材料\n')
+ns['_load_zt_lianban']()
+g.boards = {'机器人': ['603278.XSHG', '603081.XSHG']}
+g.board_type = {'机器人': 'concept'}
+g.stock_boards = {'603278.XSHG': ['机器人'], '603081.XSHG': ['机器人']}
+for c in ('603278.XSHG', '603081.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {}
+g.zt_dyn_cache = {}; g.zt_new_cache = {}
+g.zt_ferment_cache = {'ts': time.time(), 'data': {}}   # 冷缓存：发酵输出尚无该主题
+ok('T92k 冷缓存存量助攻拦截', ns['_ferment_front_gate']('603081.XSHG') is False)
+ns = fresh()
+g = ns['g']
+g.boards = {'数据要素': ['600101.XSHG']}
+g.board_type = {'数据要素': 'concept'}
+g.stock_boards = {'600101.XSHG': ['数据要素']}
+g.spot['600101.XSHG'] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {}
+g.zt_new_cache = {}
+g.zt_ferment_cache = {'ts': time.time(), 'data': {}}
+ok('T92k 冷缓存临时前排放行', ns['_ferment_front_gate']('600101.XSHG') is True)
+
+# T92l v0.57 修复4：前排封单下限生效（达标转授 / 无L2不拦截 / 全低标记弱）
+ns = fresh()
+g = ns['g']
+g.boards = {'数据要素': ['600101.XSHG', '600102.XSHG']}
+g.board_type = {'数据要素': 'concept'}
+g.stock_boards = {'600101.XSHG': ['数据要素'], '600102.XSHG': ['数据要素']}
+for c in ('600101.XSHG', '600102.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {
+    '600101.XSHG': {'ts': time.time(), 'ms': 20261022094000000, 'first_seal': 30000.0, 'break': False},
+    '600102.XSHG': {'ts': time.time(), 'ms': 20261022094500000, 'first_seal': 90000.0, 'break': False},
+}
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+fm98 = ns['_dyn_theme_ferment']()
+_t98 = fm98.get('THS:数据要素') or {}
+ok('T92l 封单下限转授', _t98.get('front') == '600102.XSHG' and _t98.get('seal_ok') is True)
+g.first_zt['600101.XSHG']['first_seal'] = 0.0
+g.first_zt['600102.XSHG']['first_seal'] = 0.0
+g.zt_ferment_cache = {}
+fm98b = ns['_dyn_theme_ferment']()
+ok('T92l 无L2不拦截', (fm98b.get('THS:数据要素') or {}).get('front') == '600101.XSHG')
+g.first_zt['600101.XSHG']['first_seal'] = 30000.0
+g.first_zt['600102.XSHG']['first_seal'] = 40000.0
+g.zt_ferment_cache = {}
+fm98c = ns['_dyn_theme_ferment']()
+_t98c = fm98c.get('THS:数据要素') or {}
+ok('T92l 全低标记弱', _t98c.get('front') == '600101.XSHG' and _t98c.get('seal_ok') is False)
+
+# T92m v0.57 修复5：跨概念临时题材桶合并（同一新首板多概念不碎片化）
+ns = fresh()
+g = ns['g']
+g.boards = {'数据要素': ['600101.XSHG', '600102.XSHG'], '机器人': ['600101.XSHG']}
+g.board_type = {'数据要素': 'concept', '机器人': 'concept'}
+g.stock_boards = {'600101.XSHG': ['数据要素', '机器人'], '600102.XSHG': ['数据要素']}
+for c in ('600101.XSHG', '600102.XSHG'):
+    g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
+g.first_zt = {
+    '600101.XSHG': {'ts': time.time(), 'ms': 20261022094000000, 'first_seal': 90000.0, 'break': False},
+    '600102.XSHG': {'ts': time.time(), 'ms': 20261022094500000, 'first_seal': 70000.0, 'break': False},
+}
+g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
+fm99 = ns['_dyn_theme_ferment']()
+_tmps99 = [k for k in fm99 if k.startswith('THS:')]
+_t99 = fm99.get(_tmps99[0]) if _tmps99 else {}
+ok('T92m 临时桶合并确认', len(_tmps99) == 1 and _t99.get('assist_count') == 2
+   and _t99.get('confirmed') is True)
 
 # --- T93 v0.38 P2 盘中动态唯一+跟风确认+竞价唯一扫板 ---
 def _dyn_fix(ns, dragon='600001.XSHG', members=('600001.XSHG', '600002.XSHG', '600003.XSHG')):

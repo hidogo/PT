@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.53（2026-10-22）（前一版 v0.52a 存档 2edbcf6）
+- 当前版本：v0.57（2026-10-22）（前一版 v0.56 工作区未提交；上一提交 a0a3c5d 为 v0.53）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.53 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.57 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,43 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.57（2026-10-22）新题材发酵审查修复（docs/42）
+- 修复1（阻塞）：`_dyn_theme_ferment` 不再调 `_is_first_board`（`c not in zt` 即首板），
+  3s tick 决策路径零行情 API；`_new_themes_of` 在 boards 文件缺失/为空时直接返回 []，不回落 `get_stock_blocks`。
+- 修复3（冷缓存竞态）：`_ferment_front_gate` 对发酵缓存缺失补齐——存量题材有存活龙头 -> 助攻不放行，
+  临时题材首个成员即前排放行；仅题材完全未知才回退 None。
+- 修复4（死配置）：`zt_theme_ferment_seal_min` 生效——前排在存活新成员中优先取封单达标的最早触板者；
+  `first_seal<=0`（无 L2）不拦截；全低于下限不转授但输出 `seal_ok=False`。
+- 修复5（碎片化）：`_merge_temp_themes` 按概念成员/今日新首板交集 union-find 合并 `THS:*` 桶并按代码去重；
+  无概念映射新首板计数打 `[ferment] unmapped=N` 日志。
+- 验证：新增 T92j/T92k/T92l/T92m 共 8 项全过；全量回归 ALL DONE / 0 FAIL；PT3.7 + veighna 双 py_compile；
+  T94 版本三处同步通过。
+
+### v0.56（2026-10-22）盘中新题材发酵识别/消费（docs/42）
+- 识别：`_dyn_theme_ferment`（15s 缓存）以 `g.first_zt` 首触为源，筛「今日新首板（T-1 不在池）+ 仍封板」；
+  `_new_themes_of` 用 THS 概念与 T-1 题材桶成员交集桥接（无交集建 `THS:` 临时桶）；
+  窗内助攻家数 >= `zt_theme_ferment_assist_min` 且时间跨度 <= 窗口 -> confirmed，>= hot_assist -> hot。
+- 前排：存量题材动态龙头（`_dyn_theme_status`）仍为前排；全新题材取最早触板存活者；龙头炸板可转授。
+- 消费：`_ferment_front_gate` 接入 `_try_first_board_buy`（助攻非前排不抢首板）；
+  `_dyn_theme_leader` / `_zt_theme_sort_bonus` 扩展（确认题材成员 + 前排加分，仅排序不放大追高）。
+- 开关：BLS `zt_theme_ferment_enabled / window_min / assist_min / hot_assist / front_bonus / sort_bonus / seal_min`。
+- 验证：T92i 13 项全过；全量 ALL DONE / 0 FAIL；PT3.7 + veighna 双 py_compile 通过。
+
+### v0.55（2026-10-22）zt_lianban 盘中题材身位/跟风/强度动态消费（docs/41）
+- 静态锚：`_build_zt_theme_index` 按 `themes` 全量列表建题材索引（theme -> members/max_board/count/rank），
+  交叉题材不漏归；`_load_zt_lianban` 加载时同步建立。
+- 动态修正：`_dyn_theme_status`（15s 缓存）以今日续板/动态身位重算每题材存活最高身位、唯一龙头、
+  存活跟风与实时家数；龙头炸板后最高身位只在存活者中取，唯一性可转授。
+- 决策消费：`_mid_board_avoid` 中位带（T-1 2-5 板）内，静态 `unique_high` 或盘中动态题材龙头放行；
+  `_pool_exp_priority` 增加题材动态龙头 + 梯队名次排序加分（仅排序、不放大追高）。
+- 开关：BLS `zt_theme_dyn_enabled / zt_theme_dyn_cache_sec / zt_theme_leader_sort_bonus / zt_theme_rank_bonus_step`。
+
+### v0.54（2026-10-22）zt_lianban 题材/概念梯队列消费对齐（docs/33）
+- 消费对齐：`_load_zt_lianban` 解析新增题材列 `theme/theme_count/theme_max_board/theme_rank/themes`
+  （AXquant theme.buckets 同源），缺列容错默认值；`g.zt_theme_authoritative` 标记、加载日志输出 `themed=N`。
+- 唯一身位兜底：文件缺 `unique_high` 列时，`_annotate_zt_uniqueness` 优先按 `theme` 分组
+  （对齐 AXquant 题材口径），缺题材列才回退涨停原因首 token。
 
 ### v0.53（2026-10-22）持仓监控全覆盖 + exp_day 持久化（docs/33）
 - 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓并入 3s tick（`tick_sell_manager`），1m `sell_manager` 保留兜底；
