@@ -422,11 +422,19 @@
   回封取消/主动不标/窗口外、地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
 
+## v0.62 首板/回封买入门封单下限同步（2026-10-23）
+
+- `first_board_seal_min` 50000 -> 200000（首板打板最小封单额，3461）：预封扫板需 seal 达标或大单加持二者满足其一。
+- `reboard_seal_min` 50000 -> 200000（回封封单下限，3523）：回封打板除大单占比>=10% 外封单需达标。
+- 与 v0.61 `firstzt_min_seal`(200000) 上报侧同档，三处门槛口径一致；`firstzt_min_bids`(5)/大单加持规则不变。
+- 自测：全量 655 PASS / 0 FAIL；py3.10 编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.62`。
+
 ## v0.61 首此涨停封单门槛上调（2026-10-23）
 
 - `firstzt_min_seal` 50000 -> 200000（元）：首此涨停上报最小封单额（5366 快照兜底 / 5383 回封确认），
   过滤小封单假封；`firstzt_min_bids`(5) 不变。
-- 首板买入门 `first_board_seal_min`(50000) 独立配置、本次不动（买侧语义与上报侧分离）。
+- 首板/回封买侧门槛于 v0.62 一并上调至 20 万（买侧语义与上报侧对齐）。
 - 自测：全量 655 PASS / 0 FAIL；py3.10 编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.61`。
 

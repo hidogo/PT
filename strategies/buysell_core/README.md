@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.61（2026-10-23）
+- 当前版本：v0.62（2026-10-23）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.61 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.62 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -30,9 +30,15 @@
 
 ## 版本记录（新→旧）
 
+### v0.62（2026-10-23）首板/回封买入门封单下限同步 20 万
+- `first_board_seal_min` 50000 -> 200000（首板打板最小封单额，3461）+ `reboard_seal_min` 50000 -> 200000
+  （回封封单下限，3523，与大单加持二选一）；与 v0.61 `firstzt_min_seal` 上报侧同档，三处门槛口径一致。
+- 验证：全量 655 PASS / 0 FAIL；py3.10 编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.62`。
+
 ### v0.61（2026-10-23）首此涨停封单门槛上调（firstzt_min_seal 5万->20万）
 - `firstzt_min_seal` 50000 -> 200000（元）：首此涨停上报/回封确认的最小封单额，过滤小封单假封；
-  仅影响 first_zt 触板跟踪与快照兜底（5366/5383），首板买入门 `first_board_seal_min`(50000) 独立未动。
+  仅影响 first_zt 触板跟踪与快照兜底（5366/5383）；首板/回封买侧于 v0.62 一并上调至 20 万。
 - 验证：全量 655 PASS / 0 FAIL；py3.10 编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.61`。
 

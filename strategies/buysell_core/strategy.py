@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.61（2026-10-23）
-# 部署核对：日志首行 `buysell_core init version=v0.61 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.62（2026-10-23）
+# 部署核对：日志首行 `buysell_core init version=v0.62 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.61"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
+STRATEGY_VERSION = "v0.62"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
 
 
 def _warn(msg):
@@ -68,7 +68,7 @@ BLS = {
     'reboard_buy_enabled': True,      # 回封打板总开关（前排首板/2板 10:00前炸板回封）
     'reboard_until_minute': 30,       # 回封打板生命周期：09:30-10:00
     'reboard_max_lianban': 2,         # 回封仅限首板或2板
-    'reboard_seal_min': 50000.0,      # 回封封单下限(元)（与大单加持二选一）
+    'reboard_seal_min': 200000.0,      # 回封封单下限(元)（与大单加持二选一）
     'reboard_l2_big_min': 0.10,       # 回封要求大单占比>=10%实时成交量
     'tick_full_sell_enabled': True,      # v0.53 持仓监控全覆盖：P4/P5/P6 并入 3s tick（1m sell_manager 兜底）
     'frame_sellscan_limit': 8,           # v0.53 帧内评分卖出持仓数上限（持仓一般<=5 天然不超）
@@ -138,7 +138,7 @@ BLS = {
     'pool_expect_skip_st': True,         # v0.28 涨停池合成过滤 ST（is_st 字段消费）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
-    'first_board_seal_min': 50000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
+    'first_board_seal_min': 200000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
     'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
     'l2_big_enabled': True,            # v0.47 L2 大单占比（近涨停候选逐笔累计）
     'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
