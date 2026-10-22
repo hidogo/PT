@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.52（2026-10-22）（前一版 v0.51 存档 ae4e8b5）
+- 当前版本：v0.52a（2026-10-22）（前一版 v0.52 存档 11baa33）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.52 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.52a ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,14 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.52a（2026-10-22）重启补种加大页数（docs/33）
+- 盘中重启补种页数拆两档：`l2_tickdir_pages=3`（09:25 竞价/09:31 兜底播种保持，竞价时段 600 分笔已全覆盖、不浪费拉取）；
+  新增 `l2_tickdir_pages_restart=10`（约 2000 分笔，覆盖 9:30-10:30 活跃窗口回看至 09:25 竞价）仅重启分支使用。
+- `_l2_big_seed(secs, pages=None)` 加可选页数参数（默认读 `l2_tickdir_pages`）；重启分支显式传 10 页。
+- 自测：T109b 新增（10 页拉取 start_pos=0..1800/覆盖至 09:25 竞价含竞价大单/默认播种保持 3 页不含 >3 页大单/跨页重叠去重）。
+  全量 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.52a`。
 
 ### v0.52（2026-10-22）已成交大单回看播种（docs/33）
 - 新增 `_l2_big_seed`：用 `get_tick_direction`（分时成交行情，含竞价终态 09:25 与重启前已成交）对候选集回看播种，

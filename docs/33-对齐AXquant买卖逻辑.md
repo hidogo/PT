@@ -379,6 +379,19 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.52a 重启补种加大页数（2026-10-22）
+
+> 限制：v0.52 重启补种固定 `l2_tickdir_pages=3`（600 分笔≈回看约 30 分钟），盘中重启只能补回重启前约半小时，
+> 上午 9:30-10:30 活跃窗口（尤其竞价至早盘）的已成交大单补不回。
+- 拆两档页数：`l2_tickdir_pages=3` 保持（09:25 竞价/09:31 兜底播种，竞价时段分笔总量 <600 已全覆盖，不浪费拉取）；
+  新增 `l2_tickdir_pages_restart=10`（约 2000 分笔，回看覆盖 9:30-10:30 活跃窗口至 09:25 竞价）仅盘中重启补种分支使用。
+- `_l2_big_seed(secs, pages=None)`：加可选页数参数（默认读 `l2_tickdir_pages`）；重启分支显式传 `pages=int(BLS[l2_tickdir_pages_restart])`。
+  分页回读仍走 `start_pos` 翻页（每页 data_count=200），`seen_ts` 集合去重防分页重叠；水印推进/双源防重逻辑不变。
+- 成本：`get_tick_direction` 不走 DataHub 帧预算，每页一次批量 RPC（全部候选同时返回），重启分支一次性 10 次 RPC 可接受。
+- 自测：T109b 新增（10 页拉取 start_pos=0..1800 / 覆盖至 09:25 竞价且含竞价大单 / 默认播种保持 3 页不含 >3 页大单 / 跨页重叠去重）。
+  全量 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.52a`；次日盘中重启后看 `[tickdir]` 探针首笔回看至 09:25 附近。
+
 ## v0.52 已成交大单回看播种（2026-10-22）
 
 > 背景：`_tx_big_feed` 仅累计「该股进入 tick 候选集后、每帧最新 200 笔逐笔」里 >=100万 的大单，是纯增量 live-only 口径；

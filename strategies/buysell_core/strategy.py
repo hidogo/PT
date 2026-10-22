@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.52（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.52 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.52a（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.52a ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.52"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.52a"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -126,6 +126,7 @@ BLS = {
     'l2_big_dir_map': {'0': 'sell', '1': 'buy', '2': 'un', '3': 'un'},  # v0.51 方向映射按官方字典校准(0=卖/1=买/2=借入/3=出借->不计净量)，可配置纠偏
     'l2_tickdir_enabled': True,      # v0.52 已成交大单回看播种（get_tick_direction 分时成交, 含竞价终态）
     'l2_tickdir_pages': 3,           # 播种回看页数上限（每页 data_count<=200, start_pos 翻页）
+    'l2_tickdir_pages_restart': 10,  # v0.52a 盘中重启补种页数（约2000分笔覆盖9:30-10:30活跃窗口至09:25竞价；09:25/09:31播种保持3页）
     'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
     'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
     'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
@@ -539,7 +540,7 @@ def before_trading_start(context, data):
             pass
         try:
             _mark_one_word_open()   # v0.31c 盘中重启：重标一字板（免5s门槛不丢）
-            _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))   # v0.52 重启回看补种（防重启窗口已成交大单丢失）
+            _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])), pages=int(BLS.get('l2_tickdir_pages_restart', 10)))   # v0.52a 重启补种加大页数（覆盖9:30-10:30活跃窗口至09:25竞价）
         except Exception:
             pass
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
@@ -4184,7 +4185,7 @@ def _fmt_tick_ts(ms):
         return str(ms)
 
 
-def _l2_big_seed(secs):
+def _l2_big_seed(secs, pages=None):
     # v0.52 已成交大单回看播种：get_tick_direction 分时成交行情（含竞价终态 09:25 与重启前已成交），
     # 分笔 business_balance >= l2_big_amt_min 且 time_stamp > 水印才计入（与 live 逐笔水印防重，双源不重复）；
     # 播种只推进水印不写 seen（分笔无 trade_index），live 逐笔按 business_time>水印 跳过已覆盖时段。
@@ -4194,7 +4195,7 @@ def _l2_big_seed(secs):
         min_amt = float(BLS.get('l2_big_amt_min', 1000000.0))
         if min_amt <= 0:
             return
-        pages = int(BLS.get('l2_tickdir_pages', 3))
+        pages = int(pages or BLS.get('l2_tickdir_pages', 3))
         count = 200
         wm = getattr(g, 'l2_big_wm', None)
         if wm is None:

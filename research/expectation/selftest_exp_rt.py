@@ -3231,5 +3231,45 @@ g.l2_big_wm = {}
 ns['load_state']()
 ok('T109 wm 同日恢复', g.l2_big_wm.get('600001.XSHG') == 93120000)
 
+# T109b v0.52a 重启补种加大页数(10页)：分页回读覆盖9:30-10:30活跃窗口至09:25竞价；09:25/09:31播种保持3页
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 300000000.0}
+_tdF = ['time_stamp', 'hq_px', 'business_amount', 'business_balance', 'business_count', 'business_direction']
+_pulled = []
+def _td_pg(secs, **k):
+    pg = int(k.get('start_pos', 0) // 200)
+    _pulled.append(pg)
+    rows = []
+    for i in range(200):
+        t = 93000000 + (9 - pg) * 600000 + i * 3000
+        bal = 0
+        if pg == 0 and i == 50:
+            bal = 1800000      # 页0 10:00 段大单(3页内即覆盖)
+        elif pg == 0 and i == 199:
+            bal = 1000000      # 页0末行大单(与页1首行跨页重叠去重)
+        elif pg == 4 and i == 100:
+            bal = 1100000      # 页4 大单(仅>3页覆盖)
+        rows.append([t, 10.0, 100000, bal, 1, 1])
+    if pg == 1:
+        rows[0] = [93000000 + (9 - 0) * 600000 + 199 * 3000, 10.0, 100000, 1000000, 1, 1]   # 跨页重叠重复页0末行
+    if pg == 9:
+        rows.append([92500000, 10.0, 100000, 1200000, 1, 1])   # 09:25 竞价终态大单(仅10页覆盖)
+    return {'fields': _tdF, '600001.XSHG': rows}
+ns['get_tick_direction'] = _td_pg
+ns['_l2_big_seed'](['600001.XSHG'], pages=int(ns['BLS'].get('l2_tickdir_pages_restart', 10)))
+ok('T109b 重启补种10页拉取 start_pos=0..1800', _pulled == list(range(10)))
+ok('T109b 10页覆盖至09:25竞价 大单含竞价/页4', abs(g.l2_big['600001.XSHG']['buy'] - 5100000.0) < 1e-6
+   and g.l2_big_wm['600001.XSHG'] == 93000000 + 9 * 600000 + 199 * 3000)
+ns2 = fresh(); g2 = ns2['g']
+g2.l2_big = {}; g2.l2_big_probed = set(); g2.l2_dir_dist = {}; g2.l2_big_wm = {}; g2.l2_big_seeded = set()
+g2.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 300000000.0}
+ns2['get_tick_direction'] = _td_pg
+_pulled = []
+ns2['_l2_big_seed'](['600001.XSHG'])   # 默认3页(09:25/09:31播种路径)
+ok('T109b 默认播种保持3页 start_pos=0..400', _pulled == [0, 1, 2])
+ok('T109b 3页播种不含>3页大单(页4/竞价不计)', abs(g2.l2_big['600001.XSHG']['buy'] - 2800000.0) < 1e-6
+   and g2.l2_big_wm['600001.XSHG'] == 93000000 + 9 * 600000 + 199 * 3000)
+
 print('ALL DONE')
 
