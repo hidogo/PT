@@ -367,3 +367,14 @@
 > C) 预封扫板=封单下限 或 大单加持 二者满足其一。
 - 自测：T99/T100/T101/T102/T103。全量 527 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py。
+
+## v0.48 修复 v0.47 实锤问题（2026-10-22）
+
+> 依据今日 11:08-11:29 日志：`business_amount` 单位非'元'（10.5 元股票单笔 200 不可能为元）→ 全下午
+> `[l2-big] 累计大单=0 占比=-1%`；且每帧 `board=6/6 over:3~19 / bcode over / hist1d over` 帧预算超限。
+> A) `_tx_big_feed` 按 `l2_big_amt_unit`（默认 shares）将 `business_amount x hq_px` 换算元（lots x100，
+>    yuan 直用）；探针输出 `最大单笔=..元 unit=..`；累计结构增 `max` 键。阈值 `l2_big_amt_min` 仍按元。
+> B) `tick_board_scan` 并入强度前三成员仅限首板窗口（`_min_age()<=first_board_minute`），
+>    `tick_board_member_cap` 20->10（午后并入无交易价值，帧预算归零）。
+- 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。

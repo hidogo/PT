@@ -2948,18 +2948,19 @@ g.dyn_unq = None
 ns['_dyn_unq_auction_eval']()
 ok('T100 首板 meet 不标唯一', ns['g'].dyn_unq['auction'].get('600002.XSHG', {}).get('unique') is False)
 
-# T101 v0.47 L2 大单累计去重 + 占比加分
+# T101 v0.48 L2 大单累计去重（business_amount 单位换算 shares->元）+ 占比加分
 ns = fresh(); g = ns['g']
 g.l2_big = {}; g.l2_big_probed = set()
-g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 10000000.0}
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}   # 1亿, 占比33.95%<1 单位保护不触发
 _fields = ['business_time', 'hq_px', 'business_amount', 'trade_index']
 _rows = [[99000000, 10.0, 500000, 1], [99001000, 10.5, 1500000, 2],
          [99002000, 11.0, 1200000, 3], [99003000, 11.0, 2000000, 2]]  # 重复 trade_index=2 去重
 ns['_tx_big_feed'](['600001.XSHG'], _fields, {'600001.XSHG': _rows})
-ok('T101 大单去重累计=270万', abs(g.l2_big['600001.XSHG']['amt'] - 2700000.0) < 1e-6)
-ok('T101 占比=27%>=10% -> 加分5', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
-g.spot['600001.XSHG']['turnover'] = 50000000.0
-ok('T101 占比降至5.4% -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+# 换算: 500000x10 + 1500000x10.5 + 1200000x11 = 500万+1575万+1320万 = 3395万（2000000 为重复去重）
+ok('T101 shares换算 大单去重累计=3395万', abs(g.l2_big['600001.XSHG']['amt'] - 33950000.0) < 1e-6)
+ok('T101 占比=33.95%>=10% -> 加分5', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+g.spot['600001.XSHG']['turnover'] = 400000000.0
+ok('T101 占比降至8.5% -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
 g.l2_big['600001.XSHG'] = {'amt': 0.0, 'seen': set()}
 ok('T101 无大单 -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
 ok('T101 无数据 -> 不加分不抛', ns['_l2_big_ratio']('600002.XSHG') < 0 and ns['_l2_big_bonus_pts']('600002.XSHG') == 0.0)
@@ -2977,16 +2978,52 @@ ns = _fb_setup()
 ns['_seal_metrics'] = lambda sec: (200000.0, 500)
 ok('T102 封单达标 -> 打板', len(_fb_calls(ns)) == 1)
 
-# T103 v0.47 B: 强度前三板块成员并入 tick 目标集 + scan_interval 收紧
+# T103 v0.48 B: 首板窗口内 强度前三板块成员并入 tick 目标集 + scan_interval 收紧
 ns = fresh(); g = ns['g']
 g.watch = ['600001.XSHG']; g.pool_static = []
 g.boards = {'概念A': ['600001.XSHG', '600002.XSHG', '600003.XSHG']}
 g.board_type = {'概念A': 'concept'}
 g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A'], '600003.XSHG': ['概念A']}
 ns['_board_rank_top3_set'] = lambda secs: {'概念A'}
+g.now_dt = datetime.datetime(2026,10,16,9,35,0)   # _min_age=5<=10 首板窗口内
 out = ns['_tick_targets']()
-ok('T103 强度前三板块成员并入 tick 目标', '600002.XSHG' in out and '600003.XSHG' in out)
+ok('T103 窗口内 强度前三板块成员并入 tick 目标', '600002.XSHG' in out and '600003.XSHG' in out)
 ok('T103 scan_interval 收紧=1', ns['BLS']['scan_interval'] == 1)
+
+# T104 v0.48 A+B: business_amount 单位换算（shares/lots/yuan）+ 首板窗口门控
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 50000000.0}
+_f = ['business_time', 'hq_px', 'business_amount', 'trade_index']
+ns['BLS']['l2_big_amt_unit'] = 'shares'
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
+    [99000000, 10.0, 200000, 1], [99001000, 10.0, 200000, 2],
+    [99002000, 10.0, 100000, 3], [99003000, 10.0, 90000, 4]]})
+ok('T104 shares换算 累计=500万(90万<阈值不计)', abs(g.l2_big['600001.XSHG']['amt'] - 5000000.0) < 1e-6)
+ok('T104 shares 占比10%达标加分', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+ns['BLS']['l2_big_amt_unit'] = 'lots'
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1000, 1]]})
+ok('T104 lots换算 1000手x100x10=100万元', abs(g.l2_big['600001.XSHG']['amt'] - 1000000.0) < 1e-6)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+ns['BLS']['l2_big_amt_unit'] = 'yuan'
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1200000, 1]]})
+ok('T104 yuan直用 累计=120万元', abs(g.l2_big['600001.XSHG']['amt'] - 1200000.0) < 1e-6)
+ns = fresh(); g = ns['g']
+g.watch = ['600001.XSHG']; g.pool_static = []
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG', '600003.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A'], '600003.XSHG': ['概念A']}
+ns['_board_rank_top3_set'] = lambda secs: {'概念A'}
+g.now_dt = datetime.datetime(2026,10,16,9,35,0)   # 窗口内
+out = ns['_tick_targets']()
+ok('T104 窗口内(09:35) 并入强度前三板块成员', '600002.XSHG' in out and '600003.XSHG' in out)
+g.tick_targets_cache = None
+g.now_dt = datetime.datetime(2026,10,16,10,5,0)   # _min_age=35>10 窗口外
+out2 = ns['_tick_targets']()
+ok('T104 窗口外(10:05) 不并入板块成员', '600002.XSHG' not in out2 and '600003.XSHG' not in out2)
 
 print('ALL DONE')
 

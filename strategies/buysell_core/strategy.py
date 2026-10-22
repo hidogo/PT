@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.47（2026-10-22）（前一版 v0.43 存档 1eea218）
-# 部署核对：日志首行 `buysell_core init version=v0.47 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.48（2026-10-22）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.48 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -32,6 +32,9 @@
 #          v0.47 灵敏度收紧（docs/33）：A L2 大单占比加分（逐笔 business_amount 按 trade_index 去重累计，
 #                >=10% 加分5分/封单豁免）；B 强度前三板块成员并入 tick 目标集 + scan_interval 4->1 + [scan] 探针；
 #                C 预封扫板=封单下限 或 大单加持 二者满足其一
+#          v0.48 修复 v0.47 实锤问题（docs/33）：A business_amount 单位非'元'——按 shares/lots/yuan 换算元
+#                (默认股x价)，探针输出最大单笔元值；B tick_board_scan 并入强度前三成员仅限首板窗口
+#                (_min_age<=first_board_minute) + 成员上限 20->10（午后帧预算归零）
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -53,7 +56,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.47"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.48"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -157,11 +160,12 @@ BLS = {
     'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
     'l2_big_enabled': True,            # v0.47 L2 大单占比（近涨停候选逐笔累计）
     'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
+    'l2_big_amt_unit': 'shares',         # v0.48 business_amount 单位: shares(股)/lots(手)/yuan(元)
     'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
     'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
     'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
     'tick_board_scan': True,           # v0.47 B1: tick 目标并入强度前三板块成员
-    'tick_board_member_cap': 20,       # 每板块并入成员上限
+    'tick_board_member_cap': 10,       # 每板块并入成员上限（v0.48 收紧, 仅首板窗口）
     'first_board_bids_min': 5,         # 首板打板最小买一挂单量(手)
     # v0.19 弹性套利 elastic_arb（AXquant Phase 1）
     'elastic_arb_enabled': True,       # 弹性套利总开关
@@ -3942,11 +3946,12 @@ def _tick_targets():
     cap = int(BLS.get('tick_watch_cap', 15))
     watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static][:cap]
     out = pos + uni + static + watch
-    if BLS.get('tick_board_scan', True):   # v0.47 B1: 强度前三板块成员并入（首板目标直连）
+    if BLS.get('tick_board_scan', True) and _min_age() <= int(BLS.get('first_board_minute', 10)):
+        # v0.48 B1 仅首板窗口生效（09:30-09:40 后并入无交易价值, 防午后帧预算超限）
         try:
             top3 = _board_rank_top3_set(_pool() or out)
             if top3:
-                _cap_m = int(BLS.get('tick_board_member_cap', 20))
+                _cap_m = int(BLS.get('tick_board_member_cap', 10))
                 for _b in top3:
                     for _m in _board_members_file(_b, _cap_m):
                         if _m and _m not in out and _m not in pos:
@@ -4009,9 +4014,12 @@ def _tx_big_feed(secs, fields, raw):
         return
     def _idx(name, default):
         return fields.index(name) if name in fields else default
-    i_a = _idx('business_amount', -1); i_t = _idx('trade_index', -1)
+    i_a = _idx('business_amount', -1); i_t = _idx('trade_index', -1); i_p = _idx('hq_px', -1)
     if i_a < 0:
         return
+    unit = str(BLS.get('l2_big_amt_unit', 'shares')).lower()   # v0.48 business_amount 单位换算
+    mult = 100.0 if unit == 'lots' else 1.0
+    yuan_mode = (unit == 'yuan')
     acc = getattr(g, 'l2_big', None)
     if acc is None:
         acc = {}; g.l2_big = acc
@@ -4023,7 +4031,7 @@ def _tx_big_feed(secs, fields, raw):
         rows = raw.get(sec) or []
         if not rows:
             continue
-        a = acc.setdefault(sec, {'amt': 0.0, 'seen': set()})
+        a = acc.setdefault(sec, {'amt': 0.0, 'seen': set(), 'max': 0.0})
         seen = a['seen']
         if len(seen) >= _cap:
             continue
@@ -4035,15 +4043,22 @@ def _tx_big_feed(secs, fields, raw):
                         continue
                     seen.add(ti)
                 va = float(row[i_a])
-                if va >= min_amt:
-                    a['amt'] += va
+                if yuan_mode:
+                    yuan = va
+                else:
+                    px = float(row[i_p]) if i_p >= 0 else 0.0
+                    yuan = va * mult * px
+                if yuan >= min_amt:
+                    a['amt'] += yuan
+                    if yuan > a.get('max', 0.0):
+                        a['max'] = yuan
             except Exception:
                 continue
         if sec not in probed:
             probed.add(sec)
             r = _l2_big_ratio(sec)
-            log.info('[l2-big] %s 累计大单=%.0f 占比=%.2f%% (阈值=%.0f)' % (
-                _sn(sec), a['amt'], r * 100.0 if r >= 0 else -1.0, min_amt))
+            log.info('[l2-big] %s 累计大单=%.0f 占比=%.2f%% 最大单笔=%.0f元 (阈值=%.0f unit=%s)' % (
+                _sn(sec), a['amt'], r * 100.0 if r >= 0 else -1.0, a.get('max', 0.0), min_amt, unit))
 
 
 def _l2_big_ratio(sec):
