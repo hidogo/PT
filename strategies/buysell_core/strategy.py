@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.45（2026-10-22）（前一版 v0.43 存档 1eea218）
-# 部署核对：日志首行 `buysell_core init version=v0.45 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.46（2026-10-22）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.46 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -27,6 +27,8 @@
 #                与 warm_days 双保险触发分歧保护 taper，修复生成侧 divergence 列云端未被消费的脱节
 #          v0.45 云 LogEngine 无 .warn 兼容（_warn 封装 warning->warn->info 兜底不抛，
 #                修复 qty<=0 skip 分支与 except 二次崩溃导致 tick_data 链路中断）
+#          v0.46 首板封单下限 + 唯一预判身位统一（docs/33）：_try_first_board_buy 补 first_board_seal_min
+#                (L2 买一挂单金额, 防假封秒炸)；_dyn_unq_auction_eval 跳过中位股(与 _mid_board_avoid 统一口径)
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -48,7 +50,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.45"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.46"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -149,6 +151,7 @@ BLS = {
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 50000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
+    'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
     'first_board_bids_min': 5,         # 首板打板最小买一挂单量(手)
     # v0.19 弹性套利 elastic_arb（AXquant Phase 1）
     'elastic_arb_enabled': True,       # 弹性套利总开关
@@ -2423,6 +2426,9 @@ def _dyn_unq_auction_eval():
     for c, en in entries.items():
         st_ = str(en.get('expected_status') or '')
         exceed = 'exceed' in st_
+        if BLS.get('dyn_unq_mid_skip', True) and _mid_board_avoid(c):
+            log.info('[dyn-unq] %s 中位股不参与唯一预判 -> skip' % _sn(c))
+            continue
         b = cboard.get(c)
         lvl = _auction_level(c)
         peer_n = 0; peer_ex = 0
@@ -2882,6 +2888,11 @@ def _try_first_board_buy(context, sec, rank_secs=None):
         return                       # 主动：板块内首个触板
     if _block_sealed_buy(sec):
         return                       # 一字/封死涨停不排队（防御）
+    amt, _cnt = _seal_metrics(sec)   # v0.46 首板封单下限（L2 买一挂单金额, 防假封秒炸）
+    seal_min = float(BLS.get('first_board_seal_min', 50000.0))
+    if seal_min > 0 and amt > 0 and amt < seal_min:
+        log.info('[firstboard] %s 封单不足 seal=%.0f<%.0f -> skip' % (_sn(sec), amt, seal_min))
+        return
     s = g.spot.get(sec) or {}
     up = float(s.get('up_px') or 0.0)
     if not up or up <= 0:

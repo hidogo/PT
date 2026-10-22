@@ -2917,5 +2917,36 @@ ns['log'] = _LogBroken()
 ns['_warn']('y')
 ok('T98 _warn 全异常吞掉不抛', True)
 
+# T99 v0.46 首板封单下限（L2 买一挂单金额 < first_board_seal_min -> 不打板，防假封秒炸）
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (3000.0, 1)
+ok('T99 封单不足(3000<50000) -> 不打板', _fb_calls(ns) == [])
+ok('T99 封单不足未记 bought/fired', '600001.XSHG' not in ns['g'].daily['bought'] and '600001.XSHG' not in (getattr(ns['g'], 'first_board_fired', None) or set()))
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (200000.0, 500)
+pc = _fb_calls(ns)
+ok('T99 封单达标 -> 打板', len(pc) == 1 and 'first_board_buy' in pc[0]['note'])
+ns = _fb_setup()
+ns['_seal_metrics'] = lambda sec: (0.0, 0)
+ok('T99 L2缺失(回测) -> 不强制, 照常打板', len(_fb_calls(ns)) == 1)
+
+# T100 v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
+ns = fresh(); g = ns['g']
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 4, 'unique_high': False, 'is_st': False},
+                '600002.XSHG': {'board_cnt': 1, 'unique_high': False, 'is_st': False}}
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'},
+              '600002.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.boards = {'概念A': ['600001.XSHG', '600002.XSHG']}
+g.board_type = {'概念A': 'concept'}
+g.stock_boards = {'600001.XSHG': ['概念A'], '600002.XSHG': ['概念A']}
+ns['_dyn_unq_auction_eval']()
+au = g.dyn_unq['auction']
+ok('T100 中位股(4板)不进唯一预判', '600001.XSHG' not in au)
+ok('T100 首板(1板)超预期无竞品 -> 唯一', au['600002.XSHG'].get('unique') is True)
+g.exp_file['600002.XSHG']['expected_status'] = 'pending_meet'
+g.dyn_unq = None
+ns['_dyn_unq_auction_eval']()
+ok('T100 首板 meet 不标唯一', ns['g'].dyn_unq['auction'].get('600002.XSHG', {}).get('unique') is False)
+
 print('ALL DONE')
 
