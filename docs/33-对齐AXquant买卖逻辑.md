@@ -422,6 +422,19 @@
   回封取消/主动不标/窗口外、地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
 
+## v0.63 死代码清理（2026-10-23）
+
+- 删除生产未引用函数：`_set_bs`/`g.bs_cache`（只写不读，板块强度缓存已由 DataHub `board_chgs` 替代）、
+  `_elastic_ask1`（已被 `_order_limit('chase')` 的 `_max_elastic_buy_price` 替代）、
+  `_tx_first_zt_ms`（v0.22 起 tick 主路径走 DataHub.tx_zt_batch 批量，兼容入口无生产消费）。
+- 删除 BLS 死键 6 个：`auction_buy_score_min`/`expectation_base`/`market_red_enabled`/`first_board_bids_min`/`score_max`/`score_min`；
+  ATK 死键 `elastic_threshold`（仅 `main_threshold` 被 `_attack_bonus` 消费）。
+- 保留项：引擎入口回调（initialize/handle_data/tick_data/before_trading_start/after_trading_end/on_order_response/on_trade_response）
+  由 Ptrade 按名调用；`frame_*` 预算键经 `_source_limit` 动态拼接读取，属活跃配置；BONUS/PENALTY 全键消费、无死项。
+- selftest：删除对应死代码测试 T42b（_elastic_ask1）/T46（_tx_first_zt_ms）共 6 断言；`_DAY`/`_lt` 由 T47/T51 自建不受影响。
+- 自测：全量 649 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.63`。
+
 ## v0.62 首板/回封买入门封单下限同步（2026-10-23）
 
 - `first_board_seal_min` 50000 -> 200000（首板打板最小封单额，3461）：预封扫板需 seal 达标或大单加持二者满足其一。

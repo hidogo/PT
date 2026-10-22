@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.62（2026-10-23）
+- 当前版本：v0.63（2026-10-23）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.62 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.63 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,16 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.63（2026-10-23）死代码清理（未引用函数 / BLS 死键 / ATK 死键）
+- 删除生产未引用函数：`_set_bs`（+ `g.bs_cache` 只写不读）、`_elastic_ask1`（已由 `_order_limit('chase')` 替代）、
+  `_tx_first_zt_ms`（v0.22 起走 DataHub.tx_zt_batch 批量，兼容入口无生产消费）；同步删 selftest T42b/T46。
+- 删除 BLS 死键 6 个：`auction_buy_score_min`/`expectation_base`/`market_red_enabled`/`first_board_bids_min`/`score_max`/`score_min`；
+  ATK 死键 `elastic_threshold`（仅 `main_threshold` 被 `_attack_bonus` 消费）。
+- 保留项：引擎入口（initialize/handle_data/tick_data/before_trading_start/after_trading_end/on_*_response）由 Ptrade 按名调用；
+  `frame_*` 预算键经 `_source_limit` 动态拼接消费，非死键；BONUS/PENALTY 全键消费。
+- 验证：全量 649 PASS / 0 FAIL（原 655 - 死代码测试 6）；py3.10 编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.63`。
 
 ### v0.62（2026-10-23）首板/回封买入门封单下限同步 20 万
 - `first_board_seal_min` 50000 -> 200000（首板打板最小封单额，3461）+ `reboard_seal_min` 50000 -> 200000

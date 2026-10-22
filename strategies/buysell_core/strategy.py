@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.62（2026-10-23）
-# 部署核对：日志首行 `buysell_core init version=v0.62 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.63（2026-10-23）
+# 部署核对：日志首行 `buysell_core init version=v0.63 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.62"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
+STRATEGY_VERSION = "v0.63"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
 
 
 def _warn(msg):
@@ -29,7 +29,7 @@ def _warn(msg):
 BLS = {
     'DO_ORDER': False,
     'universe': ['600570.XSHG', '603528.XSHG', '601188.XSHG'],   # 占位自选池，待接全市场扫描
-    'buy_score_min': 55.0, 'auction_buy_score_min': 50.0,
+    'buy_score_min': 55.0,
     'ma5_pullback': True, 'ma5_loose_high': 1.02, 'ma5_core_only': True,   # 5D线低吸仅对核心(CORE)标签股（对齐 AXquant CORE+低吸） 'ma5_require_bs': True,     # 对齐 AXquant：低吸还要 BS(100日新高)标签 'ma5_first_5d': True,       # 仅 5日内首次回踩 MA5（防重复低吸）
     'cold_secs': 60, 'daily_max_buy': 1,
     # 实盘单门控（v0.13）：仅放行「预期买入」路径；其余买入仍受 DO_ORDER 门控
@@ -86,7 +86,6 @@ BLS = {
     'hold_stand_cache_sec': 15.0,        # _hold_stand 节流缓存
     'hold_stand_log_sec': 60.0,          # [hold] 地位日志节流（/股）
     # 预期文件：AXquant 预期三态 csv（docs/25）
-    'expectation_base': 'data/expectation_',
     'expectation_suffix': '.csv',
     'scan_interval': 1,             # 每 N 根 bar 触发一次全市场扫描（v0.47 收紧 4->1）
     'score_sell_clear': 30, 'score_sell_half': 50,
@@ -117,7 +116,6 @@ BLS = {
     'warm_taper_min': 0.50,           # 递减下限（分歧保护）
     'red_ratio_buy_min': 0.55,         # 红盘比下限（对齐 AXquant first_board_buy 回暖下限）
     # v0.41 全市场红盘比（情绪温度消费口径统一：冰点/回暖判定用全市场，替代个股板块近似；docs/16）
-    'market_red_enabled': True,        # 全市场红盘比总开关
     'market_batch': 300,               # 全量分片 get_snapshot 批规模（与 scan_batch 一致）
     'market_red_ttl': 60.0,            # 全市场红盘比缓存 s（10:00 后）
     'market_red_ttl_fast': 30.0,       # 10:00 前快速刷新缓存 s（受单轮全量耗时下限约束，盘中探针校准）
@@ -153,7 +151,6 @@ BLS = {
     'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
     'tick_board_scan': True,           # v0.47 B1: tick 目标并入强度前三板块成员
     'tick_board_member_cap': 10,       # 每板块并入成员上限（v0.48 收紧, 仅首板窗口）
-    'first_board_bids_min': 5,         # 首板打板最小买一挂单量(手)
     # v0.19 弹性套利 elastic_arb（AXquant Phase 1）
     'elastic_arb_enabled': True,       # 弹性套利总开关
     'elastic_arb_window_minute': 30,   # 仅开盘后 N 分钟内（09:30-10:00，其它类 10:00 前）
@@ -219,7 +216,7 @@ BLS = {
     'sealed_fresh_secs': 5.0,        # 封死判定持续 N 秒才生效（防瞬时零卖盘误判不排单）
     'sealed_offerqty_enabled': True, # 用 total_offerqty==0 判封死（快照总委卖量；缺失回退 ask_grp 空判）
     # 打分引擎（AXquant 默认）
-    'score_base': 40, 'score_max': 92, 'score_min': 0,
+    'score_base': 40,
     'vwap_penalty_per_30s': 1.0, 'vwap_daily_limit': 12,
     # 预期角色容忍度（AXquant sell_policy_hint 迁移，docs/17）：绿开/止损/评分阈值缩放系数
     'sell_policy': {
@@ -264,7 +261,7 @@ BONUS = {
 PENALTY = {
     'open_low_5': 15, 'open_low_2': 8, 'open_low_0': 3, 'board_weak': 8,
 }
-ATK = {'a1': 6.0, 'a2': 3.0, 'a3': 2.0, 'main_threshold': 0.08, 'elastic_threshold': 0.15}
+ATK = {'a1': 6.0, 'a2': 3.0, 'a3': 2.0, 'main_threshold': 0.08}
 
 
 def _sn(sec):
@@ -487,7 +484,6 @@ def initialize(context):
     g.rt_stats = {}   # v0.43 灵敏度日结采样（检测->下单时延，after_trading_end 打 [rt-summary]）
     g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()   # v0.47 L2 大单累计 / v0.51 方向分布 / v0.52 播种水印（均按日重置）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
-    g.bs_cache = {}     # sec -> (ts, board_strength)
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
     g.first_board_fired = set()  # 首板打板当日去重（tick 首触 / 1m 兜底共用）
     g.elastic_cache = {'day': '', 'ts': 0.0, 'strong': {}}   # 弹性套利：板块一字板统计缓存（60s，按日重置）
@@ -1854,10 +1850,6 @@ def _buy_pos_ok(context, sec, qty, limit):
         log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> skip' % (_sn(sec), qty, add, ratio, cap))
         return False
     return True
-def _set_bs(sec, v):
-    g.bs_cache[sec] = (time.time(), v)
-    return v
-
 
 def _set_now(context):
     g.now_dt = getattr(getattr(context, 'blotter', None), 'current_dt', None) or None
@@ -3667,20 +3659,6 @@ def _elastic_1m_surge(sec):
         return 0.0
 
 
-def _elastic_ask1(sec):
-    # 卖一价（L2 十档，成交确性好）；缺省回退最新价（对齐 AXquant ask_price_1）
-    try:
-        gp = _gear(sec)
-        a = (gp.get('ask_grp') or {}).get(1) or []
-        if isinstance(a, (list, tuple)) and len(a) >= 1:
-            v = float(a[0] or 0.0)
-            if v > 0:
-                return v
-    except Exception:
-        pass
-    return last_px(sec) or 0.0
-
-
 def _try_elastic_arb_buy(context):
     # 弹性套利（v0.19 Phase 1，AXquant elastic_arb）：板块一字>=2 情绪爆发 -> 抓同板块 20cm 弹性标的
     if not BLS.get('elastic_arb_enabled', True):
@@ -5270,15 +5248,6 @@ def _l2_big_bonus_pts(sec):
         return float(BLS.get('l2_big_bonus', 5.0)) if _l2_big_ok(sec) else 0.0
     except Exception:
         return 0.0
-
-
-def _tx_first_zt_ms(sec):
-    # 单标逐笔拉取（兼容入口；v0.22 起 tick 主路径走 DataHub.tx_zt_batch 批量）
-    try:
-        dh = _get_ds()
-        return dh.tx_zt_batch([sec], {}).get(sec)
-    except Exception:
-        return None
 
 
 def _tx_frame_zt_ms(sec, frame_data):

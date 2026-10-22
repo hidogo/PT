@@ -14,7 +14,7 @@ def make_mod(**overrides):
         def warn(self, *a): pass
         def error(self, *a): pass
     g = types.SimpleNamespace()
-    for k in ('buy_log','sold_log','daily','state_day','spot','last_ma5','hist','bs_cache',
+    for k in ('buy_log','sold_log','daily','state_day','spot','last_ma5','hist',
               'now_dt','bar_counter','pool_all','pool_day','watch','selfwatch','pool_static',
               'last_scan','scan_offset','auction_c','exp','exp_day','seal_base','seal_bid_base',
               'first_zt','exp_file','exp_fired','pending'):
@@ -874,15 +874,6 @@ ns['_DS'].cache.clear()
 ns['get_price'] = lambda *a, **k: None
 ok('T42 无 1m 数据 -> 0.0', ns['_elastic_1m_surge']('600001.XSHG') == 0.0)
 
-ns = fresh()
-ns['g'].spot['X'] = {'last_px': 10.3}
-ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [10.5, 1000.0, 2]}}
-ok('T42b ask1 卖一价', abs(ns['_elastic_ask1']('X') - 10.5) < 1e-9)
-ok('T42b 3s 盘口缓存复用 10.5', abs(ns['_elastic_ask1']('X') - 10.5) < 1e-9)
-ns['_DS'].cache.clear()
-ns['get_gear_price'] = lambda sec: {}
-ok('T42b 缺盘口回退最新价', abs(ns['_elastic_ask1']('X') - 10.3) < 1e-9)
-
 # --- T43 弹性套利全门禁（_try_elastic_arb_buy） ---
 def _ea_setup():
     ns = fresh()
@@ -990,25 +981,6 @@ ns['g'].spot['600002.XSHG'] = {}
 ok('T45 成员缺快照 -> 批量回填', ns['_board_top_gainer']('600001.XSHG') is True and ns['g'].spot['600002.XSHG'].get('last_px') == 10.2)
 ns['g'].spot['600002.XSHG'] = {'preclose_px': 10.0, 'last_px': 10.6}   # 成员 +6% > 我
 ok('T45 成员更高 -> 非最高', ns['_board_top_gainer']('600001.XSHG') is False)
-
-
-# --- T46 L2 逐笔首笔成交感知（_tx_first_zt_ms，灵敏度<=3s） ---
-ns = fresh()
-_lt = time.localtime()
-_DAY = '%04d%02d%02d' % (_lt.tm_year, _lt.tm_mon, _lt.tm_mday)
-ns['get_individual_transaction'] = lambda secs, data_count=200, is_dict=True: {
-    '600001.XSHG': [[int(_DAY + '092958000'), 12.0, 100, 1, 2, 0, 0, 0, 0, 1],   # 09:29:58 竞价 -> 忽略
-                    [int(_DAY + '093001500'), 12.05, 200, 2, 2, 0, 0, 0, 0, 1],  # 09:30:01 未到涨停 -> 忽略
-                    [int(_DAY + '093003000'), 12.1, 300, 3, 2, 0, 0, 0, 0, 1],   # 09:30:03 涨停价 -> 首笔
-                    [int(_DAY + '093004000'), 12.1, 400, 4, 2, 0, 0, 0, 0, 1]],  # 09:30:04 涨停价 -> 更晚
-    'fields': ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction',
-               'buy_no', 'sell_no', 'trans_flag', 'trans_identify_am', 'channel_num']}
-ns['g'].spot['600001.XSHG'] = {'up_px': 12.1}
-ok('T46 逐笔涨停价首笔时间', ns['_tx_first_zt_ms']('600001.XSHG') == int(_DAY + '093003000'))
-ns['g'].spot['600001.XSHG'] = {'up_px': 12.2}
-ok('T46 无涨停价成交 -> None', ns['_tx_first_zt_ms']('600001.XSHG') is None)
-ns['get_individual_transaction'] = lambda secs, data_count=200, is_dict=True: None
-ok('T46 接口异常/无数据 -> None', ns['_tx_first_zt_ms']('600001.XSHG') is None)
 
 
 # --- T47 帧内推送逐笔（_tx_frame_zt_ms，0 额外 API 调用） ---
