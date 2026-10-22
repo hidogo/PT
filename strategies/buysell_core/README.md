@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.52a（2026-10-22）（前一版 v0.52 存档 11baa33）
+- 当前版本：v0.53（2026-10-22）（前一版 v0.52a 存档 2edbcf6）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.52a ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.53 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,20 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.53（2026-10-22）持仓监控全覆盖 + exp_day 持久化（docs/33）
+- 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓并入 3s tick（`tick_sell_manager`），1m `sell_manager` 保留兜底；
+  帧内评分卖出持仓数上限 `frame_sellscan_limit=8`（持仓一般<=5 天然不超）；`_hist_1d` 缺失时跳过 P5/P6 防降级误触发。
+- 日切统一入口 `_maybe_roll_day()`：日切逻辑提取并挂进 `handle_data` 首帧；同日重启后 `exp_day` 已持久化/恢复 ->
+  首帧不再清空盘中事件状态（break_sold/seal_sold/first_zt/seal_base/one_word_open/l2_big/l2_big_wm 等，防重复卖出/播种丢失），
+  跨日仍正常触发全量重置。
+- `before_trading_start` 同日重启分支：09:25 后保留盘中状态（`g.exp_day = _today`），09:31 前仍走重建兜底。
+- `_exp_one_word(sec, quiet=False)` 加 quiet 参数：tick 3s 路径静默预热，防刷屏。
+- `_save_state` 增 `exp_day`；`load_state` 同日恢复、跨日置 None。
+- 自测：T110（roundtrip 同日恢复 exp_day/break_sold/first_zt/l2_big/wm + 跨日重置 + `_maybe_roll_day` 双分支）新增 6 项、
+  T111（P4 一字预期 CS / P4 普通分时 CS / P5 清仓 / P6 半仓 tick 全覆盖 + sold_log 冷却去重）新增 5 项；
+  全量 585 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.53`。
 
 ### v0.52a（2026-10-22）重启补种加大页数（docs/33）
 - 盘中重启补种页数拆两档：`l2_tickdir_pages=3`（09:25 竞价/09:31 兜底播种保持，竞价时段 600 分笔已全覆盖、不浪费拉取）；

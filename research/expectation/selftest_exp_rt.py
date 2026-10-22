@@ -3271,5 +3271,84 @@ ok('T109b 默认播种保持3页 start_pos=0..400', _pulled == [0, 1, 2])
 ok('T109b 3页播种不含>3页大单(页4/竞价不计)', abs(g2.l2_big['600001.XSHG']['buy'] - 2800000.0) < 1e-6
    and g2.l2_big_wm['600001.XSHG'] == 93000000 + 9 * 600000 + 199 * 3000)
 
+
+# T110 v0.53 exp_day 持久化 + 日切统一入口：同日重启恢复盘中事件状态，跨日重置
+ns = fresh(); g = ns['g']
+g.state_day = '2026-10-16'; g.exp_day = '2026-10-16'
+g.first_zt = {'600001.XSHG': {'break': True, 'ts': 1000.0}}
+g.break_sold = {'600001.XSHG'}; g.seal_sold = set(); g.break2_sold = set()
+g.l2_big = {'600002.XSHG': {'amt': 1.0, 'buy': 1.0, 'sell': 0.0, 'un': 0.0, 'seen': {10, 20}, 'max': 1.0}}
+g.l2_big_wm = {'600002.XSHG': 93010000}; g.l2_dir_dist = {'0': 1}
+ns['_save_state']()
+g.exp_day = None; g.first_zt = {}; g.break_sold = set(); g.l2_big = {}; g.l2_big_wm = {}; g.l2_dir_dist = {}
+ns['load_state']()
+ok('T110 同日重启恢复 exp_day', g.exp_day == '2026-10-16')
+ok('T110 同日重启保留 break_sold/first_zt', g.break_sold == {'600001.XSHG'} and g.first_zt.get('600001.XSHG', {}).get('break') is True)
+ok('T110 同日重启保留 l2_big/wm/seen', abs(g.l2_big['600002.XSHG']['buy'] - 1.0) < 1e-9 and g.l2_big['600002.XSHG']['seen'] == {10, 20} and g.l2_big_wm['600002.XSHG'] == 93010000)
+_st = pickle.load(open(ns['_TMP'] + '/buysell_core_state.pkl', 'rb'))
+_st['day'] = '2026-10-15'
+pickle.dump(_st, open(ns['_TMP'] + '/buysell_core_state.pkl', 'wb'))
+g.exp_day = '2026-10-16'; g.break_sold = {'X'}
+ns['load_state']()
+ok('T110 跨日重置 exp_day/break_sold', g.exp_day is None and g.break_sold == set())
+g.exp_day = '2026-10-16'; g.one_word_marked_open = True; g.break_sold = {'600001.XSHG'}
+ok('T110 _maybe_roll_day 同日返回False不清空', ns['_maybe_roll_day']() is False and g.one_word_marked_open is True and g.break_sold == {'600001.XSHG'})
+g.exp_day = '2026-10-15'; g.one_word_marked_open = True; g.break_sold = {'600001.XSHG'}
+ok('T110 _maybe_roll_day 跨日返回True并清空', ns['_maybe_roll_day']() is True and g.exp_day == '2026-10-16' and g.break_sold == set() and g.one_word_marked_open is False)
+
+# T111 v0.53 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓并入 3s tick（sold_log 冷却去重）
+def _tick_sell_ns(entry_type='normal', auction_status=None, intraday_status=None, score=None):
+    _ns = fresh(); _ns['time'] = _FakeTime(9000.0)
+    _g = _ns['g']
+    _g.first_zt = {}
+    _g.spot['600001.XSHG'] = {'last_px': 9.5, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+    _g.exp['600001.XSHG'] = {'entry_type': entry_type}
+    if auction_status:
+        _g.exp['600001.XSHG']['auction_status'] = auction_status
+    _ns['get_positions'] = lambda: {'600001.XSHG': {'enable_amount': 1000, 'cost_basis': 9.0}}
+    _ns['_sellable_source'] = lambda: _ns['get_positions']()
+    _ns['_sellable'] = lambda raw, p: 1000
+    _ns['last_px'] = lambda sec: 9.5
+    _ns['_auction_change'] = lambda sec: 3.0
+    _ns['my_cost'] = lambda raw, p: 9.0
+    _ns['get_stop_loss_pct'] = lambda sec: 0.05
+    _ns['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+    _ns['_save_state'] = lambda *a, **k: None
+    _ns['_sell_inflight'] = lambda sec: False
+    _ns['_hold_exp_init'] = lambda sec, force=False: None
+    _ns['_eval_auction'] = lambda sec: (_ns['CM'], ['x'])
+    _ns['_eval_intraday'] = lambda sec, auction_status: ((intraday_status if intraday_status else _ns['CM']), ['x'])
+    _ns['_hist_1d'] = lambda sec: object()
+    _ns['score_now'] = lambda sec: (score if score is not None else 40.0)
+    _out = []
+    def _ds(c, sec, qty, note, urgent=False, mode=None):
+        _out.append((sec, note, qty))
+        _ns['g'].sold_log[sec] = _ns['time'].time()
+    _ns['_do_sell'] = _ds
+    return _ns, _out
+
+ns, out = _tick_sell_ns(entry_type='one_word', auction_status=ns['AW'])
+ns['_is_one_word_open'] = lambda sec: True
+ns['_exp_one_word'] = lambda sec, quiet=False: (ns['CS'], ['seal_fail'])
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T111 P4 一字预期CS -> P4_exp_one_word_tick', len(out) == 1 and 'P4_exp_one_word_tick' in out[0][1])
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T111 P4 冷却第二次不重复', len(out) == 1)
+
+ns, out = _tick_sell_ns(entry_type='normal', auction_status=ns['AW'], intraday_status=ns['CS'])
+ns['_is_one_word_open'] = lambda sec: False
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T111 P4 普通分时CS -> P4_exp_miss_tick', len(out) == 1 and 'P4_exp_miss_tick' in out[0][1])
+
+ns, out = _tick_sell_ns(entry_type='normal', auction_status=ns['AW'], intraday_status=ns['CM'], score=20.0)
+ns['_is_one_word_open'] = lambda sec: False
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T111 P5 评分清仓 -> P5_score_clear_tick 全仓', len(out) == 1 and 'P5_score_clear_tick' in out[0][1] and out[0][2] == 1000)
+
+ns, out = _tick_sell_ns(entry_type='normal', auction_status=ns['AW'], intraday_status=ns['CM'], score=40.0)
+ns['_is_one_word_open'] = lambda sec: False
+ns['tick_sell_manager'](ns['_CTX'])
+ok('T111 P6 评分半仓 -> P6_score_half_tick 卖500', len(out) == 1 and 'P6_score_half_tick' in out[0][1] and out[0][2] == 500)
+
 print('ALL DONE')
 

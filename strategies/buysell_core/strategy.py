@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.52a（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.52a ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.53（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.53 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.52a"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.53"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -70,6 +70,8 @@ BLS = {
     'reboard_max_lianban': 2,         # 回封仅限首板或2板
     'reboard_seal_min': 50000.0,      # 回封封单下限(元)（与大单加持二选一）
     'reboard_l2_big_min': 0.10,       # 回封要求大单占比>=10%实时成交量
+    'tick_full_sell_enabled': True,      # v0.53 持仓监控全覆盖：P4/P5/P6 并入 3s tick（1m sell_manager 兜底）
+    'frame_sellscan_limit': 8,           # v0.53 帧内评分卖出持仓数上限（持仓一般<=5 天然不超）
     # 预期文件：AXquant 预期三态 csv（docs/25）
     'expectation_base': 'data/expectation_',
     'expectation_suffix': '.csv',
@@ -171,7 +173,7 @@ BLS = {
     'frame_m1_prio_limit': 15,        # 预期分时确认 two_1m 独立配额（高优先级，不挤占弹性 surge）
     'frame_blocks_limit_fast': 20,    # 10:00 前板块全列表归属预算（_boards_of 新最强板块用）
     'frame_day_limit': 8,             # 帧内 1d 日线 get_price 次数（板块5日强度续算）
-    'frame_day_limit_fast': 12,       # 10:00 前日线预算放大
+    'frame_day_limit_fast': 16,       # 10:00 前日线预算放大（v0.53 持仓评分 P5/P6 并入 tick 共用 hist1d）
     # v0.36 弹性套利：当日新最强板块第一时间跟踪（最主动弹性标的，10% 前买入）
     'elastic_top_enabled': True,
     'elastic_top_window_minute': 30,  # 新最强板块弹性跟踪窗口：10:00 前
@@ -532,6 +534,8 @@ def before_trading_start(context, data):
     except Exception:
         pass
     if _restart_same_day:
+        if _hhmm() >= '09:25':
+            g.exp_day = _today   # v0.53 同日重启(09:25后)：保留盘中状态，首帧日切不再清空（09:31 前仍走 09:25/09:31 重建兜底）
         try:
             _synth_pool_expect()        # v0.36g 盘中重启：重建涨停池三态（防 expect_buy 45->12 丢失）
             _synth_selfwatch_expect()   # v0.36g 盘中重启：重建自选股三态
@@ -548,6 +552,17 @@ def before_trading_start(context, data):
         if df is not None and len(df) >= 6:
             g.last_ma5[sec] = float(df['close'].iloc[-6:-1].mean())
     log.info('before_trading_start done positions=%s' % list(get_positions()))
+
+
+def _maybe_roll_day():
+    # v0.53 日切统一入口：返回是否发生日切。同日重启后 exp_day 已持久化/恢复 -> 首帧不再清空盘中事件状态
+    # （break_sold/seal_sold/first_zt/seal_base/one_word_open/l2_big/l2_big_wm 等，防重复卖出/播种丢失）。
+    day = str(get_trading_day())
+    if getattr(g, 'exp_day', None) == day:
+        return False
+    g.exp_day = day
+    g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+    return True
 
 
 def handle_data(context, data):
@@ -571,9 +586,7 @@ def handle_data(context, data):
         _sync_watch(context)
     if BLS.get('selfwatch_enabled', True) and (g.bar_counter % BLS.get('selfwatch_sync_interval', 8)) == 0:
         _load_selfwatch(); _sync_pool_static()
-    if g.exp_day != str(get_trading_day()):
-        g.exp_day = str(get_trading_day())
-        g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+    if _maybe_roll_day():
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
     sell_manager(context)
@@ -1205,7 +1218,7 @@ def _hold_exp_init(sec, force=False):
     return e
 
 
-def _exp_one_word(sec):
+def _exp_one_word(sec, quiet=False):
     # 一字板封单（L2 实时化）：金额比基准判超预期/衰竭；买一委托笔数骤降视为撤单松动，加速判 miss
     seal, bids = _seal_metrics(sec)
     base = g.seal_base.get(sec, 0.0)
@@ -1219,12 +1232,15 @@ def _exp_one_word(sec):
     if BLS.get("seal_bid_enabled", True) and bbase > 0 and bids < bbase * float(BLS.get("seal_bid_fail_ratio", 0.5)):
         bid_fail = True
     if ratio <= float(BLS["seal_fail_ratio"]) or bid_fail:
-        log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d bid_fail=%s -> CS" % (_sn(sec), seal, base, ratio, bids, bbase, bid_fail))
+        if not quiet:
+            log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d bid_fail=%s -> CS" % (_sn(sec), seal, base, ratio, bids, bbase, bid_fail))
         return CS, ["seal_fail"]
     if ratio >= float(BLS["seal_exceed_ratio"]):
-        log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d -> CX" % (_sn(sec), seal, base, ratio, bids))
+        if not quiet:
+            log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d -> CX" % (_sn(sec), seal, base, ratio, bids))
         return CX, ["seal_increase"]
-    log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d -> CM" % (_sn(sec), seal, base, ratio, bids))
+    if not quiet:
+        log.info("[seal] %s seal=%.0f base=%.0f ratio=%.2f bids=%d -> CM" % (_sn(sec), seal, base, ratio, bids))
     return CM, ["seal_within"]
 
 
@@ -3858,6 +3874,7 @@ def sell_manager(context):
 
 
 def tick_sell_manager(context):
+    g.sellscan_used = 0   # v0.53 评分卖出每帧计数（重置）
     # v0.26 tick \u7ea7\u5356\u51fa\uff083s \u5e27\u672b\uff0c\u4e8b\u4ef6\u9a71\u52a8\uff09\uff1a\u70b8\u677f/\u5c01\u5355\u5927\u51cf/\u6025\u5356 P1/P2E/P3 3s \u54cd\u5e94\uff1b
     # \u72b6\u6001\u6765\u81ea\u672c\u5e27 tick_data \u91c7\u96c6\uff08first_zt.break/seal_low\uff09\uff1b\u9996\u89e6\u53d1\u6807\u8bb0+\u5728\u9014\u9501+\u51b7\u5374\u53bb\u91cd\u9632\u91cd\u590d\u5356\uff1b
     # P4/P5/P6 \u4ecd\u7531 1m sell_manager \u8bc4\u4f30\uff08\u8bc4\u5206\u57fa\u4e8e 1m/1d \u6570\u636e\uff09\u3002
@@ -3920,7 +3937,39 @@ def tick_sell_manager(context):
         if cost > 0:
             pnl = px / cost - 1.0
             if pnl <= -get_stop_loss_pct(sec) * rp['stop_adj']:
-                _do_sell(context, sec, amt, 'P3_stop_loss_tick pnl=%.1f%%' % (pnl * 100), urgent=True)
+                _do_sell(context, sec, amt, 'P3_stop_loss_tick pnl=%.1f%%' % (pnl * 100), urgent=True); continue
+        # v0.53 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓 3s 评估（1m sell_manager 保留兜底）
+        if not BLS.get('tick_full_sell_enabled', True):
+            continue
+        if int(getattr(g, 'sellscan_used', 0)) >= int(BLS.get('frame_sellscan_limit', 8)):
+            continue
+        g.sellscan_used = int(getattr(g, 'sellscan_used', 0)) + 1
+        if sec in g.exp:
+            if g.exp[sec].get('entry_type') == 'one_word' and _is_one_word_open(sec):
+                st4, _r4 = _exp_one_word(sec, quiet=True)
+                if st4 in (CS, PS):
+                    _do_sell(context, sec, amt, 'P4_exp_one_word_tick ' + st4); continue
+            else:
+                if g.exp[sec].get('entry_type') == 'one_word' and not _is_one_word_open(sec):
+                    _hold_arb_log(sec, '文件 entry_type=one_word 但实时已开板 -> 回落普通分时三态')
+                au4 = g.exp[sec].get('auction_status') or _eval_auction(sec)[0]
+                st4 = _eval_intraday(sec, au4)[0]
+                if st4 in (PS, CS):
+                    _do_sell(context, sec, amt, 'P4_exp_miss_tick ' + st4); continue
+        # P5/P6 评分：hist1d 数据缺失/预算降级 -> 跳过（防降级误触发），1m 兜底
+        if _hist_1d(sec) is None:
+            continue
+        sc = score_now(sec)
+        if sc < BLS['score_sell_clear'] * rp['score_clear_adj']:
+            _do_sell(context, sec, amt, 'P5_score_clear_tick score=%.1f' % sc)
+        elif sc < BLS['score_sell_half'] * rp['score_half_adj']:
+            half = int(amt * float(BLS.get('sell_half_ratio', 0.5)))
+            qty = int(half // 100) * 100
+            if qty < 1:
+                qty = amt if amt < 100 else 100
+            if qty > amt:
+                qty = amt
+            _do_sell(context, sec, qty, 'P6_score_half_tick score=%.1f' % sc)
 
 
 def _mark_sold_event(sec, kind):
@@ -4873,6 +4922,7 @@ def load_state():
             g.l2_dir_dist = dict(st.get('l2_dir_dist') or {})
             g.l2_big_wm = dict(st.get('l2_big_wm') or {})
             g.dyn_unq = st.get('dyn_unq')
+            g.exp_day = st.get('exp_day')   # v0.53 同日重启恢复 exp_day，首帧日切不清盘中状态
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
             g.first_zt = getattr(g, 'first_zt', None) or {}
@@ -4882,6 +4932,7 @@ def load_state():
             g.reboard_fired = False
             g.dyn_unq = None
             g.l2_big = {}; g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+            g.exp_day = None   # v0.53 跨日：首帧日切正常触发
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = {'bought': [], 'sold': []}; g.state_day = None
@@ -4909,7 +4960,8 @@ def _save_state():
                          'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {}),
                          'l2_big': dict(getattr(g, 'l2_big', None) or {}),
                          'l2_dir_dist': dict(getattr(g, 'l2_dir_dist', None) or {}),
-                         'l2_big_wm': dict(getattr(g, 'l2_big_wm', None) or {})}, f, protocol=2)
+                         'l2_big_wm': dict(getattr(g, 'l2_big_wm', None) or {}),
+                         'exp_day': getattr(g, 'exp_day', None)}, f, protocol=2)
     except Exception as e:
         _warn('save_state fail %r' % e)
 

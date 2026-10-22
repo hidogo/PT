@@ -379,6 +379,20 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.53 持仓监控全覆盖 + exp_day 持久化（2026-10-22）
+
+> 背景：此前持仓卖出只 P1/P2E/P3 与炸板/封单事件走 3s tick，P4 预期三态/P5 评分清仓/P6 评分半仓仅 1m 评估，
+> 快速下行期反应滞后。本次把 P4/P5/P6 并入 3s tick，并修复盘中重启后首帧误清空盘中事件状态的问题（exp_day 未持久化）。
+- `tick_sell_manager` 追加全覆盖段：P4-one_word（`_exp_one_word` quiet 静默）CS/PS -> 卖、P4-normal（`_eval_intraday`）PS/CS -> 卖、
+  P5 评分清仓（score<clear*adj）、P6 评分半仓（score<half*adj 卖半仓整手）；`_hist_1d` 缺失跳过防降级误触发；帧内计数
+  `frame_sellscan_limit=8` 上限防帧超预算；1m `sell_manager` 保留兜底双保险。
+- `_maybe_roll_day()`：日切统一入口挂 handle_data 首帧。同日重启后 `exp_day` 恢复 -> 首帧不日切（不重复卖出/不丢播种）；跨日触发全量重置。
+- `before_trading_start` 同日重启分支 09:25 后 `g.exp_day=_today` 保留盘中状态；`_save_state`/`load_state` 同步 `exp_day`。
+- 自测：T110 新增 6 项（roundtrip 恢复 exp_day/break_sold/first_zt/l2_big/wm、跨日重置、`_maybe_roll_day` 同日 False/跨日 True 清空）、
+  T111 新增 5 项（P4 一字 CS / P4 普通 CS / P5 清仓 / P6 半仓 + sold_log 冷却去重）。全量 585 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.53`。
+
+
 ## v0.52a 重启补种加大页数（2026-10-22）
 
 > 限制：v0.52 重启补种固定 `l2_tickdir_pages=3`（600 分笔≈回看约 30 分钟），盘中重启只能补回重启前约半小时，
