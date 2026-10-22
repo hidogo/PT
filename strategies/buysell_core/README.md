@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.58（2026-10-22）（上一提交 3e218fa 为 v0.54-v0.57 批量存档）
+- 当前版本：v0.59（2026-10-22）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.58 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.59 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,22 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.59（2026-10-22）持仓卖出闭环：地位评估 + P7a/P7b/P7c（docs/33）
+- 持仓地位评估 `_hold_stand`（15s 节流缓存）：role（leader/follower/mid/outside）+ active（主动/跟风/中性）+
+  board（强/平/弱）；评分仅持仓消费（leader+3/follower-1/mid-3/active+3/跟风-3/板块弱-3），日志 `[hold] <股名> role=.. active=.. board=.. pts=..`（60s/股节流）。
+- P7a 连板放量不封板：持仓 + T-1 `board_cnt>=2` + 今日量>=昨日量×`p7a_vol_ratio`(1.10) + 未封板 -> `P7a_vol_break`；
+  唯一身位降级减半（`p7a_half_ratio`=0.5），否则清仓；现价限价非地板价；`[vol]` 探针（每日一次）核对量单位。
+- P7b 跟风拉升不封板：持仓 + `role∈(follower,outside)` + 板块强（`board_strength>=p7b_board_min`=1.0 或题材存活龙头封板）
+  + 1m surge>=`p7b_surge_min`(1.5) + 未封板 -> `P7b_follow_break` 减半。
+- P7c 首板次日不主动冲板 -> 冲高分批清仓：T-1 `board_cnt==1` + 09:30-10:00 窗口 `active≠主动` -> 标记 `p7c_price`；
+  现价>=标记价×(1+`p7c_surge_min`%) -> 每 `p7c_batch_cold_secs`(10s) 卖一批（2×50%，`cool=False` 批次自控替代 30s 通用冷却）；
+  回封取消标记；破 VWAP 由 P4 兜底。
+- 去重/持久化：`g.p7a_sold`/`g.p7b_sold`/`g.p7c_part`/`g.p7c_sold` 随 `_save_state`/`load_state` 跨重启持久化。
+- 接入：tick 卖出链 P3 后 P4 前（3s）+ 1m `sell_manager` 同条件兜底；BLS 新增 `p7_sell_enabled`/`p7a_*`/`p7b_*`/`p7c_*`/`hold_stand_*`。
+- 验证：T113 新增 19 项（P7a 清仓/唯一减半/未放量/已封板/仅连板、P7b 减半/leader/surge不足/板块弱、P7c 标记/第一批/冷却内/第二批/回封取消/主动不标/窗口外、
+  地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（新增代码无 3.8+ 语法，兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
 
 ### v0.58（2026-10-22）P2E 竞价核卖（同题材中位崩塌传导 + 自身大不及；docs/33）
 - 触发 A（题材传导）：持仓 `_zt_themes_of` 非空 -> 所属题材存在中位股（T-1 `board_cnt` 2-5）-> 中位股最弱竞价

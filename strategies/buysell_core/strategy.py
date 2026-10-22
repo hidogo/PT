@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.58（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.58 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.59（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.59 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.58"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.59"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -72,6 +72,19 @@ BLS = {
     'reboard_l2_big_min': 0.10,       # 回封要求大单占比>=10%实时成交量
     'tick_full_sell_enabled': True,      # v0.53 持仓监控全覆盖：P4/P5/P6 并入 3s tick（1m sell_manager 兜底）
     'frame_sellscan_limit': 8,           # v0.53 帧内评分卖出持仓数上限（持仓一般<=5 天然不超）
+    # v0.59 持仓卖出闭环（docs/33）：持仓地位评估 + P7a 连板放量不封板 / P7b 跟风拉升不封板 / P7c 首板次日不主动冲板分批清仓
+    'p7_sell_enabled': True,             # P7a/P7b/P7c 总开关
+    'p7a_vol_ratio': 1.10,               # P7a 放量阈值：今日量 >= 昨日量×ratio（唯一身位降级减半）
+    'p7a_half_ratio': 0.5,               # P7a 唯一身位降级：减半（非唯一清仓）
+    'p7b_board_min': 1.0,                # P7b 板块强阈值（board_strength>= 或题材存活龙头封板）
+    'p7b_surge_min': 1.5,                # P7b 跟风拉升 1m 涨幅阈值%
+    'p7b_half_ratio': 0.5,               # P7b 减半比例
+    'p7c_until_minute': 30,              # P7c 观察窗口：09:30-10:00（首板次日不主动冲板）
+    'p7c_surge_min': 1.5,                # P7c 冲高触发：现价>=标记价×(1+%) 分批卖
+    'p7c_batch_cold_secs': 10.0,         # P7c 批次冷却（两批 2×50%，10s 批次间隔替代 30s 通用冷却）
+    'p7c_active_threshold': 0.5,         # 主动判定：个股涨幅 >= 板块强度 + 阈值（%）
+    'hold_stand_cache_sec': 15.0,        # _hold_stand 节流缓存
+    'hold_stand_log_sec': 60.0,          # [hold] 地位日志节流（/股）
     # 预期文件：AXquant 预期三态 csv（docs/25）
     'expectation_base': 'data/expectation_',
     'expectation_suffix': '.csv',
@@ -515,6 +528,12 @@ def initialize(context):
     g.exp_file = {}     # sec -> 预期文件条目（AXquant 竞价终态）
     g.exp_fired = set() # sec -> 本日已触发(买/放弃)的预期买入（一次触发+跨重启去重）
     g.pending = {}      # sec -> 已发送委托（成交确认前的去重/回执）
+    g.p7a_sold = set()    # v0.59 P7a 连板放量不封板 卖出首触发标记（跨重启持久化）
+    g.p7b_sold = set()    # v0.59 P7b 跟风拉升不封板 卖出首触发标记（跨重启持久化）
+    g.p7c_part = {}       # v0.59 P7c 首板次日不主动冲板 标记（price/half/sold1_ts）
+    g.p7c_sold = set()    # v0.59 P7c 分批清仓完成标记（跨重启持久化）
+    g.hold_stand_cache = {}  # v0.59 持仓地位评估缓存（15s 节流，不持久化）
+    g.hold_stand_log = {}    # v0.59 持仓地位日志节流（60s/股，不持久化）
     run_daily(context, auction_pre_confirm, time='09:25')
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, mid_probe, time='11:00')
@@ -4167,13 +4186,14 @@ def _sell_inflight(sec):
     return True
 
 
-def _do_sell(context, sec, qty, note, urgent=False, mode=None):
+def _do_sell(context, sec, qty, note, urgent=False, mode=None, cool=True):
     # 统一卖出入口：sold_log 冷却 + 在途挂单守卫(_sell_inflight)；urgent(核卖)限价用跌停地板价保成交
     if qty <= 0:
         return
     if not isinstance(getattr(g, 'sold_log', None), dict):
         g.sold_log = {}
-    g.sold_log[sec] = time.time()
+    if cool:
+        g.sold_log[sec] = time.time()   # v0.59 P7c 分批卖出 cool=False：批次间隔自控（10s）不写通用 30s 冷却
     place_order(context, sec, 'sell', qty=qty, note=note, mode=mode or ('sell_urgent' if urgent else 'sell'))
 
 def _audit_pos_fields(sec, p):
@@ -4347,6 +4367,17 @@ def sell_manager(context):
             pnl_pct = px / cost - 1.0
             if pnl_pct <= -get_stop_loss_pct(sec) * rp['stop_adj']:
                 _do_sell(context, sec, amt, 'P3_stop_loss pnl=%.1f%%' % (pnl_pct * 100), urgent=True); continue
+        # v0.59 P7 持仓卖出闭环（docs/33）：P7a 连板放量不封板 / P7b 跟风拉升不封板 / P7c 首板次日不主动冲板分批清仓
+        if BLS.get('p7_sell_enabled', True):
+            _p7a = _p7a_check(sec, amt)
+            if _p7a and sec not in (getattr(g, 'p7a_sold', None) or set()):
+                _do_sell(context, sec, _p7a[1], _p7a[0]); _mark_p7(sec, 'p7a'); continue
+            _p7b = _p7b_check(sec, amt)
+            if _p7b and sec not in (getattr(g, 'p7b_sold', None) or set()):
+                _do_sell(context, sec, _p7b[1], _p7b[0]); _mark_p7(sec, 'p7b'); continue
+            _p7c = _p7c_check(sec, amt)
+            if _p7c:
+                _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
         # P4 预期三态：普通标的竞价/逆势，一字板封单，docs/17
         if sec in g.exp:
             if g.exp[sec].get('entry_type') == 'one_word' and _is_one_word_open(sec):
@@ -4441,6 +4472,17 @@ def tick_sell_manager(context):
             pnl = px / cost - 1.0
             if pnl <= -get_stop_loss_pct(sec) * rp['stop_adj']:
                 _do_sell(context, sec, amt, 'P3_stop_loss_tick pnl=%.1f%%' % (pnl * 100), urgent=True); continue
+        # v0.59 P7 持仓卖出闭环（docs/33）：P7a 连板放量不封板 / P7b 跟风拉升不封板 / P7c 首板次日不主动冲板分批清仓
+        if BLS.get('p7_sell_enabled', True):
+            _p7a = _p7a_check(sec, amt)
+            if _p7a and sec not in (getattr(g, 'p7a_sold', None) or set()):
+                _do_sell(context, sec, _p7a[1], _p7a[0]); _mark_p7(sec, 'p7a'); continue
+            _p7b = _p7b_check(sec, amt)
+            if _p7b and sec not in (getattr(g, 'p7b_sold', None) or set()):
+                _do_sell(context, sec, _p7b[1], _p7b[0]); _mark_p7(sec, 'p7b'); continue
+            _p7c = _p7c_check(sec, amt)
+            if _p7c:
+                _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
         # v0.53 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓 3s 评估（1m sell_manager 保留兜底）
         if not BLS.get('tick_full_sell_enabled', True):
             continue
@@ -4486,6 +4528,221 @@ def _mark_sold_event(sec, kind):
         _save_state()
     except Exception:
         pass
+
+# ================= v0.59 持仓地位评估 + P7 卖出闭环（docs/33） =================
+def _hold_stand_pts(role, active, board):
+    # 持仓地位评分（仅持仓消费）：leader+3 / follower-1 / mid-3 / active+3 / 跟风-3 / 板块弱-3
+    pts = 0.0
+    pts += {'leader': 3.0, 'follower': -1.0, 'mid': -3.0}.get(role, 0.0)
+    pts += {'active': 3.0, 'follow': -3.0}.get(active, 0.0)
+    if board == 'weak':
+        pts -= 3.0
+    return pts
+
+
+def _hold_board_strong(sec):
+    # 板块加持（v0.59 P7b）：板块强度>=p7b_board_min 或 所属题材存活龙头/发酵前排封板
+    try:
+        if _board_strength(sec) >= float(BLS.get('p7b_board_min', 1.0) or 1.0):
+            return True
+        st = _dyn_theme_status()
+        for nm in _zt_themes_of(sec):
+            d = st.get(nm) or {}
+            ld = d.get('leader')
+            if ld and _sealed_now(ld):
+                return True
+        fm = _dyn_theme_ferment()
+        for nm in _new_themes_of(sec):
+            d = fm.get(nm) or {}
+            if d.get('confirmed') and d.get('front') and _sealed_now(d['front']):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _hold_stand(sec):
+    # v0.59 持仓地位评估（docs/33）：role（leader/follower/mid/outside）+ active（主动/跟风/中性）+ board（强/平/弱）
+    # 15s 节流缓存；评分仅持仓消费（leader+3/follower-1/mid-3/active+3/跟风-3/板块弱-3），日志 [hold] 60s/股节流
+    try:
+        cache = getattr(g, 'hold_stand_cache', None)
+        if not isinstance(cache, dict):
+            cache = {}; g.hold_stand_cache = cache
+        now = time.time()
+        hit = cache.get(sec)
+        if hit and now - float(hit.get('ts') or 0) < float(BLS.get('hold_stand_cache_sec', 15.0) or 15.0):
+            return hit
+        role = 'outside'; active = 'neutral'; board = 'mid'
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        cnt = int(zt.get('board_cnt') or 0)
+        if _dyn_theme_leader(sec):
+            role = 'leader'
+        elif zt and cnt >= 1:
+            if 2 <= cnt <= 5 and not zt.get('unique_high'):
+                role = 'mid'
+            else:
+                # 池内非龙头：同题材有存活更高身位 -> follower，否则 outside
+                st = _dyn_theme_status()
+                is_fol = False
+                for nm in _zt_themes_of(sec):
+                    d = st.get(nm) or {}
+                    if d.get('leader') and d.get('leader') != sec and int(d.get('alive_count') or 0) > 1:
+                        is_fol = True; break
+                role = 'follower' if is_fol else 'outside'
+        # active：主动=涨幅显著强于所属板块均值；跟风=板块强但个股明显弱于板块
+        try:
+            my_chg = _sector_chg(sec) * 100.0
+            bstr = _board_strength(sec)
+            if bstr > 0 and my_chg >= bstr + float(BLS.get('p7c_active_threshold', 0.5) or 0.5):
+                active = 'active'
+            elif bstr >= 1.0 and my_chg <= bstr - float(BLS.get('p7c_active_threshold', 0.5) or 0.5):
+                active = 'follow'
+        except Exception:
+            pass
+        # board：强=板块强度>=p7b_board_min 或题材龙头封板；弱=板块强度<=-1；平=其它
+        try:
+            if _hold_board_strong(sec):
+                board = 'strong'
+            elif _board_strength(sec) <= -1.0:
+                board = 'weak'
+            else:
+                board = 'mid'
+        except Exception:
+            pass
+        out = {'ts': now, 'role': role, 'active': active, 'board': board}
+        cache[sec] = out
+        gl = getattr(g, 'hold_stand_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.hold_stand_log = gl
+        if now - float(gl.get(sec) or 0) >= float(BLS.get('hold_stand_log_sec', 60.0) or 60.0):
+            gl[sec] = now
+            log.info('[hold] %s role=%s active=%s board=%s pts=%+.1f' % (
+                _sn(sec), role, active, board, _hold_stand_pts(role, active, board)))
+        return out
+    except Exception:
+        return {'ts': time.time(), 'role': 'outside', 'active': 'neutral', 'board': 'mid'}
+
+
+def _p7a_check(sec, amt):
+    # v0.59 P7a 连板放量不封板（docs/33）：持仓 + T-1 board_cnt>=2 + 今日量>=昨日量×p7a_vol_ratio + 未封板
+    # 唯一身位降级减半（p7a_half_ratio=0.5），否则清仓；现价限价非地板价。返回 (note, qty) 或 None。
+    if not BLS.get('p7_sell_enabled', True):
+        return None
+    zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+    if int(zt.get('board_cnt') or 0) < 2:
+        return None
+    if _sealed_now(sec):
+        return None
+    df = _hist_1d(sec)
+    if df is None or len(df) < 2:
+        return None
+    vols = list(df['volume'])
+    yv = float(vols[-2] or 0.0)   # 昨日量（hist1d [-1]=今日 [-2]=昨日，与 _volume_ratio 同口径；[vol] 探针核对单位）
+    tv = _snap_vol(g.spot.get(sec) or {})
+    if yv <= 0 or tv <= 0:
+        return None
+    if tv < yv * float(BLS.get('p7a_vol_ratio', 1.10) or 1.10):
+        return None
+    if _unique_stand(sec):
+        half = int(amt * float(BLS.get('p7a_half_ratio', 0.5) or 0.5))
+        half = int(half // 100) * 100
+        qty = half if half >= 100 else amt
+        return ('P7a_vol_break_half vol=%.0f yv=%.0f' % (tv, yv), qty)
+    return ('P7a_vol_break vol=%.0f yv=%.0f' % (tv, yv), amt)
+
+
+def _p7b_check(sec, amt):
+    # v0.59 P7b 跟风拉升不封板（docs/33）：持仓 + role∈(follower,outside) + 板块强 + 1m surge>=p7b_surge_min + 未封板 -> 减半
+    if not BLS.get('p7_sell_enabled', True):
+        return None
+    st = _hold_stand(sec)
+    if st.get('role') not in ('follower', 'outside'):
+        return None
+    if st.get('board') != 'strong':
+        return None
+    if _sealed_now(sec):
+        return None
+    sg = _elastic_1m_surge(sec)
+    if sg < float(BLS.get('p7b_surge_min', 1.5) or 1.5):
+        return None
+    half = int(amt * float(BLS.get('p7b_half_ratio', 0.5) or 0.5))
+    half = int(half // 100) * 100
+    qty = half if half >= 100 else amt
+    return ('P7b_follow_break surge=%.1f%%' % sg, qty)
+
+
+def _p7c_check(sec, amt):
+    # v0.59 P7c 首板次日不主动冲板 -> 冲高分批清仓（docs/33）：T-1 board_cnt==1 + 09:30-10:00 窗口 active!=主动
+    # 标记 p7c_price；现价>=标记价×(1+p7c_surge_min%) -> 每 p7c_batch_cold_secs(10s) 卖一批（2×50%）；回封取消标记；
+    # 破 VWAP 由 P4 兜底。返回 (note, qty) 或 None（含标记/取消副作用）。
+    if not BLS.get('p7_sell_enabled', True):
+        return None
+    zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+    if int(zt.get('board_cnt') or 0) != 1:
+        return None
+    if _min_age() > int(BLS.get('p7c_until_minute', 30) or 30):
+        return None
+    # 回封取消标记（若回封涨停则不再继续卖，等待后续重新标记）
+    if _today_zt(sec) or _sealed_now(sec):
+        part = getattr(g, 'p7c_part', None)
+        if isinstance(part, dict) and sec in part:
+            del part[sec]
+        sold = getattr(g, 'p7c_sold', None)
+        if isinstance(sold, set) and sec in sold:
+            sold.discard(sec)
+        return None
+    st = _hold_stand(sec)
+    if st.get('active') == 'active':
+        part = getattr(g, 'p7c_part', None)
+        if isinstance(part, dict) and sec in part:
+            del part[sec]
+        return None
+    part = getattr(g, 'p7c_part', None)
+    if not isinstance(part, dict):
+        part = {}; g.p7c_part = part
+    px = last_px(sec) or 0.0
+    rec = part.get(sec)
+    if rec is None:
+        part[sec] = {'ts': time.time(), 'price': px}
+        return None
+    tripx = float(rec.get('price') or 0.0) * (1.0 + float(BLS.get('p7c_surge_min', 1.5) or 1.5) / 100.0)
+    if px < tripx:
+        return None
+    now = time.time()
+    cold = float(BLS.get('p7c_batch_cold_secs', 10.0) or 10.0)
+    if rec.get('sold1_ts'):
+        if now - float(rec['sold1_ts']) < cold:
+            return None
+        qty = min(int(float(rec.get('half') or amt)), amt)
+        if qty < 100:
+            qty = amt
+        part.pop(sec, None)
+        sold = getattr(g, 'p7c_sold', None)
+        if not isinstance(sold, set):
+            sold = set(); g.p7c_sold = sold
+        sold.add(sec)
+        return ('P7c_passive_sweep b2 px=%.2f tripx=%.2f' % (px, tripx), qty)
+    half = int(amt * 0.5)
+    half = int(half // 100) * 100
+    if half < 1:
+        half = amt if amt < 100 else 100
+    rec['half'] = half
+    rec['sold1_ts'] = now
+    return ('P7c_passive_sweep b1 px=%.2f tripx=%.2f' % (px, tripx), half)
+
+
+def _mark_p7(sec, kind):
+    # v0.59 P7a/P7b 事件卖出首触发标记（跨重启持久化，防同日重启后重复卖）
+    try:
+        key = 'p7a_sold' if kind == 'p7a' else 'p7b_sold'
+        st = getattr(g, key, None)
+        if not isinstance(st, set):
+            st = set(); setattr(g, key, st)
+        st.add(sec)
+        _save_state()
+    except Exception:
+        pass
+
 
 # ================= 定时回调（单参 func(context)） =================
 def _l2_probe(context):
@@ -4537,6 +4794,16 @@ def _l2_probe(context):
             log.info('[l2] %s gear bid_sum=%s offer_sum=%s' % (_sn(sec), _bs, _as))
         except Exception as _e:
             _warn('l2 totals probe fail %r' % _e)
+        # v0.59 [vol] 探针：核对 P7a 量比单位（快照 volume vs hist1d 最后两根；[-1]=今日 [-2]=昨日 口径）
+        try:
+            _dfv = _hist_1d(sec)
+            _vv = list(_dfv['volume']) if _dfv is not None and len(_dfv) >= 2 else []
+            _sv = g.spot.get(sec) or {}
+            log.info('[vol] %s snap business_amount=%s volume=%s trd_volume=%s hist1d[-1]=%s hist1d[-2]=%s' % (
+                _sn(sec), _sv.get('business_amount'), _sv.get('volume'), _sv.get('trd_volume'),
+                (_vv[-1] if len(_vv) >= 1 else 'NA'), (_vv[-2] if len(_vv) >= 2 else 'NA')))
+        except Exception:
+            pass
         g.l2_probed = True
     except Exception as e:
         _warn('l2 probe fail: %r' % e)
@@ -5426,6 +5693,10 @@ def load_state():
             g.l2_big_wm = dict(st.get('l2_big_wm') or {})
             g.dyn_unq = st.get('dyn_unq')
             g.exp_day = st.get('exp_day')   # v0.53 同日重启恢复 exp_day，首帧日切不清盘中状态
+            g.p7a_sold = set(st.get('p7a_sold') or [])
+            g.p7b_sold = set(st.get('p7b_sold') or [])
+            g.p7c_part = dict(st.get('p7c_part') or {})
+            g.p7c_sold = set(st.get('p7c_sold') or [])
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
             g.first_zt = getattr(g, 'first_zt', None) or {}
@@ -5435,6 +5706,7 @@ def load_state():
             g.reboard_fired = False
             g.dyn_unq = None
             g.l2_big = {}; g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+            g.p7a_sold = set(); g.p7b_sold = set(); g.p7c_part = {}; g.p7c_sold = set()
             g.exp_day = None   # v0.53 跨日：首帧日切正常触发
     except Exception:
         g.buy_log = {}; g.sold_log = {}
@@ -5464,7 +5736,11 @@ def _save_state():
                          'l2_big': dict(getattr(g, 'l2_big', None) or {}),
                          'l2_dir_dist': dict(getattr(g, 'l2_dir_dist', None) or {}),
                          'l2_big_wm': dict(getattr(g, 'l2_big_wm', None) or {}),
-                         'exp_day': getattr(g, 'exp_day', None)}, f, protocol=2)
+                         'exp_day': getattr(g, 'exp_day', None),
+                         'p7a_sold': sorted(getattr(g, 'p7a_sold', None) or []),
+                         'p7b_sold': sorted(getattr(g, 'p7b_sold', None) or []),
+                         'p7c_part': dict(getattr(g, 'p7c_part', None) or {}),
+                         'p7c_sold': sorted(getattr(g, 'p7c_sold', None) or [])}, f, protocol=2)
     except Exception as e:
         _warn('save_state fail %r' % e)
 

@@ -3697,5 +3697,136 @@ _n112k, _r112k = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est=
 _n112k['tick_sell_manager'](_n112k['_ctx'])
 ok('T112k tick 兜底 A 触发', len(_r112k) == 1 and 'P2E_theme_mid_break' in _r112k[0][3])
 
+
+# --- v0.59 持仓卖出闭环：持仓地位评估 + P7a/P7b/P7c（docs/33） ---
+class _FakeDF(object):
+    # 模拟 1d 历史 df（volume 序列；[-1]=今日 [-2]=昨日，与 _volume_ratio 同口径）
+    def __init__(self, vols):
+        self._vols = vols
+    def __getitem__(self, k):
+        if k == 'volume':
+            return list(self._vols)
+        if k in ('open', 'close'):
+            return [10.0] * len(self._vols)
+        raise KeyError(k)
+    def __len__(self):
+        return len(self._vols)
+
+def _p7_ns(board_cnt=2, unique=False, hist_vol=None, snap_vol=None, sealed=False, stand=None,
+           surge=None, active='neutral', t0=9000.0):
+    n = fresh(); n['time'] = _FakeTime(t0)
+    g = n['g']
+    g.first_zt = {}; g.p7a_sold = set(); g.p7b_sold = set(); g.p7c_part = {}; g.p7c_sold = set()
+    g.zt_lianban = {'600200.XSHG': {'board_cnt': board_cnt}}
+    g.spot['600200.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 12.0,
+                             'wavg_px': 10.5, 'trade_status': 'OPEN', 'volume': snap_vol or 0.0}
+    n['_sealed_now'] = lambda sec: sealed
+    n['_hist_1d'] = lambda sec: _FakeDF(hist_vol if hist_vol is not None else [100.0, 90.0])
+    n['_snap_vol'] = lambda s: snap_vol if snap_vol is not None else 0.0
+    n['_unique_stand'] = lambda sec: unique
+    n['_hold_stand'] = lambda sec: stand or {'ts': 0.0, 'role': 'outside', 'active': active, 'board': 'strong'}
+    n['_elastic_1m_surge'] = lambda sec: surge if surge is not None else 0.0
+    n['_min_age'] = lambda: 10
+    n['_today_zt'] = lambda sec: False
+    n['last_px'] = lambda sec: 10.8
+    n['_save_state'] = lambda *a, **k: None
+    return n
+
+# T113 P7a 连板(2板)放量未封板 -> 清仓（非唯一）
+_n = _p7_ns(board_cnt=2, hist_vol=[100.0, 90.0], snap_vol=120.0)
+_q = _n['_p7a_check']('600200.XSHG', 1000)
+ok('T113 P7a 放量未封板 -> 清仓', _q is not None and 'P7a_vol_break' in _q[0] and _q[1] == 1000)
+# T113b P7a 唯一身位降级减半
+_n = _p7_ns(board_cnt=2, unique=True, hist_vol=[100.0, 90.0], snap_vol=120.0)
+_q = _n['_p7a_check']('600200.XSHG', 1000)
+ok('T113b P7a 唯一身位 -> 减半', _q is not None and 'P7a_vol_break_half' in _q[0] and _q[1] == 500)
+# T113c P7a 未放量 -> 不触发
+_n = _p7_ns(board_cnt=2, hist_vol=[100.0, 90.0], snap_vol=95.0)
+ok('T113c P7a 未达放量阈值 -> 不触发', _n['_p7a_check']('600200.XSHG', 1000) is None)
+# T113d P7a 已封板 -> 不触发
+_n = _p7_ns(board_cnt=2, hist_vol=[100.0, 90.0], snap_vol=120.0, sealed=True)
+ok('T113d P7a 已封板 -> 不触发', _n['_p7a_check']('600200.XSHG', 1000) is None)
+# T113e P7a 首板(1板)不适用 -> 不触发
+_n = _p7_ns(board_cnt=1, hist_vol=[100.0, 90.0], snap_vol=120.0)
+ok('T113e P7a 仅连板(>=2)适用', _n['_p7a_check']('600200.XSHG', 1000) is None)
+# T113f P7b 跟风+板块强+1m拉升达标 -> 减半
+_n = _p7_ns(board_cnt=2, stand={'ts': 0.0, 'role': 'follower', 'active': 'follow', 'board': 'strong'}, surge=2.0)
+_q = _n['_p7b_check']('600200.XSHG', 1000)
+ok('T113f P7b 跟风拉升未封板 -> 减半', _q is not None and 'P7b_follow_break' in _q[0] and _q[1] == 500)
+# T113g P7b leader 不触发
+_n = _p7_ns(board_cnt=2, stand={'ts': 0.0, 'role': 'leader', 'active': 'active', 'board': 'strong'}, surge=2.0)
+ok('T113g P7b leader 不触发', _n['_p7b_check']('600200.XSHG', 1000) is None)
+# T113h P7b surge 不足不触发
+_n = _p7_ns(board_cnt=2, stand={'ts': 0.0, 'role': 'follower', 'active': 'follow', 'board': 'strong'}, surge=1.0)
+ok('T113h P7b surge 不足不触发', _n['_p7b_check']('600200.XSHG', 1000) is None)
+# T113i P7b 板块弱不触发
+_n = _p7_ns(board_cnt=2, stand={'ts': 0.0, 'role': 'follower', 'active': 'follow', 'board': 'weak'}, surge=2.0)
+ok('T113i P7b 板块弱不触发', _n['_p7b_check']('600200.XSHG', 1000) is None)
+# T113j P7c 首板次日不主动 -> 仅标记不卖
+_n = _p7_ns(board_cnt=1, active='neutral', t0=1000.0)
+ok('T113j P7c 不主动 -> 标记不卖', _n['_p7c_check']('600200.XSHG', 1000) is None and '600200.XSHG' in (_n['g'].p7c_part or {}))
+# T113k P7c 冲高触发第一批（50%）
+_n['last_px'] = lambda sec: 10.8 * 1.02
+_n['g'].p7c_part['600200.XSHG'] = {'ts': 9000.0, 'price': 10.8}
+_q = _n['_p7c_check']('600200.XSHG', 1000)
+ok('T113k P7c 冲高 -> 第一批50%', _q is not None and 'b1' in _q[0] and _q[1] == 500 and _n['g'].p7c_part['600200.XSHG'].get('sold1_ts'))
+# T113l P7c 批次冷却：10s 内第二批不触发
+_n['time'] = _FakeTime(1006.0)
+ok('T113l P7c 批次冷却内不卖第二批', _n['_p7c_check']('600200.XSHG', 500) is None)
+# T113m P7c 冷却后第二批（剩余50%）
+_n['time'] = _FakeTime(1011.0)
+_q = _n['_p7c_check']('600200.XSHG', 500)
+ok('T113m P7c 冷却后第二批', _q is not None and 'b2' in _q[0] and _q[1] == 500 and '600200.XSHG' in (_n['g'].p7c_sold or set()))
+# T113n P7c 回封取消标记
+_n = _p7_ns(board_cnt=1, active='neutral', t0=1000.0)
+_n['g'].p7c_part['600200.XSHG'] = {'ts': 9000.0, 'price': 10.8}
+_n['_today_zt'] = lambda sec: True
+ok('T113n P7c 回封取消标记', _n['_p7c_check']('600200.XSHG', 1000) is None and '600200.XSHG' not in (_n['g'].p7c_part or {}))
+# T113o P7c 主动 -> 不标记
+_n = _p7_ns(board_cnt=1, active='active', t0=1000.0)
+ok('T113o P7c 主动冲板 -> 不标记', _n['_p7c_check']('600200.XSHG', 1000) is None and '600200.XSHG' not in (_n['g'].p7c_part or {}))
+# T113p P7c 窗口外（>10:00）不触发
+_n = _p7_ns(board_cnt=1, active='neutral', t0=1000.0)
+_n['_min_age'] = lambda: 35
+ok('T113p P7c 窗口外不标记', _n['_p7c_check']('600200.XSHG', 1000) is None)
+# T113q _hold_stand 分类：动态龙头 + 板块强 + 主动
+_n = fresh(); _n['time'] = _FakeTime(1000.0)
+_n['g'].zt_lianban = {'600200.XSHG': {'board_cnt': 3, 'themes': '机器人'}}
+_n['g'].spot['600200.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'wavg_px': 10.5, 'trade_status': 'OPEN'}
+_n['_dyn_theme_leader'] = lambda sec: True
+_n['_board_strength'] = lambda sec: 2.0
+_n['_sector_chg'] = lambda sec: 0.08
+_st = _n['_hold_stand']('600200.XSHG')
+ok('T113q 地位评估 leader/主动/强', _st['role'] == 'leader' and _st['active'] == 'active' and _st['board'] == 'strong')
+# T113r _hold_stand 分类：中位(2-5板非唯一) -> mid
+_n = fresh(); _n['time'] = _FakeTime(1000.0)
+_n['g'].zt_lianban = {'600200.XSHG': {'board_cnt': 3, 'themes': '机器人'}}
+_n['g'].spot['600200.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'wavg_px': 10.5, 'trade_status': 'OPEN'}
+_n['_dyn_theme_leader'] = lambda sec: False
+_n['_board_strength'] = lambda sec: 0.0
+_n['_sector_chg'] = lambda sec: 0.0
+_st = _n['_hold_stand']('600200.XSHG')
+ok('T113r 地位评估 mid', _st['role'] == 'mid')
+# T113s tick 链 P7a 触发（3s 链接入）
+_n = _p7_ns(board_cnt=2, hist_vol=[100.0, 90.0], snap_vol=120.0)
+_out = []
+def _ds(c, sec, qty, note, urgent=False, mode=None, cool=True):
+    _out.append((sec, note, qty))
+_n['_do_sell'] = _ds
+_n['place_order'] = lambda c, sec, side, qty=None, note='', mode='chase': _out.append((sec, side, qty, note))
+_n['get_positions'] = lambda: {'600200.XSHG': {'enable_amount': 1000, 'cost_basis': 10.0}}
+_n['_sellable_source'] = lambda: _n['get_positions']()
+_n['_sellable'] = lambda raw, p: 1000
+_n['last_px'] = lambda sec: 10.8
+_n['my_cost'] = lambda raw, p: 10.0
+_n['_hold_exp_init'] = lambda sec, force=False: None
+_n['_sell_inflight'] = lambda sec: False
+_n['_auction_change'] = lambda sec: 1.0
+_n['_role_tolerance'] = lambda sec: {'green_tol': 1.0, 'stop_adj': 1.0, 'score_clear_adj': 1.0, 'score_half_adj': 1.0}
+_n['get_stop_loss_pct'] = lambda sec: 0.05
+_n['_p2e_core_sell_check'] = lambda sec: (False, '')
+_n['tick_sell_manager'](_n['_ctx'])
+ok('T113s tick 链 P7a 清仓', len(_out) == 1 and 'P7a_vol_break' in _out[0][1] and '600200.XSHG' in (_n['g'].p7a_sold or set()))
+
 print('ALL DONE')
 

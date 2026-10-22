@@ -381,6 +381,47 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.59 持仓卖出闭环：地位评估 + P7a/P7b/P7c（2026-10-22）
+
+> 背景：持仓卖出核心是「标的持续超预期」，监控点为主动性（非跟风）与板块加持；此前主动性/地位只在买入侧消费，
+> 持仓持有/卖出侧无显式地位评估。本次落地持仓地位评估 + 三个主动卖出闭环（P7a 连板放量不封板 / P7b 跟风拉升不封板 /
+> P7c 首板次日不主动冲板分批清仓），tick（3s）与 1m 双链兜底。
+
+### 持仓地位评估 `_hold_stand(sec)`
+- 15s 节流缓存（`hold_stand_cache_sec`），输出 role / active / board 三维：
+  - role：动态龙头 `_dyn_theme_leader` -> leader；T-1 `board_cnt∈[2,5]` 非唯一 -> mid；池内同题材有存活更高身位 -> follower；其它 -> outside。
+  - active：个股涨幅 >= 板块强度 + `p7c_active_threshold`(0.5%) -> 主动；板块强但个股明显弱于板块 -> 跟风；其它中性。
+  - board：板块强度>=`p7b_board_min`(1.0) 或所属题材存活龙头/发酵前排封板 -> 强；板块强度<=-1 -> 弱；其它平。
+- 评分仅持仓消费（`_hold_stand_pts`）：leader+3 / follower-1 / mid-3 / active+3 / 跟风-3 / 板块弱-3；
+  日志 `[hold] <股名> role=.. active=.. board=.. pts=..`（60s/股节流，`hold_stand_log_sec`）。
+
+### P7a 连板放量不封板（`_p7a_check`）
+- 条件：持仓 + T-1 `board_cnt>=2` + 今日量>=昨日量×`p7a_vol_ratio`(1.10) + 未封板（`_sealed_now`）。
+- 量口径：今日量=`_snap_vol`（快照 volume），昨日量=hist1d `vols[-2]`（[-1]=今日 [-2]=昨日，与 `_volume_ratio` 同口径）；
+  `[vol]` 探针（随 `_l2_probe` 每日一次）输出快照 volume / hist1d[-1] / hist1d[-2] 核对单位。
+- 卖出：唯一身位（`_unique_stand`）降级减半（`p7a_half_ratio`=0.5），否则清仓；现价限价非地板价（非核卖）。
+- 去重：`g.p7a_sold` 首触发标记，跨重启持久化。
+
+### P7b 跟风拉升不封板（`_p7b_check`）
+- 条件：持仓 + role∈(follower,outside) + 板块强（`_hold_board_strong`：板块强度>=1.0 或题材存活龙头/发酵前排封板）
+  + 1m surge>=`p7b_surge_min`(1.5) + 未封板 -> `P7b_follow_break` 减半（`p7b_half_ratio`=0.5）。
+- 语义：跟风股在强板块被拉起但不封板 -> 减半兑现；去重 `g.p7b_sold` 跨重启持久化。
+
+### P7c 首板次日不主动冲板 -> 冲高分批清仓（`_p7c_check`）
+- 条件：T-1 `board_cnt==1` + 09:30-10:00 窗口（`p7c_until_minute`=30）active≠主动 -> 标记 `p7c_price`（仅标记不卖）。
+- 触发：现价>=标记价×(1+`p7c_surge_min`%) 且未封板 -> 每 `p7c_batch_cold_secs`(10s) 卖一批（2×50%；
+  `_do_sell(..., cool=False)` 批次间隔自控，不写通用 30s 冷却，第二批 10s 即触发）。
+- 回封（`_today_zt`/`_sealed_now`）取消标记；转主动取消标记；破 VWAP 由 P4 兜底。
+- 状态：`g.p7c_part`（price/half/sold1_ts）+ `g.p7c_sold`（完成）跨重启持久化。
+
+### 接入与配置
+- tick 卖出链 P3 后 P4 前（3s）+ 1m `sell_manager` 同条件兜底（双保险，sold_log 冷却 + 在途守卫去重）。
+- BLS：`p7_sell_enabled / p7a_vol_ratio / p7a_half_ratio / p7b_board_min / p7b_surge_min / p7b_half_ratio /
+  p7c_until_minute / p7c_surge_min / p7c_batch_cold_secs / p7c_active_threshold / hold_stand_cache_sec / hold_stand_log_sec`。
+- 自测：T113 新增 19 项（P7a 清仓/唯一减半/未放量/已封板/仅连板、P7b 减半/leader/surge不足/板块弱、P7c 标记/第一批/冷却内/第二批/
+  回封取消/主动不标/窗口外、地位评估 leader/mid、tick 链 P7a 触发）。全量 644 PASS / 0 FAIL；py3.10 编译通过（兼容 PT3.7）。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `buysell_core init version=v0.59`。
+
 ## v0.58 P2E 竞价核卖（同题材中位崩塌传导 + 自身大不及）（2026-10-22）
 
 > 背景：P2E 原逻辑只对文件 `expected_status ∈ (confirmed_miss, degraded)` 清仓（无竞价幅度、无题材传导、9:30 后才有卖出链）。
