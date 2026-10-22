@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.44（2026-10-21）（前一版 v0.43 存档 1eea218）
-# 部署核对：日志首行 `buysell_core init version=v0.44 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.45（2026-10-22）（前一版 v0.43 存档 1eea218）
+# 部署核对：日志首行 `buysell_core init version=v0.45 ...`（init 打印 STRATEGY_VERSION）
 # 最近变更：v0.36e 概念板块口径+灵敏度（合并快照/两段式surge/预算24）
 #          v0.36g 盘中重启重建涨停池/自选三态（防 expect_buy 45->12 丢失）
 #          v0.36h 待上传根目录只留 *_latest（dated 全移 archive）
@@ -25,6 +25,8 @@
 #                [may-order]/[exp-order]/order sent 同补 lag；after_trading_end 打 [rt-summary] 日结（按 side/mode）
 #          v0.44 合成数据消费审计（docs/40）：_warm_cap 显式消费 sentiment.divergence 分歧标志，
 #                与 warm_days 双保险触发分歧保护 taper，修复生成侧 divergence 列云端未被消费的脱节
+#          v0.45 云 LogEngine 无 .warn 兼容（_warn 封装 warning->warn->info 兜底不抛，
+#                修复 qty<=0 skip 分支与 except 二次崩溃导致 tick_data 链路中断）
 # ============================================================
 # buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）
 # 依据：docs/16 + docs/18；AXquant 真实参数取自 D:/PROJ/AXquant/axquant/strategy
@@ -46,7 +48,22 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.44"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-21）
+STRATEGY_VERSION = "v0.45"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+
+
+def _warn(msg):
+    # 云 LogEngine 无 .warn：有 warning 用 warning，否则退 info，绝不抛（防链路中断）
+    _lb = getattr(log, "warning", None) or getattr(log, "warn", None)
+    try:
+        if _lb is not None:
+            _lb(msg)
+        else:
+            log.info("[WARN] " + str(msg))
+    except Exception:
+        try:
+            log.info("[WARN] " + str(msg))
+        except Exception:
+            pass
 
 
 # ---------- 参数 ----------
@@ -581,11 +598,11 @@ def handle_data(context, data):
     try:
         _try_elastic_top_buy(context)   # v0.36 新最强板块弹性套利（1m 兜底）
     except Exception as e:
-        log.warn('elastic_top buy fail: %r' % e)
+        _warn('elastic_top buy fail: %r' % e)
     try:
         _try_dyn_unq(context)            # v0.38 盘中动态唯一+跟风+扫板（1m 兜底，状态幂等）
     except Exception as e:
-        log.warn('dyn_unq(1m) fail: %r' % e)
+        _warn('dyn_unq(1m) fail: %r' % e)
 
 
 # ================= 行情/工具 =================
@@ -1497,7 +1514,7 @@ def _market_red_ratio():
                 g.pool_all = [x for x in (_norm_sec(c) for c in (get_Ashares() or [])) if x]
                 g.pool_day = day
             except Exception as e:
-                log.warn('market-red get_Ashares fail: %r' % e)
+                _warn('market-red get_Ashares fail: %r' % e)
                 g.pool_all = []
         pool = list(g.pool_all or [])
         if not pool:
@@ -1506,7 +1523,7 @@ def _market_red_ratio():
         return dh.cached(('mkt_red', day), '_mkt_', _market_red_ttl(),
                          lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
     except Exception as e:
-        log.warn('market-red fail: %r' % e)
+        _warn('market-red fail: %r' % e)
         return None
 
 
@@ -1707,7 +1724,7 @@ def dump_scores(context):
             log.info('score %s bar=%s px=%.2f ma5=%.2f chg=%.1f%% board=%.1f tags=%s score=%.1f' % (
                 _sn(sec), _hhmm(), px if px else 0.0, ma5, chg, st, tags, sc))
         except Exception as e:
-            log.warn('dump_scores fail %s: %r' % (_sn(sec), e))
+            _warn('dump_scores fail %s: %r' % (_sn(sec), e))
 
 
 def _norm_sec(code):
@@ -1812,7 +1829,7 @@ def _scan_market():
             g.pool_all = [x for x in (_norm_sec(c) for c in (get_Ashares() or [])) if x]
             g.pool_day = day
         except Exception as e:
-            log.warn('get_Ashares fail: %r' % e)
+            _warn('get_Ashares fail: %r' % e)
             g.pool_all = []
     if not g.pool_all:
         return BLS['universe']
@@ -1856,7 +1873,7 @@ def _sync_watch(context):
             g.watch = list(dict.fromkeys(watch))
         log.info('market_scan bar=%s pool=%d watch=%d' % (_hhmm(), len(g.pool_all or []), len(g.watch)))
     except Exception as e:
-        log.warn('market_scan fail: %r' % e)
+        _warn('market_scan fail: %r' % e)
 
 
 
@@ -2590,7 +2607,7 @@ def _try_dyn_unq(context):
                 continue
             _dyn_unq_eval_follow(sec, st, u)       # B 跟风确认
         except Exception as e:
-            log.warn('dyn_unq %s fail %r' % (_sn(sec), e))
+            _warn('dyn_unq %s fail %r' % (_sn(sec), e))
     _try_dyn_sweep(context, st)                    # D 竞价唯一扫板
 
 
@@ -2904,7 +2921,7 @@ def _try_first_board_buy_1m(context):
         try:
             _try_first_board_buy(context, sec)
         except Exception as e:
-            log.warn('first_board_buy(1m) fail %r' % e)
+            _warn('first_board_buy(1m) fail %r' % e)
 
 
 # ================= 弹性套利 elastic_arb（AXquant，v0.19 Phase 1） =================
@@ -3117,7 +3134,7 @@ def _board_probe():
         g.board_probe = out
         return out
     except Exception as e:
-        log.warn('board probe fail: %r' % e)
+        _warn('board probe fail: %r' % e)
         return None
 
 
@@ -3877,10 +3894,10 @@ def _l2_probe(context):
                     _as += float(_r[1] or 0)
             log.info('[l2] %s gear bid_sum=%s offer_sum=%s' % (_sn(sec), _bs, _as))
         except Exception as _e:
-            log.warn('l2 totals probe fail %r' % _e)
+            _warn('l2 totals probe fail %r' % _e)
         g.l2_probed = True
     except Exception as e:
-        log.warn('l2 probe fail: %r' % e)
+        _warn('l2 probe fail: %r' % e)
 
 def _tick_targets():
     # tick 采集目标：持仓 + universe 恒有 + watch 前 N（控 3s 帧负担，避免丢帧）
@@ -4028,7 +4045,7 @@ def tick_data(context, data):
                     try:
                         _try_first_board_buy(context, sec, rank_secs=_near)
                     except Exception as _e:
-                        log.warn('first_board_buy fail %r' % _e)
+                        _warn('first_board_buy fail %r' % _e)
                     continue
                 if (last >= u - 1e-9 and seal >= float(BLS.get('firstzt_min_seal', 0.0))
                         and bids >= int(BLS.get('firstzt_min_bids', 0))):   # 快照兜底：首此涨停上报最小封单/挂单门槛,过滤假封            # 首次触板
@@ -4039,7 +4056,7 @@ def tick_data(context, data):
                     try:
                         _try_first_board_buy(context, sec, rank_secs=_near)
                     except Exception as _e:
-                        log.warn('first_board_buy fail %r' % _e)
+                        _warn('first_board_buy fail %r' % _e)
                 continue
             if last < u - 1e-9:                 # 破板
                 if not ft.get('break'):
@@ -4057,29 +4074,29 @@ def tick_data(context, data):
     try:
         tick_sell_manager(context)
     except Exception as e:
-        log.warn('tick sell fail: %r' % e)
+        _warn('tick sell fail: %r' % e)
 
     # v0.13：3s 帧末统一评估预期买入（竞价超预期/快速上攻/封单超预期 -> 立买；走弱 -> 放弃）
     if BLS.get('tick_exp_enabled', True):
         try:
             _try_expected_buys(context)
         except Exception as e:
-            log.warn('tick exp buy fail: %r' % e)
+            _warn('tick exp buy fail: %r' % e)
     # v0.19 弹性套利：3s 帧末评估（09:30-09:40，板块一字>=2 抓 20cm）
     try:
         _try_elastic_arb_buy(context)
     except Exception as e:
-        log.warn('elastic_arb buy fail: %r' % e)
+        _warn('elastic_arb buy fail: %r' % e)
     # v0.36 新最强板块弹性套利：第一时间跟踪（最主动弹性标的，10% 前买入）
     try:
         _try_elastic_top_buy(context)
     except Exception as e:
-        log.warn('elastic_top buy fail: %r' % e)
+        _warn('elastic_top buy fail: %r' % e)
     # v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2）
     try:
         _try_dyn_unq(context)
     except Exception as e:
-        log.warn('dyn_unq fail: %r' % e)
+        _warn('dyn_unq fail: %r' % e)
     # v0.25 Phase 3：帧末拉取预算统计
     if BLS.get('budget_log_enabled', True):
         try:
@@ -4115,7 +4132,7 @@ def auction_pre_confirm(context):
         try:
             st, reason = _exp_rt_status(code)
         except Exception as e:
-            log.warn('auction_pre_confirm %s fail %r' % (_sn(code), e)); continue
+            _warn('auction_pre_confirm %s fail %r' % (_sn(code), e)); continue
         g.exp[code]['status'] = st
         if st == PM and str(reason).startswith('observe'):
             eo = g.exp.setdefault(code, {})
@@ -4312,10 +4329,10 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         px = limit or last_px(sec) or 0.0
         cash = float(getattr(context.portfolio, 'cash', 0) or 0)
         if px <= 0 or cash <= 0:
-            log.warn('place_order skip(no px/cash) %s' % _sn(sec)); return
+            _warn('place_order skip(no px/cash) %s' % _sn(sec)); return
         qty = _calc_buy_qty(context, sec, px, float(ratio) if ratio else float(BLS.get('ordinary_buy_ratio', 0.10)))
         if qty <= 0:
-            log.warn('place_order skip(qty<=0) %s' % _sn(sec)); return
+            _warn('place_order skip(qty<=0) %s' % _sn(sec)); return
         if not _buy_pos_ok(context, sec, qty, limit):
             return   # v0.30 情绪总仓位上限（冰点40%/回暖80%，连续回暖递减）
     else:
@@ -4323,7 +4340,7 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         if qty is None:
             qty = int(getattr(positions.get(sec), 'amount', 0) or 0)
     if not qty or qty <= 0:
-        log.warn('place_order skip qty<=0 %s' % _sn(sec)); return
+        _warn('place_order skip qty<=0 %s' % _sn(sec)); return
     if not BLS['DO_ORDER']:
         log.info('[may-order] %s %s qty=%s limit=%s %s %s (DO_ORDER=False)' % (_sn(sec), side, qty, limit, note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent='', status='SIM')
@@ -4347,7 +4364,7 @@ def place_expected_order(context, sec, note=''):
     up = float(s.get('up_px') or 0.0) if s else 0.0
     cash = float(getattr(context.portfolio, 'cash', 0) or 0)
     if px <= 0 or cash <= 0:
-        log.warn('exp order skip(no px/cash) %s' % _sn(sec))
+        _warn('exp order skip(no px/cash) %s' % _sn(sec))
         return False
     if _block_sealed_buy(sec):
         return False   # 一字/封死涨停：不排队买入（v0.15 对齐 AXquant limit_up_sealed_no_queue）
@@ -4358,7 +4375,7 @@ def place_expected_order(context, sec, note=''):
     ratio = float(BLS.get('board_buy_budget_ratio', BLS.get('exp_order_pct', 0.3))) if mode == 'board' else float(BLS.get('exp_order_pct', 0.3))
     qty = _calc_buy_qty(context, sec, p_for_size, ratio)
     if qty <= 0:
-        log.warn('exp order skip(qty<=0) %s' % _sn(sec))
+        _warn('exp order skip(qty<=0) %s' % _sn(sec))
         return False
     if not _buy_pos_ok(context, sec, qty, limit):
         return False   # v0.30 情绪总仓位上限
@@ -4394,7 +4411,7 @@ def on_order_response(context, order):
         log.info('on_order_response %s status=%s' % (ent, st))
         _signal(_sec_m, 'ORD', int(_p.get('qty') or 0), float(_p.get('limit') or 0.0), 'ord', 'order_response', ent=ent, status=str(st))
     except Exception as e:
-        log.warn('on_order_response err %r' % e)
+        _warn('on_order_response err %r' % e)
 
 
 def on_trade_response(context, trade):
@@ -4429,7 +4446,7 @@ def on_trade_response(context, trade):
         log.info('on_trade_response %s qty=%s side=%s' % (_sn(code), qty, side))
         _signal(code, side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
     except Exception as e:
-        log.warn('on_trade_response err %r' % e)
+        _warn('on_trade_response err %r' % e)
 
 
 # ================= 持久化（无 os 依赖） =================
@@ -4481,7 +4498,7 @@ def _save_state():
                          'seal_sold': sorted(getattr(g, 'seal_sold', None) or []),
                          'dyn_unq': dict(getattr(g, 'dyn_unq', None) or {})}, f, protocol=2)
     except Exception as e:
-        log.warn('save_state fail %r' % e)
+        _warn('save_state fail %r' % e)
 
 
 def after_trading_end(context, data):

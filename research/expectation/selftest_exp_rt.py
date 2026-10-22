@@ -2895,5 +2895,27 @@ ok('T97 divergence=0 warm_days=2 -> 0.80', abs(ns['_warm_cap'](g.sentiment) - 0.
 g.sentiment['warm_days'] = 3; g.sentiment['divergence'] = 1
 ok('T97 warm_days=3+divergence=1 -> 0.70', abs(ns['_warm_cap'](g.sentiment) - 0.70) < 1e-9)
 
+# T98 v0.45 云 LogEngine 无 .warn 兼容：_warn 退 warning->warn->info，绝不抛（防 tick 链路中断）
+ns = fresh()
+class _LogNoWarn:
+    def info(self, *a): self.info_calls = getattr(self, 'info_calls', 0) + 1
+    def error(self, *a): pass
+lw = _LogNoWarn()
+ns['log'] = lw
+ns['_warn']('qty<=0 skip')
+ok('T98 _warn fallback-to-info 不抛', getattr(lw, 'info_calls', 0) >= 1)
+class _LogWarnOnly:
+    def warn(self, *a): self.w_calls = getattr(self, 'w_calls', 0) + 1
+    def info(self, *a): raise RuntimeError('info must not be called')
+lw2 = _LogWarnOnly()
+ns['log'] = lw2
+ns['_warn']('x')
+ok('T98 _warn prefers .warn 不抛', getattr(lw2, 'w_calls', 0) >= 1)
+class _LogBroken:
+    def info(self, *a): raise RuntimeError('boom')
+ns['log'] = _LogBroken()
+ns['_warn']('y')
+ok('T98 _warn 全异常吞掉不抛', True)
+
 print('ALL DONE')
 
