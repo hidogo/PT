@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.49（2026-10-22）
-# 部署核对：日志首行 `buysell_core init version=v0.49 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.50（2026-10-22）
+# 部署核对：日志首行 `buysell_core init version=v0.50 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.49"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
+STRATEGY_VERSION = "v0.50"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-22）
 
 
 def _warn(msg):
@@ -122,6 +122,7 @@ BLS = {
     'l2_big_enabled': True,            # v0.47 L2 大单占比（近涨停候选逐笔累计）
     'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
     'l2_big_amt_unit': 'shares',         # v0.48 business_amount 单位: shares(股)/lots(手)/yuan(元)
+    'l2_big_dir_enabled': True,         # v0.50 大单净量口径: 买-卖 方向分计（False 回退 v0.47 全大单）
     'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
     'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
     'l2_big_seen_cap': 20000,          # 去重序号上限（防累计无限膨胀）
@@ -4052,8 +4053,26 @@ def _parse_tx_zt_ms(sec, rows, fields):
     return best
 
 
+def _tx_dir(v):
+    # v0.50 逐笔成交方向多态解析：数值 1/2、'B'/'buy'/'买' -> 买；'S'/'sell'/'卖' -> 卖；其它/缺失 -> None(未知)
+    try:
+        if v is None:
+            return None
+        sv = str(v).strip().lower()
+        if sv in ('', 'none'):
+            return None
+        if sv in ('1', 'b', 'buy', '\u4e70'):
+            return 'buy'
+        if sv in ('2', 's', 'sell', '\u5356'):
+            return 'sell'
+    except Exception:
+        pass
+    return None
+
+
 def _tx_big_feed(secs, fields, raw):
     # v0.47 L2 大单累计：逐笔 business_amount 按 trade_index 去重（防跨帧重复），累计当日大单金额
+    # v0.50 方向分计：buy/sell/un 累计，净量 = 买-卖（l2_big_dir_enabled）
     if not BLS.get('l2_big_enabled', True) or not raw:
         return
     try:
@@ -4064,12 +4083,13 @@ def _tx_big_feed(secs, fields, raw):
         return
     def _idx(name, default):
         return fields.index(name) if name in fields else default
-    i_a = _idx('business_amount', -1); i_t = _idx('trade_index', -1); i_p = _idx('hq_px', -1)
+    i_a = _idx('business_amount', -1); i_t = _idx('trade_index', -1); i_p = _idx('hq_px', -1); i_d = _idx('business_direction', -1)
     if i_a < 0:
         return
     unit = str(BLS.get('l2_big_amt_unit', 'shares')).lower()   # v0.48 business_amount 单位换算
     mult = 100.0 if unit == 'lots' else 1.0
     yuan_mode = (unit == 'yuan')
+    dir_on = BLS.get('l2_big_dir_enabled', True)
     acc = getattr(g, 'l2_big', None)
     if acc is None:
         acc = {}; g.l2_big = acc
@@ -4081,7 +4101,7 @@ def _tx_big_feed(secs, fields, raw):
         rows = raw.get(sec) or []
         if not rows:
             continue
-        a = acc.setdefault(sec, {'amt': 0.0, 'seen': set(), 'max': 0.0})
+        a = acc.setdefault(sec, {'amt': 0.0, 'buy': 0.0, 'sell': 0.0, 'un': 0.0, 'seen': set(), 'max': 0.0})
         seen = a['seen']
         if len(seen) >= _cap:
             continue
@@ -4102,26 +4122,54 @@ def _tx_big_feed(secs, fields, raw):
                     a['amt'] += yuan
                     if yuan > a.get('max', 0.0):
                         a['max'] = yuan
+                    if dir_on:
+                        _d = _tx_dir(row[i_d]) if i_d >= 0 else None
+                        if _d == 'buy':
+                            a['buy'] += yuan
+                        elif _d == 'sell':
+                            a['sell'] += yuan
+                        else:
+                            a['un'] += yuan
             except Exception:
                 continue
         if sec not in probed:
             probed.add(sec)
             r = _l2_big_ratio(sec)
-            log.info('[l2-big] %s 累计大单=%.0f 占比=%.2f%% 最大单笔=%.0f元 (阈值=%.0f unit=%s)' % (
-                _sn(sec), a['amt'], r * 100.0 if r >= 0 else -1.0, a.get('max', 0.0), min_amt, unit))
+            if dir_on:
+                log.info('[l2-big] %s 大单买=%.0f 卖=%.0f 净=%.0f 占比=%.2f%% 未知=%.0f 最大单笔=%.0f元 (阈值=%.0f unit=%s)' % (
+                    _sn(sec), a.get('buy', 0.0), a.get('sell', 0.0), a.get('buy', 0.0) - a.get('sell', 0.0),
+                    r * 100.0 if r >= 0 else -1.0, a.get('un', 0.0), a.get('max', 0.0), min_amt, unit))
+                if a.get('amt', 0.0) > 0 and a.get('buy', 0.0) <= 0 and a.get('sell', 0.0) <= 0:
+                    w = getattr(g, 'l2_big_dir_warn', None)
+                    if w is None:
+                        w = set(); g.l2_big_dir_warn = w
+                    if sec not in w:
+                        w.add(sec)
+                        log.info('[l2-big] %s 逐笔 direction 全部未识别(未知=%.0f) 净量口径待探针校准' % (_sn(sec), a.get('un', 0.0)))
+            else:
+                log.info('[l2-big] %s 累计大单=%.0f 占比=%.2f%% 最大单笔=%.0f元 (阈值=%.0f unit=%s)' % (
+                    _sn(sec), a['amt'], r * 100.0 if r >= 0 else -1.0, a.get('max', 0.0), min_amt, unit))
 
 
 def _l2_big_ratio(sec):
-    # v0.47 L2 大单占比 = Σ大单金额/当日成交额（快照 turnover/amount 元）；无数据/单位异常 -> -1
+    # v0.50 L2 大单净量占比 = (大单买-大单卖)/当日成交额（快照 turnover/amount 元）；净<=0/无数据/单位异常 -> -1
     try:
         acc = (getattr(g, 'l2_big', None) or {}).get(sec)
-        if not acc or not acc.get('amt'):
+        if not acc:
             return -1.0
+        if BLS.get('l2_big_dir_enabled', True):
+            num = float(acc.get('buy') or 0.0) - float(acc.get('sell') or 0.0)
+            if num <= 0:
+                return -1.0
+        else:
+            num = float(acc.get('amt') or 0.0)
+            if num <= 0:
+                return -1.0
         s = g.spot.get(sec) or {}
         to = float(s.get('turnover') or s.get('amount') or 0.0)
         if to <= 0:
             return -1.0
-        r = acc['amt'] / to
+        r = num / to
         if r > 1.0:
             return -1.0        # 单位异常保护（大单额>总成交额 -> 不授分）
         return r

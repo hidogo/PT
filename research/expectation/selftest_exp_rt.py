@@ -2948,20 +2948,22 @@ g.dyn_unq = None
 ns['_dyn_unq_auction_eval']()
 ok('T100 首板 meet 不标唯一', ns['g'].dyn_unq['auction'].get('600002.XSHG', {}).get('unique') is False)
 
-# T101 v0.48 L2 大单累计去重（business_amount 单位换算 shares->元）+ 占比加分
+# T101 v0.50 L2 大单净量（买-卖）累计去重 + 占比加分
 ns = fresh(); g = ns['g']
 g.l2_big = {}; g.l2_big_probed = set()
-g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}   # 1亿, 占比33.95%<1 单位保护不触发
-_fields = ['business_time', 'hq_px', 'business_amount', 'trade_index']
-_rows = [[99000000, 10.0, 500000, 1], [99001000, 10.5, 1500000, 2],
-         [99002000, 11.0, 1200000, 3], [99003000, 11.0, 2000000, 2]]  # 重复 trade_index=2 去重
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+_fields = ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction']
+_rows = [[99000000, 10.0, 1000000, 1, 'buy'],   # 1000万 买
+         [99001000, 10.0, 1500000, 2, 'buy'],   # 1500万 买
+         [99002000, 10.0, 800000, 3, 'sell'],   # 800万 卖
+         [99003000, 10.0, 2000000, 2, 'sell']]  # 重复 trade_index=2 去重
 ns['_tx_big_feed'](['600001.XSHG'], _fields, {'600001.XSHG': _rows})
-# 换算: 500000x10 + 1500000x10.5 + 1200000x11 = 500万+1575万+1320万 = 3395万（2000000 为重复去重）
-ok('T101 shares换算 大单去重累计=3395万', abs(g.l2_big['600001.XSHG']['amt'] - 33950000.0) < 1e-6)
-ok('T101 占比=33.95%>=10% -> 加分5', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
-g.spot['600001.XSHG']['turnover'] = 400000000.0
-ok('T101 占比降至8.5% -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
-g.l2_big['600001.XSHG'] = {'amt': 0.0, 'seen': set()}
+ok('T101 全大单去重累计=3300万', abs(g.l2_big['600001.XSHG']['amt'] - 33000000.0) < 1e-6)
+ok('T101 净量=1700万(买2500-卖800)', abs(g.l2_big['600001.XSHG']['buy'] - g.l2_big['600001.XSHG']['sell'] - 17000000.0) < 1e-6)
+ok('T101 净量占比=17%>=10% -> 加分5', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+g.spot['600001.XSHG']['turnover'] = 250000000.0
+ok('T101 净量占比降至6.8% -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+g.l2_big['600001.XSHG'] = {'amt': 0.0, 'buy': 0.0, 'sell': 0.0, 'un': 0.0, 'seen': set()}
 ok('T101 无大单 -> 不加分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
 ok('T101 无数据 -> 不加分不抛', ns['_l2_big_ratio']('600002.XSHG') < 0 and ns['_l2_big_bonus_pts']('600002.XSHG') == 0.0)
 
@@ -2994,22 +2996,22 @@ ok('T103 scan_interval 收紧=1', ns['BLS']['scan_interval'] == 1)
 ns = fresh(); g = ns['g']
 g.l2_big = {}; g.l2_big_probed = set()
 g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 50000000.0}
-_f = ['business_time', 'hq_px', 'business_amount', 'trade_index']
+_f = ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction']
 ns['BLS']['l2_big_amt_unit'] = 'shares'
 ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
-    [99000000, 10.0, 200000, 1], [99001000, 10.0, 200000, 2],
-    [99002000, 10.0, 100000, 3], [99003000, 10.0, 90000, 4]]})
+    [99000000, 10.0, 200000, 1, 'buy'], [99001000, 10.0, 200000, 2, 'buy'],
+    [99002000, 10.0, 100000, 3, 'buy'], [99003000, 10.0, 90000, 4, 'sell']]})
 ok('T104 shares换算 累计=500万(90万<阈值不计)', abs(g.l2_big['600001.XSHG']['amt'] - 5000000.0) < 1e-6)
 ok('T104 shares 占比10%达标加分', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
 ns = fresh(); g = ns['g']
 g.l2_big = {}; g.l2_big_probed = set()
 ns['BLS']['l2_big_amt_unit'] = 'lots'
-ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1000, 1]]})
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1000, 1, 'buy']]})
 ok('T104 lots换算 1000手x100x10=100万元', abs(g.l2_big['600001.XSHG']['amt'] - 1000000.0) < 1e-6)
 ns = fresh(); g = ns['g']
 g.l2_big = {}; g.l2_big_probed = set()
 ns['BLS']['l2_big_amt_unit'] = 'yuan'
-ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1200000, 1]]})
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 1200000, 1, 'buy']]})
 ok('T104 yuan直用 累计=120万元', abs(g.l2_big['600001.XSHG']['amt'] - 1200000.0) < 1e-6)
 ns = fresh(); g = ns['g']
 g.watch = ['600001.XSHG']; g.pool_static = []
@@ -3125,6 +3127,37 @@ ok('T106 大单5%<10% 不触发', ns['g'].reboard_fired is False and '600001.XSH
 ns = _reboard_ns(0.27, True, fired=True)
 ns['_try_reboard_buy'](ns['_CTX'])
 ok('T106 当日已 fired 不触发', '600001.XSHG' not in ns['g'].daily['bought'])
+
+# T107 v0.50 大单净量口径专项
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+_f = ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction']
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
+    [99000000, 10.0, 1000000, 1, 'buy'], [99001000, 10.0, 2000000, 2, 'sell']]})
+ok('T107 卖>买 净=-1000万 -> 不授分', ns['_l2_big_ratio']('600001.XSHG') < 0 and ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [[99000000, 10.0, 2000000, 1, 'x']]})
+ok('T107 方向未知 归un 净=0 不授分', abs(g.l2_big['600001.XSHG']['un'] - 20000000.0) < 1e-6 and ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+_f2 = ['business_time', 'hq_px', 'business_amount', 'trade_index']
+ns['_tx_big_feed'](['600001.XSHG'], _f2, {'600001.XSHG': [[99000000, 10.0, 2000000, 1]]})
+ok('T107 direction字段缺失 不授分', ns['_l2_big_bonus_pts']('600001.XSHG') == 0.0)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+ns['BLS']['l2_big_dir_enabled'] = False
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
+    [99000000, 10.0, 1000000, 1, 'buy'], [99001000, 10.0, 1000000, 2, 'sell']]})
+ok('T107 dir_enabled=False 全大单口径 占比20%加分', abs(ns['_l2_big_bonus_pts']('600001.XSHG') - 5.0) < 1e-9)
+ns = fresh()
+ok('T107 _tx_dir 数值1=买 2=卖', ns['_tx_dir'](1) == 'buy' and ns['_tx_dir'](2) == 'sell')
+ok('T107 _tx_dir B=买 s=卖', ns['_tx_dir']('B') == 'buy' and ns['_tx_dir']('s') == 'sell')
+ok('T107 _tx_dir 未知x=None None=None', ns['_tx_dir']('x') is None and ns['_tx_dir'](None) is None)
 
 print('ALL DONE')
 

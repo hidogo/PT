@@ -379,6 +379,17 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.50 大单净量口径（2026-10-22）
+
+> L2 大单占比语义修正：净量 =（大单买 - 大单卖）/ 实时成交额 >= 10% 才加分/封单豁免。
+> `_tx_big_feed` 按 `business_direction` 分计 buy/sell/un（多态解析：数值 1/2、'B'/'buy'/'买'、'S'/'sell'/'卖'），
+> 方向未知/缺失的成交不计入净量（保守不误判）；`_l2_big_ratio` 改净量口径，net<=0 不授分；
+> `l2_big_dir_enabled=False` 可回退 v0.47 全大单口径；`[l2-big]` 探针输出 买/卖/净/占比/未知，
+> 单标的 direction 全部未识别时打一次校准告警。
+- 自测：T101 重写净量口径 + T104 补 direction + T107 新增（卖>买负净不授分/方向未知不计/字段缺失降级/dir_enabled=False 回退/多态解析）。
+  全量 556 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.50` 与 `[l2-big] 大单买=.. 卖=.. 净=..` 探针。
+
 ## v0.49 炸板应对收紧 + 回封打板（2026-10-22）
 
 > A) 炸板卖出改买N档限价：`_order_limit` 新增 `sell_break` 模式——取 L2 `bid_grp[break_sell_bid_level(3)]` 档价，
