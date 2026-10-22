@@ -29,6 +29,7 @@ def make_mod(**overrides):
     ns['get_Ashares'] = lambda: []
     ns['get_gear_price'] = lambda sec: {}
     ns['get_individual_transaction'] = lambda *a, **k: {}
+    ns['get_tick_direction'] = lambda *a, **k: {}
     ns['get_individual_entrust'] = lambda *a, **k: {}
     ns['get_trend_data'] = lambda **k: {}
     ns['get_snapshot'] = lambda sec: {}
@@ -3190,6 +3191,45 @@ pickle.dump(_st, open(ns['_TMP'] + '/buysell_core_state.pkl', 'wb'))
 g.l2_big = {'X': 1}; g.l2_dir_dist = {'9': 1}
 ns['load_state']()
 ok('T108 跨日重置 l2_big/dir_dist', g.l2_big == {} and g.l2_dir_dist == {})
+
+# T109 v0.52 已成交大单播种（get_tick_direction 分时成交）+ 水印防重
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set()
+g.spot['600001.XSHG'] = {'up_px': 11.0, 'turnover': 100000000.0}
+_tdf = ['time_stamp', 'hq_px', 'business_amount', 'business_balance', 'business_count', 'business_direction']
+_td = {'fields': _tdf, '600001.XSHG': [
+    [92500000, 10.0, 100000, 1200000, 1, 1],   # 09:25 竞价大分笔 120万 买(1)
+    [93005000, 10.0, 80000, 950000, 1, 0],     # 09:30 小分笔 95万（不入池）
+    [93010000, 10.0, 200000, 1500000, 2, 1],   # 09:30 大分笔 150万 买(1, 含2笔)
+]}
+ns['get_tick_direction'] = lambda *a, **k: _td
+ns['_l2_big_seed'](['600001.XSHG'])
+ok('T109 竞价终态播种 大分笔计入(120+150万)', abs(g.l2_big['600001.XSHG']['buy'] - 2700000.0) < 1e-6
+   and abs(g.l2_big['600001.XSHG']['amt'] - 2700000.0) < 1e-6 and g.l2_big['600001.XSHG']['un'] == 0.0)
+ok('T109 水印=最大已覆盖分笔时间', g.l2_big_wm['600001.XSHG'] == 93010000)
+ok('T109 播种方向分布计数', g.l2_dir_dist == {'1': 2})
+ns['_l2_big_seed'](['600001.XSHG'])
+ok('T109 重复播种幂等(水印防重)', abs(g.l2_big['600001.XSHG']['buy'] - 2700000.0) < 1e-6)
+_f = ['business_time', 'hq_px', 'business_amount', 'trade_index', 'business_direction']
+ns['_tx_big_feed'](['600001.XSHG'], _f, {'600001.XSHG': [
+    [93010000, 10.0, 150000, 1, 1],   # 与已播种分笔同时点 -> 跳过
+    [93015000, 10.0, 200000, 2, 1]    # 09:30:15 新大单 200万 -> 计入
+]})
+ok('T109 live跳过已播种时段 新时段计入', abs(g.l2_big['600001.XSHG']['buy'] - 4700000.0) < 1e-6
+   and g.l2_big_wm['600001.XSHG'] == 93015000)
+ns = fresh(); g = ns['g']
+g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {'600001.XSHG': 93100000}; g.l2_big_seeded = set()
+g.l2_big['600001.XSHG'] = {'amt': 1000000.0, 'buy': 1000000.0, 'sell': 0.0, 'un': 0.0, 'seen': {1}, 'max': 1000000.0}
+_td2 = {'fields': _tdf, '600001.XSHG': [[93120000, 10.0, 100000, 1800000, 1, 1], [93000000, 10.0, 50000, 600000, 1, 0]]}
+ns['get_tick_direction'] = lambda *a, **k: _td2
+ns['_l2_big_seed'](['600001.XSHG'])
+ok('T109 重启回看只补>水印缺口', abs(g.l2_big['600001.XSHG']['buy'] - 2800000.0) < 1e-6
+   and g.l2_big_wm['600001.XSHG'] == 93120000)
+g.state_day = '2026-10-16'
+ns['_save_state']()
+g.l2_big_wm = {}
+ns['load_state']()
+ok('T109 wm 同日恢复', g.l2_big_wm.get('600001.XSHG') == 93120000)
 
 print('ALL DONE')
 

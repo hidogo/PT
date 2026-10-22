@@ -379,6 +379,24 @@
 - 自测：T101 重写（shares 换算口径）+ T103 补窗口内时间 + T104 新增（shares/lots/yuan 换算、窗口内外门控）。全量 533 PASS / 0 FAIL；双编译通过。
 - 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.48` 与 `[l2-big] ... 最大单笔=..元` 探针。
 
+## v0.52 已成交大单回看播种（2026-10-22）
+
+> 背景：`_tx_big_feed` 仅累计「该股进入 tick 候选集后、每帧最新 200 笔逐笔」里 >=100万 的大单，是纯增量 live-only 口径；
+> 09:30 首帧时 09:25 竞价撮合已滚出 200 笔窗口，盘中重启/中途入池前的已成交大单也拿不到。
+> v0.52 用 `get_tick_direction`（分时成交行情，含竞价终态，沪深都有、交易模块可用）回看播种，补上已成交大单。
+- 播种函数 `_l2_big_seed(secs)`：对候选集（涨停池+自选+持仓+预期）分页拉 `get_tick_direction`（`start_pos` 翻页、`data_count=200`、`l2_tickdir_pages=3` 封顶），
+  分笔 `business_balance >= l2_big_amt_min` 且 `time_stamp > 水印` 计入 买/卖/un（方向走 `_tx_dir`，0=卖/1=买）。
+- 双源防重：`g.l2_big_wm[sec]`（已覆盖到的最大 business_time，随 `_save_state`/`load_state` 持久化、跨日重置）。
+  - live 逐笔：`business_time > wm` 才计入，计入时推进 wm（仅大单行推进，小分笔不推、留给播种补大分笔）；
+  - 播种：只补 `time_stamp > wm` 的分笔，调用内用 `seen_ts` 集合去重（防分页重叠）；竞价终态播种后 wm≈09:25，09:30 起 live 无重叠。
+- 入口：09:25 竞价终态（auction_pre_confirm）、09:31 兜底（after_open_probe，覆盖其自身 l2_big 重置窗口）、盘中重启（before_trading_start 重启分支，补重启窗口）。
+- 探针 `[tickdir]`：每标的打印 首笔/条数/大单分笔/水印（阈值），用于实证分时成交源是否含 09:25 竞价（看首笔是否为 09:25:00 附近）。
+- 说明：live 为「单笔逐笔>=100万」、播种为「单分笔>=100万」，两者口径略有差异但净量方向一致；重启补种仅可能在一个分笔窗口（~1s）内与 live 有界重叠，保守不重复计。
+- 自测：T109 新增（竞价播种 120+150万 计入/水印=最大分笔时间/方向分布/重复播种幂等/live 跳过已播种时段且新时段计入/重启只补>水印缺口/wm 同日恢复）。
+  全量 570 PASS / 0 FAIL；双编译通过。
+- 待重传：strategies/buysell_core/strategy.py，核对日志首行 `version=v0.52`、09:25 出现 `[tickdir]` 探针（首笔~09:25 即含竞价）、
+  盘中重启后 `[l2-big]` 保留重启前累计并补回缺口。
+
 ## v0.51 大单净量方向校准 + 跨重启持久化（2026-10-22）
 
 > 实锤：2026-10-22 盘中日志 `[l2] tx_row=[..., 0, ...]`（business_direction=0）——官方字典

@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.51（2026-10-22）（前一版 v0.50 存档 71d40f6）
+- 当前版本：v0.52（2026-10-22）（前一版 v0.51 存档 ae4e8b5）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.51 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.52 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,14 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.52（2026-10-22）已成交大单回看播种（docs/33）
+- 新增 `_l2_big_seed`：用 `get_tick_direction`（分时成交行情，含竞价终态 09:25 与重启前已成交）对候选集回看播种，
+  分笔 `business_balance>=100万` 计入 买/卖/un；水印 `l2_big_wm[sec]` 与 live 逐笔双源防重（live 按 business_time>水印 跳过已覆盖时段）
+- 播种入口：09:25 竞价终态（auction_pre_confirm）+ 09:31 兜底（after_open_probe，覆盖重置窗口）+ 盘中重启回看补种（防重启窗口已成交大单丢失）
+- 成本控制：`l2_tickdir_pages=3` 页回看（每页 data_count=200），仅对近涨停目标集播种；`[tickdir]` 探针输出 首笔/条数/大单分笔/水印（实证是否含 09:25 竞价）
+- `l2_big_wm` 随 `_save_state`/`load_state` 持久化（同日恢复、跨日重置）；水印只在大单行推进（小分笔不推，留待播种补大分笔）
+- 自测：T109 新增（竞价播种/水印防重/幂等/live 跳过已播种时段/重启补缺口/wm 恢复）。全量 570 PASS / 0 FAIL；双编译通过。
 
 ### v0.51（2026-10-22）大单净量方向校准 + 跨重启持久化（docs/33）
 - `_tx_dir` 方向映射按 PTrade 官方字典校准：0=卖、1=买、2=借入/3=出借->不计净量（v0.50 误用 1/2，实盘 direction=0 全部归 un、净量空转）
