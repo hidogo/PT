@@ -2,6 +2,89 @@
 
 > 版本：buysell_core v0.15　目标：把 PT 托管策略的单键买卖逻辑对齐 AXquant 已实盘验证的真实口径，收敛三处关键差异：**一字板封单超预期不参考排单 / 竞价核卖 P2E / 弹性买入价 10% 上限**。上游 AXquant 依据：`axquant/runner/bt_handlers.py`（P1-3 sealed、弹性 cap）、`axquant/strategy/btree/builder.py`（AUCTION 卖出链、_is_sealed_at_limit）、`axquant/strategy/decision/sell.py`（止损分档）。
 
+## v0.68 评分/竞价/预期文件三重数据就绪加固（2026-10-23）
+> 实盘 10-23 观测三处数据就绪缺口：①盘中重启(10:19 v0.66)后首帧行情/板块未就绪被当 0.0 打分，
+> 重启后评分虚高（三峡新材 48→70、海洋王 40→65，chg=0.0% board=0.0 只剩加分）；②09:30:01-02 首帧缺前收致
+> `_auction_change` 写死 (day,0.0) 毒缓存，大业/海洋王/安乃达/赛福天 4 个唯一预判 `miss=auction_not_met(0.0%)`
+> 当天永久误弃（exp_fired 不可恢复）；③`expectation_latest.csv` 盘中 15→5 全量替换丢候选。
+- A 评分数据就绪门：`_spot_ready`（现价+前收齐备）+ `_board_strength_info`（板块有归属但无有效涨跌样本=不可测，
+  未映射=中性放行）；未就绪 `score_now` 返回 None：买入入口跳过、卖出 P5/P6 跳过防误卖、`dump_scores` 打
+  `data_na`，`[score-na]` 60s/票节流。
+- B 竞价未就绪守卫：`_auction_change` 缺前收/无价返回 0.0 且不写缓存（下帧重算，根治毒缓存）；`_auction_ready`
+  缓存命中或 前收+开盘齐备即就绪；`_exp_rt_status` 超预期路径未就绪 -> `PM await_intraday_confirm` 不再误弃；
+  首帧 `_avail_cash<=0` 静默跳过（下帧自然重试）。
+- C 预期文件盘中替换保护：盘中重读 `_load_expectation(merge=True)`（09:25/09:31/P2E 钩子）逐 code 合并防收缩；
+  日期守卫（date/trading_date/generated_at 列非今日拒绝重载）；差异日志 `expectation file merged old=.. new=.. total=..`。
+- 上传契约：定时上传任务需 **9:15 前完成上传**，09:25 竞价终态重读命中当日文件；若 08:59 首载读到前一日残留
+  属正常（盘中 merge 后以 09:25 当日文件为准，不再丢候选）。
+- 自测：T120-T127 新增 8 例（评分就绪门/板块不可用/不写毒缓存/未就绪不误弃/资金静默/merge 不丢/日期拒绝/差异日志），
+  全量 728 PASS / 0 FAIL。
+- 待重传 strategy.py，核对日志首行 `version=v0.68`、重启首帧 `[score-na]`、09:30 不再 `miss=auction_not_met(0.0%)`、
+  09:25 `expectation file merged old=.. new=..`。
+
+## v0.67 L2 大单链路补齐：盘中入池补播种 + 探针节流重打 + 批量缺票兜底（2026-10-23）
+> 实盘 10-23 观测：盘中新入池触板票（统一股份、奇精机械、登康口腔、榕基软件、天娱数科、达实智能等）不在 09:25/09:31 播种列表，
+> 首次进入近涨停目标集时 `[l2-big]` 首帧打印 0/0 且探针只打一次；同帧批量逐笔偶有部分票缺行/近空（兆威/华阳有数据而登康/大港近空），
+> 大单净量比决策读实时累计不受影响，但首帧信号失真、盘中无法核对。
+- A) 盘中入池补播种 `_l2_big_seed_onjoin`：tick_data 构建 `_near` 后对未播种票按 `l2_big_seed_onjoin_interval_sec`(60s)
+   节流调 `_l2_big_seed(pages=l2_tickdir_pages_onjoin=5)` 回看历史大单；与既有 `l2_big_wm` 水印共用，双源不重复，首帧即有累计。
+- B) `[l2-big]` 探针分钟节流重打：首帧立即打印，之后按 `l2_big_log_sec`(300s) 间隔重复打印同票累计变化，便于盘中核对；
+   direction 全部未识别告警仍只在首帧。
+- C) 批量逐笔缺票兜底：`_tx_pull_raw` 批量拉取后统计缺行票，帧预算内（`frame_tx_limit` 1->2、`l2_tx_fallback_cap=5`）
+   逐只 `get_individual_transaction([c])` 补回并合并 fields（字段序不一致时按批量 fields 重排，缺列补 None）；
+   打 `[tx-pull] req=.. got=.. missing=.. (fallback=..)`；兜底结果并入本帧 raw，下帧新 token 仍可重试。
+- 自测：T117（入池播种历史大单进 acc 买/卖分量 + 60s 节流防重复 + 已播种票过滤）+ T118（首帧立即/间隔内不重打/超时重打+时间戳更新）
+  + T119（批量缺票单票补回、fields 合并、missing 日志）+ T51 契约更新（批量一次拉取+缺票单票兜底、同帧二次消费不重复拉）。
+  全量 700 PASS / 0 FAIL；py3.13 编译通过。
+- 待重传 strategy.py，核对日志首行 `version=v0.67`、盘中新票 `[tickdir]` 入池播种、同票 `[l2-big]` 多时间点、
+  `[tx-pull] .. missing=.. (fallback=..)` 与收盘 `[l2-big-sum]`。
+
+## v0.66 L2 大单占比分母打通（2026-10-23）
+> 实盘 10-23 发现 `[l2-big]` 占比全天恒 `-1.00%`：`_l2_big_ratio` 分母取 `turnover`/`amount`，而云端
+> `get_snapshot` 无 `turnover`（只有 `turnover_ratio` 换手率），`amount` 是期货字段股票恒 0；权威字段为
+> `business_balance`（总成交额，元）。分母恒 0 -> 占比恒 -1 -> 大单占比增强项（加分/封单豁免/回封门）全程静默。
+- A) 新增 `_l2_big_turnover(sec)` 统一分母：`business_balance`（总成交额元）优先 ->
+   `business_amount`（总成交量股）x `wavg_px`/`last_px` 兜底 -> `turnover`/`amount` 旧环境兼容。
+- B) `_l2_big_ratio` 分母改用 helper；首板记录 `g.first_zt['amt']`（原 `turnover or amount` 恒 0）同步修复。
+- C) `[l2-big]` 探针补打 `分母=` 便于现场核对；日志 `分布=` 明确为 `全局分布=`（`g.l2_dir_dist` 为全市场共用字典）。
+- D) 买入/卖出大单取得强化（净大单=买入大单-卖出大单，两个分量才是分子关键）：方向来自逐笔
+   `business_direction`（0=卖、1=买、2=借入/3=出借不计入净量，docs/10 官方字典）；`l2_big` 累计结构
+   增 `bn/sn/un_n` 大单笔数分方向计数，`[l2-big]` 探针输出 `大单买=..(N笔) 卖=..(M笔)`；
+   `after_trading_end` 增 `[l2-big-sum]` 按票日结 买额/卖额/净额/笔数（净额降序前 30），供次日核对买入/卖出大单均取得。
+- 自测：T115 新增（business_balance 优先 17% 加分 / business_amount x wavg 兜底 / turnover 兼容）
+  + T116 新增（逐笔/播种双源 buy/sell/un 金额与笔数分计、净大单=买-卖、日结按净额排序）。
+- 待重传 strategy.py，核对日志首行 `version=v0.66` 与 `[l2-big] .. 占比=..% 分母=..` 不再全 -1。
+
+## v0.64 订单系统闭环 + 资金实时（2026-10-23）
+> F1-F5 修复订单系统闭环，并落地"资金实时最新"（用户补充：云端持仓拉不到本地，成交/委托主推是唯一实时的资金与持仓对账通道）。
+
+### F1 买入量化记账只在发单成功时
+- `place_order`/`place_expected_order` 改为返回 bool（True=已发单或 SIM 信号，False=跳过/异常）。
+- 7 个买入信号点（动态扫板/低吸/core_buy/首板/回封/弹性套利/弹性top）改 `if place_order(...):` 成功才记 `daily.bought`——修复静默失败占 `daily_max_buy=1` 名额。
+- 预期买入路径 `place_expected_order` 保持现状（2897 已 `if not place_expected_order(...)` 返回 None 不置 fired）。
+
+### F2 委托主推释放买名额 + 终态释放资金承诺
+- `on_order_response` 重写为 list[dict] 主推（PTrade 回调传 list，兼容单对象）：`_map_order_status` 状态码映射（'0'未报 '1'待报 '2'已报 '3'待撤 '4'部成待撤 '5'已撤 '6'废单 '7'部成 '8'已成 '9'部撤 'V'已确认）。
+- buy 单终态（FILLED/CANCELLED/REJECTED/PARTIAL 按成交额）`_buy_commit_rel` 释放 `g.buy_commit`；REJECTED/CANCELLED 额外 `_release_buy_slot` 释放 `daily.bought`+`exp_fired`（buy_log 冷却保留防信号风暴）。
+
+### F3 在途委托/买入承诺持久化 + 重启对账
+- `g.pending` + `g.buy_commit` 纳入 `_save_state`/`load_state`（仅同日分支恢复，跨日清空）。
+- `before_trading_start` 挂 `_reconcile_pending()`：`get_open_orders()`+`get_all_orders()` 重建在途委托（防重复卖/资金扣减），restart 后 `_sell_inflight` 继续生效。
+
+### F4 预期下单 pending 字段补齐
+- `place_expected_order` pending 补 `status='SENT'/'filled'=0/'ts'`，与 `place_order` 对齐，保证主推回填与重启恢复一致。
+
+### F5 成交主推回填 + 撤单跳过
+- `on_trade_response` 重写为 list[dict]（PTrade 回调传 list）：sell 成交回填 `filled`+`sold_log`+`daily.sold`；buy 成交按成交额释放买入承诺；撤单主推（`real_type='2'`）与废单跳过；成交量取绝对值（实盘撤单/卖可能为负）。
+
+### 资金实时（_avail_cash）
+- `_avail_cash = portfolio.cash - sum(buy_commit)`（在途买单承诺，现价×量），防 6s 资金同步滞后窗口超配。
+- `_buy_pos_ok`/`_calc_buy_qty`/`place_order`/`place_expected_order` 统一走 `_avail_cash`；commit 由主推回报终态释放。
+
+### 验证
+- selftest 新增 F1-F5 17 条（无行情跳过 False / 实单记 pending+commit / REJECTED 释放三件套 / 状态码映射 / FILLED 释放 / 同日重启恢复 pending+commit / _avail_cash / sell 成交回填 / buy 部分成交释放 / 撤单跳过）；全量 666 PASS / 0 FAIL；py3.10 编译通过。
+- 待重传 strategy.py，核对日志首行 `buysell_core init version=v0.64`；盘中核对 `[order sent]`/`[buy-slot]`/`[pending-restore]`/`on_order_response status=`/`on_trade_response`。
+
 ## 1. 一字板·封单超预期不参考排单
 - AXquant P1-3：除 auction/add_position/elastic_arb 外，`_is_sealed_at_limit` 命中即 `limit_up_sealed_no_queue` 拦单——挂涨停价只是排队，不参考/不参与排单成交。
 - PT 对齐：新增 `_sealed_at_limit(sec)` = 现价>=涨停价*0.998 且 L2 十档卖盘空（封死）。无 L2 盘口(回测)判非封死，与 AXquant `has_book` 一致。
