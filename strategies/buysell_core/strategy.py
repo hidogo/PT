@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.68（2026-10-23）
-# 部署核对：日志首行 `buysell_core init version=v0.68 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.71（2026-10-25）
+# 部署核对：日志首行 `buysell_core init version=v0.71 ...`（init 打印 STRATEGY_VERSION）
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.68"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-23）
+STRATEGY_VERSION = "v0.71"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-25）
 
 
 def _warn(msg):
@@ -30,7 +30,13 @@ BLS = {
     'DO_ORDER': False,
     'universe': ['600570.XSHG', '603528.XSHG', '601188.XSHG'],   # 占位自选池，待接全市场扫描
     'buy_score_min': 55.0,
-    'ma5_pullback': True, 'ma5_loose_high': 1.02, 'ma5_core_only': True,   # 5D线低吸仅对核心(CORE)标签股（对齐 AXquant CORE+低吸） 'ma5_require_bs': True,     # 对齐 AXquant：低吸还要 BS(100日新高)标签 'ma5_first_5d': True,       # 仅 5日内首次回踩 MA5（防重复低吸）
+    'ma5_pullback': True, 'ma5_loose_high': 1.00, 'ma5_core_only': True,   # 5D线低吸仅对核心(CORE)标签股
+    'ma5_second_low_enabled': True,    # v0.70 用生命周期内次低价确认，过滤单次插针
+    'ma5_touch_band': 0.02,            # 次低价进入动态MA5上下2%即视为触及
+    'ma5_require_bs': False,           # v0.69 低吸不再要求 BS(100日新高)，CORE+首次触 MA5 即可
+    'ma5_first_5d': False,             # v0.69 默认按“当日首次触线”；True 可回退五日内首次回踩
+    'ma5_buy_score_min': 50.0,         # 5D低吸独立评分门槛（L2 净大单加分已并入 score_now）
+    'ma5_buy_ratio': 0.10,             # 5D低吸单笔仓位=总资产10%
     'cold_secs': 60, 'daily_max_buy': 1,
     # 实盘单门控（v0.13）：仅放行「预期买入」路径；其余买入仍受 DO_ORDER 门控
     'EXPECT_ORDER': False,          # True = 预期买入发真实 order()（模拟盘小额测试）
@@ -281,6 +287,13 @@ BLS = {
     'lb_senti_rotate_high_pen': -0.6,     # 切低位：高标参与排序减分
     'lb_senti_ice_low_bonus': 0.3,        # 冰点观望：仅低位首板试错加分（其余不参与）
     'lb_senti_high_bonus': 0.6,           # 高位延续：中高位/高标参与排序加分
+    # v0.71 预期买入方向裁判：只做硬跳过和排序奖励，不改技术确认与仓位比例
+    'exp_direction_enabled': True,        # 预期方向裁判总开关
+    'exp_direction_attack_bonus': 0.8,    # attack_high/attack_low 排序加分
+    'exp_direction_avoid_hard_skip': True,  # avoid 直接不参与
+    'exp_direction_hot_front_only': True,   # 发酵高潮只允许最强前排
+    'exp_direction_rotate_leader_exception': True,  # rotate_low 允许原题材唯一存活龙头
+    'exp_direction_log': True,             # 输出方向裁决日志
 }
 # 打分加减分配置（scoring.bonus.* / scoring.penalty.* 默认）
 BONUS = {
@@ -546,6 +559,8 @@ def initialize(context):
     g.daily = {'bought': [], 'sold': []}
     g.state_day = None   # 持久化的“交易日”戳（跨重启每日买入计数恢复）
     g.spot = {}; g.last_ma5 = {}
+    g.ma5_touch_day = None; g.ma5_touched = set()   # v0.69 当日首次触 MA5 去重
+    g.ma5_lifecycle_day = None; g.ma5_lows = {}     # v0.70 当日生命周期最低两价
     _get_ds()  # DataHub singleton warmup (kept out of g)
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
@@ -669,9 +684,7 @@ def before_trading_start(context, data):
         except Exception:
             pass
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
-        df = _hist_1d(sec)
-        if df is not None and len(df) >= 6:
-            g.last_ma5[sec] = float(df['close'].iloc[-6:-1].mean())
+        _ma5_base4(sec)
     log.info('before_trading_start done positions=%s' % list(get_positions()))
 
 
@@ -682,6 +695,8 @@ def _maybe_roll_day():
     if getattr(g, 'exp_day', None) == day:
         return False
     g.exp_day = day
+    g.ma5_touch_day = day; g.ma5_touched = set()
+    g.ma5_lifecycle_day = day; g.ma5_lows = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     return True
 
@@ -744,16 +759,100 @@ def _hist_1d(sec):
         return None
 
 
-def _ensure_ma5(sec):
-    # 惰性算 MA5（watch/盘中入池才需要；1d 历史缓存，60s 内复用）
-    if sec in g.last_ma5:
-        return g.last_ma5[sec]
+def _date_key(v):
+    # 日线索引兼容 Timestamp/date/'YYYY-MM-DD'/'YYYYMMDD'
+    try:
+        fn = getattr(v, 'date', None)
+        if callable(fn):
+            v = fn()
+        s = str(v)
+        if len(s) >= 10 and s[4:5] == '-' and s[7:8] == '-':
+            return s[:10]
+        if len(s) >= 8 and s[:8].isdigit():
+            return '%s-%s-%s' % (s[:4], s[4:6], s[6:8])
+    except Exception:
+        pass
+    return ''
+
+
+def _ma5_base4(sec):
+    # v0.69 盘中 MA5=最近4个已完成日收盘均值×4/5 + 当前价/5。
+    # get_price 日线通常不含当日；若数据源把未完成日线放在末行，则按索引日期剔除。
+    day = str(get_trading_day())
+    cache = getattr(g, 'last_ma5', None)
+    if not isinstance(cache, dict):
+        cache = {}; g.last_ma5 = cache
+    rec = cache.get(sec)
+    if isinstance(rec, dict) and rec.get('day') == day:
+        return float(rec.get('base4') or 0.0)
     df = _hist_1d(sec)
-    if df is not None and len(df) >= 6:
-        v = float(df['close'].iloc[-6:-1].mean())
-        g.last_ma5[sec] = v
-        return v
-    return None
+    if df is None:
+        return None
+    try:
+        closes = [float(x) for x in list(df['close'])]
+    except Exception:
+        return None
+    if len(closes) < 5:
+        return None
+    last_is_today = False
+    try:
+        last_is_today = (_date_key(df.index[-1]) == day)
+    except Exception:
+        pass
+    vals = closes[-5:-1] if last_is_today else closes[-4:]
+    if len(vals) < 4 or any(v <= 0 for v in vals):
+        return None
+    base4 = sum(vals) / 4.0
+    cache[sec] = {'day': day, 'base4': base4}
+    return base4
+
+
+def _ensure_ma5(sec):
+    # 动态 MA5 必须含当前价；避免盘前静态值在盘中一路不变。
+    base4 = _ma5_base4(sec)
+    px = last_px(sec)
+    if not base4 or not px or px <= 0:
+        return None
+    return (base4 * 4.0 + float(px)) / 5.0
+
+
+def _ma5_at_price(sec, px):
+    # 给定价格作为今日临时收盘价，计算该时点动态 MA5。
+    base4 = _ma5_base4(sec)
+    try:
+        px = float(px)
+    except Exception:
+        return None
+    if not base4 or px <= 0:
+        return None
+    return (float(base4) * 4.0 + px) / 5.0
+
+
+def _ma5_second_low(sec, px):
+    # v0.70 记录当日生命周期内最低两个价格；次低价=两者中较高者。
+    # 至少两个样本后才返回；状态按交易日重置并随同日重启恢复。
+    cache = getattr(g, 'ma5_lows', None)
+    if not isinstance(cache, dict):
+        cache = {}; g.ma5_lows = cache
+    try:
+        px = float(px)
+    except Exception:
+        return None
+    if px <= 0:
+        return None
+    vals = []
+    for v in (cache.get(sec) or []):
+        try:
+            v = float(v)
+            if v > 0:
+                vals.append(v)
+        except Exception:
+            pass
+    vals.append(px)
+    vals.sort()
+    vals = vals[:2]
+    cache[sec] = vals
+    return vals[1] if len(vals) >= 2 else None
 
 
 def refresh_spot(context):
@@ -1437,7 +1536,7 @@ def _unique_stand(sec):
 def _broken_now(sec):
     # v0.49 炸板中（break 未复位）——供打分扣涨停分
     try:
-        return bool((g.first_zt.get(sec) or {}).get('break'))
+        return bool(((g.first_zt or {}).get(sec) or {}).get('break'))
     except Exception:
         return False
 
@@ -2094,6 +2193,7 @@ def dump_scores(context):
     for sec in _pool() + list(get_positions()):
         try:
             px = last_px(sec); ma5 = _ensure_ma5(sec) or 0.0
+            ma5b4 = _ma5_base4(sec) or 0.0
             chg = _auction_change(sec)
             tags = ','.join(_tags(sec)) or '-'
             st = _board_strength(sec)
@@ -2101,8 +2201,8 @@ def dump_scores(context):
             if sc is None:
                 log.info('score %s bar=%s data_na -> skip' % (_sn(sec), _hhmm()))
                 continue
-            log.info('score %s bar=%s px=%.2f ma5=%.2f chg=%.1f%% board=%.1f tags=%s score=%.1f' % (
-                _sn(sec), _hhmm(), px if px else 0.0, ma5, chg, st, tags, sc))
+            log.info('score %s bar=%s px=%.2f ma5=%.2f ma5b4=%.2f chg=%.1f%% board=%.1f tags=%s score=%.1f' % (
+                _sn(sec), _hhmm(), px if px else 0.0, ma5, ma5b4, chg, st, tags, sc))
         except Exception as e:
             _warn('dump_scores fail %s: %r' % (_sn(sec), e))
 
@@ -3070,30 +3170,26 @@ def lb_senti_t100_freeze(context):
         'auction': dict(st.get('auction') or {}),
         'mid': dict(d),
     }
-    log.info('[lb-senti] t100 freeze phase=%s promo=%.1f%% break=%.1f%% red=%s low=%d new_dir=%d'
+    dir_n = {'attack_high': 0, 'attack_low': 0, 'neutral': 0, 'avoid': 0}
+    for _c, _en in (getattr(g, 'exp_file', {}) or {}).items():
+        if str((_en or {}).get('side') or '') != 'buy':
+            continue
+        _k = str(_exp_direction_eval(_c).get('kind') or 'neutral')
+        dir_n[_k if _k in dir_n else 'neutral'] += 1
+    st['t100']['direction'] = dict(dir_n)
+    log.info('[lb-senti] t100 freeze phase=%s promo=%.1f%% break=%.1f%% red=%s low=%d new_dir=%d dir_high=%d dir_low=%d dir_avoid=%d'
              % (st['t100']['phase'], float(d.get('promo') or 0.0) * 100.0,
                 float(d.get('break_rate') or 0.0) * 100.0,
                 ('%.2f' % d['red']) if d.get('red') is not None else '-',
-                int(d.get('low_assist') or 0), int(d.get('new_dir_n') or 0)))
+                int(d.get('low_assist') or 0), int(d.get('new_dir_n') or 0),
+                dir_n['attack_high'], dir_n['attack_low'], dir_n['avoid']))
     _save_state()
 
 
 def _lb_senti_direction_bonus(sec):
-    # 参与方向加权（docs/43）：切低位/高位分歧给低位新方向首板加分、中高位减分；冰点仅低位试错；高位延续给中高位加分
+    # v0.71：预期方向分统一由 _exp_direction_eval 计算，禁止与旧 phase 分数重复叠加。
     try:
-        ph = _lb_senti_phase().get('phase') or 'watch'
-        tier = _lb_senti_tier(sec)
-        if ph in ('high_diverg', 'rotate_low'):
-            if tier == 'low':
-                return float(BLS.get('lb_senti_rotate_low_bonus', 1.2))
-            if tier == 'high':
-                return float(BLS.get('lb_senti_rotate_high_pen', -0.6))
-            return float(BLS.get('lb_senti_rotate_mid_pen', -0.8))
-        if ph == 'ice_wait':
-            return float(BLS.get('lb_senti_ice_low_bonus', 0.3)) if tier == 'low' else 0.0
-        if ph == 'high_continue':
-            return float(BLS.get('lb_senti_high_bonus', 0.6)) if tier in ('mid', 'high') else 0.2
-        return 0.0
+        return float(_exp_direction_eval(sec).get('score') or 0.0)
     except Exception:
         return 0.0
 
@@ -3113,17 +3209,141 @@ def _lb_senti_participate_scale():
 
 
 def _lb_senti_buy_gate(sec):
-    # 参与方向闸门（docs/43）：高位分歧/切低位只放行低位首板与今日新方向；冰点观望仅放行低位试错；
-    # 高位延续/watch 不拦截。返回 (allow, note)。
+    # 参与方向闸门（docs/43 + v0.71）：高位分歧/冰点仅低位；切低位默认低位，
+    # 允许 T-1 原题材当前唯一存活龙头例外。返回 (allow, note)。
     try:
         ph = _lb_senti_phase().get('phase') or 'watch'
         if ph in ('high_diverg', 'rotate_low', 'ice_wait'):
             if _lb_senti_tier(sec) == 'low':
                 return (True, 'low_ok(%s)' % ph)
+            if (ph == 'rotate_low' and BLS.get('exp_direction_rotate_leader_exception', True)
+                    and _exp_original_theme_leader(sec)):
+                return (True, 'origin_unique_leader_ok(rotate_low)')
             return (False, 'mid_high_skip(%s)' % ph)
         return (True, 'normal(%s)' % ph)
     except Exception:
         return (True, 'normal')
+
+
+def _exp_original_theme_leader(sec):
+    # v0.71：仅识别 T-1 原题材中当前唯一存活、动态最高身位的中高位龙头。
+    try:
+        if _lb_senti_tier(sec) == 'low':
+            return ''
+        if not ((getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}):
+            return ''
+        dyn = _dyn_theme_status()
+        for name in _zt_themes_of(sec):
+            d = dyn.get(name) or {}
+            if d.get('leader') == sec and int(d.get('max_board_dyn') or 0) >= 2:
+                return name
+    except Exception:
+        pass
+    return ''
+
+
+def _exp_direction_eval(sec):
+    # v0.71 预期买入方向裁判：attack_high/attack_low 仅排序 +0.8；avoid 直接不参与。
+    # 技术三态 CX/CM/PM/CS 不在此函数内改变，仓位比例也不消费 direction score。
+    out = {
+        'kind': 'neutral', 'score': 0.0, 'hard_skip': False, 'size_mult': 1.0,
+        'theme': '', 'role': 'outside', 'stage': 'watch', 'phase': 'watch', 'reason': '',
+    }
+    if not BLS.get('exp_direction_enabled', True):
+        out['reason'] = 'disabled'
+        return out
+    try:
+        ph = _lb_senti_phase().get('phase') or 'watch'
+        tier = _lb_senti_tier(sec)
+        zt_rec = ((getattr(g, 'zt_lianban', {}) or {}).get(sec) or {})
+        static_leader = bool(zt_rec.get('unique_high'))
+        old_themes = _zt_themes_of(sec)
+        new_themes = _new_themes_of(sec)
+        dyn = _dyn_theme_status()
+        fm = _dyn_theme_ferment()
+        hot_rear = ''
+        old_leader = ''
+        old_front = ''
+        old_front_stage = ''
+        new_front = ''
+        new_front_stage = ''
+
+        for name in old_themes:
+            d = dyn.get(name) or {}
+            f = fm.get(name) or {}
+            if (d.get('leader') == sec or static_leader) and tier in ('mid', 'high'):
+                old_leader = old_leader or name
+            if f.get('confirmed') and f.get('front') == sec:
+                old_front = old_front or name
+                old_front_stage = str(f.get('stage') or 'confirmed')
+            elif (BLS.get('exp_direction_hot_front_only', True)
+                  and f.get('confirmed') and f.get('stage') == 'hot'):
+                hot_rear = hot_rear or name
+
+        for name in new_themes:
+            if name in old_themes:
+                continue
+            f = fm.get(name) or {}
+            if f.get('confirmed') and f.get('front') == sec:
+                new_front = new_front or name
+                new_front_stage = str(f.get('stage') or 'confirmed')
+            elif (BLS.get('exp_direction_hot_front_only', True)
+                  and f.get('confirmed') and f.get('stage') == 'hot'):
+                hot_rear = hot_rear or name
+
+        out['phase'] = ph
+        bonus = float(BLS.get('exp_direction_attack_bonus', 0.8) or 0.0)
+        if old_leader and ph == 'high_continue':
+            out.update(kind='attack_high', score=bonus, theme=old_leader, role='leader',
+                       stage=(fm.get(old_leader) or {}).get('stage') or 'watch',
+                       reason='origin_leader_high_continue')
+        elif old_leader and ph == 'rotate_low' and BLS.get('exp_direction_rotate_leader_exception', True):
+            out.update(kind='attack_high', score=bonus, theme=old_leader, role='leader',
+                       stage=(fm.get(old_leader) or {}).get('stage') or 'watch',
+                       reason='origin_leader_rotate_exception')
+        elif new_front:
+            out.update(kind='attack_low', score=bonus, theme=new_front, role='front',
+                       stage=new_front_stage, reason='new_theme_front')
+        elif old_front:
+            _kind = 'attack_low' if tier == 'low' else 'attack_high'
+            out.update(kind=_kind, score=bonus, theme=old_front, role='front',
+                       stage=old_front_stage, reason='theme_ferment_front')
+        elif hot_rear and BLS.get('exp_direction_hot_front_only', True):
+            out.update(kind='avoid', theme=hot_rear, role='rear', stage='hot',
+                       reason='hot_rear')
+        elif ph in ('rotate_low', 'high_diverg', 'ice_wait') and tier in ('mid', 'high'):
+            out.update(kind='avoid', role='follower', reason='mid_high_%s' % ph)
+        elif tier in ('mid', 'high'):
+            out['role'] = 'follower'
+
+        out['hard_skip'] = bool(out['kind'] == 'avoid'
+                                and BLS.get('exp_direction_avoid_hard_skip', True))
+        if out['kind'] == 'avoid':
+            out['score'] = 0.0
+        return out
+    except Exception as e:
+        out['reason'] = 'fallback:%r' % e
+        return out
+
+
+def _exp_direction_log(sec, ctx, action):
+    # 方向裁决日志：按 code/kind/reason 每日节流，避免 3s tick 刷屏。
+    if not BLS.get('exp_direction_log', True):
+        return
+    try:
+        st = _lb_senti_state()
+        key = 'expdir:%s:%s:%s:%s' % (sec, ctx.get('kind'), ctx.get('reason'), action)
+        if key in st.setdefault('gate_seen', {}):
+            return
+        st['gate_seen'][key] = time.time()
+        en = ((getattr(g, 'exp_file', {}) or {}).get(sec) or {})
+        src = str(en.get('_src') or 'provider')
+        log.info('[exp-dir] %s source=%s phase=%s kind=%s score=%.1f size_mult=1.0 role=%s stage=%s theme=%s action=%s reason=%s'
+                 % (_sn(sec), src, ctx.get('phase') or '-', ctx.get('kind') or 'neutral',
+                    float(ctx.get('score') or 0.0), ctx.get('role') or '-', ctx.get('stage') or '-',
+                    ctx.get('theme') or '-', action, ctx.get('reason') or '-'))
+    except Exception:
+        pass
 
 
 def _lb_gate_seen(sec, note):
@@ -3438,8 +3658,12 @@ def _exp_rt_status(code):
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
 
-def _attempt_expected_buy(context, code):
+def _attempt_expected_buy(context, code, direction=None):
     # 统一入口（tick/bar 共用）：超预期确认 -> 发单；确认 miss -> 放弃；否则等待
+    dctx = direction if isinstance(direction, dict) else _exp_direction_eval(code)
+    if dctx.get('hard_skip'):
+        _exp_direction_log(code, dctx, 'skip')
+        return None
     if _mid_board_avoid(code):
         log.info('[mid-avoid] %s 连板中位股规避(expected_buy)' % _sn(code)); return None
     _lbg, _lbg_note = _lb_senti_buy_gate(code)   # v0.65 连板盘中情绪参与方向闸门（切低位/冰点只放行低位试错）
@@ -3467,7 +3691,11 @@ def _attempt_expected_buy(context, code):
         log.info("[exp] %s miss=%s -> skip" % (_sn(code), reason))
         return True
     if st in (CX, CM):
-        if not place_expected_order(context, code, note="exp_rt %s %s" % (st, reason)):
+        _exp_direction_log(code, dctx, 'allow')
+        note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s' % (
+            st, reason, dctx.get('kind') or 'neutral', float(dctx.get('score') or 0.0),
+            dctx.get('reason') or '-')
+        if not place_expected_order(context, code, note=note):
             return None   # 发单失败 -> 下次重试，不置 fired
         if st == CX and _dyn_unq_confirmed(code):
             log.info('[dyn-unq] %s CX 动态唯一龙头确认 -> 预期买入' % _sn(code))
@@ -3747,16 +3975,17 @@ def _try_dyn_unq(context):
     _try_dyn_sweep(context, st)                    # D 竞价唯一扫板
 
 
-def _pool_exp_priority(code):
-    # v0.27 涨停池观察候选排序：分最高优先，其次「最主动」（最早触板/最快拉升）
+def _pool_exp_priority(code, direction=None):
+    # v0.71 预期候选统一排序：评分 + 动态唯一 + 题材身位 + 方向裁决，其次最早触板。
     try:
         sc = float(score_now(code) or 0.0)
     except Exception:
         sc = 0.0
+    dctx = direction if isinstance(direction, dict) else _exp_direction_eval(code)
     if _dyn_unq_confirmed(code):
         sc += float(BLS.get('dyn_unq_sort_bonus', 2.0))   # v0.38 动态唯一龙头确认排序加分
     sc += _zt_theme_sort_bonus(code)                      # v0.55 题材强度/身位排序加分
-    sc += _lb_senti_direction_bonus(code) * _lb_senti_participate_scale()   # v0.65 连板盘中情绪方向加权（10:00 后降频缩放不归零）
+    sc += float(dctx.get('score') or 0.0) * _lb_senti_participate_scale()   # v0.71 方向奖励，10:00 后缩放不归零
     act = _first_zt_ms(code) or 1e18   # v0.37 毫秒归一（逐笔 ms 优先, 帧 ts 归一）
     return (-sc, act)
 
@@ -3766,15 +3995,19 @@ def _try_expected_buys(context):
         return                       # 预期买入窗口：10:00 前（其它类）
     if not g.exp_file or len(g.daily["bought"]) >= BLS["daily_max_buy"]:
         return
-    provider = []
-    pool = []
-    for code, en in g.exp_file.items():
+    cands = []
+    for idx, (code, en) in enumerate(g.exp_file.items()):
         if str(en.get("side") or "") != "buy":
             continue
-        (pool if str(en.get("_src") or "") in ("zt_pool", "selfwatch") else provider).append(code)
-    pool.sort(key=_pool_exp_priority)   # v0.27 涨停池合成：分最高/最主动优先
-    for code in provider + pool:
-        _attempt_expected_buy(context, code)
+        dctx = _exp_direction_eval(code)
+        if dctx.get('hard_skip'):
+            _exp_direction_log(code, dctx, 'skip')
+            continue
+        cands.append((code, dctx, _pool_exp_priority(code, direction=dctx), idx))
+    # v0.71 所有预期来源统一参与方向/评分排序；来源不再天然前置，idx 仅作稳定平局条件。
+    cands.sort(key=lambda x: (x[2][0], x[2][1], x[3]))
+    for code, dctx, _prio, _idx in cands:
+        _attempt_expected_buy(context, code, direction=dctx)
         if len(g.daily["bought"]) >= BLS["daily_max_buy"]:
             return
 
@@ -3806,34 +4039,66 @@ def try_ma5_buy(context):
     if _min_age() > int(BLS.get('ma5_buy_window_min', 240)):
         return                       # 5日低吸窗口：10:30 前
     positions = context.portfolio.positions
+    day = str(get_trading_day())
+    if getattr(g, 'ma5_touch_day', None) != day:
+        g.ma5_touch_day = day; g.ma5_touched = set()
+    if not isinstance(getattr(g, 'ma5_touched', None), set):
+        g.ma5_touched = set(getattr(g, 'ma5_touched', None) or [])
+    if getattr(g, 'ma5_lifecycle_day', None) != day:
+        g.ma5_lifecycle_day = day; g.ma5_lows = {}
+    if not isinstance(getattr(g, 'ma5_lows', None), dict):
+        g.ma5_lows = {}
     for sec in _pool():
         if sec in positions:
             continue
         tags = _tags(sec)
         if BLS.get('ma5_core_only', True) and 'CORE' not in tags:
             continue   # 低吸仅对核心(CORE)标签股（对齐 AXquant）
+        px = last_px(sec)
+        if not px or px <= 0:
+            continue
+        second_low = _ma5_second_low(sec, px)
         if _mid_board_avoid(sec):
             log.info('[mid-avoid] %s 连板中位股规避(ma5)' % _sn(sec)); continue
-        if BLS.get('ma5_require_bs', True) and 'BS' not in tags:
-            continue   # 对齐 AXquant CORE+BS：低吸还要 100日新高标签
-        if BLS.get('ma5_first_5d', True) and not _ma5_first_5d(sec):
+        if BLS.get('ma5_require_bs', False) and 'BS' not in tags:
+            continue   # v0.69 默认不要求 BS；保留开关兼容旧口径
+        if BLS.get('ma5_first_5d', False) and not _ma5_first_5d(sec):
             continue   # 对齐 AXquant：只有 5日内首次回踩 MA5 才触发，防重复低吸
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs'] or not trade_open(sec):
             continue
-        px = last_px(sec); ma5 = _ensure_ma5(sec)
-        if not px or px <= 0 or not ma5:
+        ma5 = _ensure_ma5(sec)
+        if not ma5:
             continue
-        if px <= ma5 * BLS['ma5_loose_high']:
+        if BLS.get('ma5_second_low_enabled', True):
+            ref_px = second_low
+            ma5_ref = _ma5_at_price(sec, ref_px) if ref_px else None
+        else:
+            ref_px = px
+            ma5_ref = ma5
+        if not ref_px or not ma5_ref:
+            continue
+        band = abs(float(ref_px) - float(ma5_ref)) / float(ma5_ref)
+        if band <= float(BLS.get('ma5_touch_band', 0.02)) + 1e-12:
             score = score_now(sec)
             if not score:
                 continue   # v0.68 评分未就绪 -> 不评估买入
-            if score >= BLS['buy_score_min'] and _buy_red_ok(sec):
-                if place_order(context, sec, 'buy', note='ma_pullback px=%.2f ma5=%.2f score=%.1f red=%.2f tags=%s' % (px, ma5, score, _red_ratio(sec), ','.join(_tags(sec))), mode='pullback'):
+            if sec in g.ma5_touched:
+                continue   # v0.69 当日首次触线后不再重复评估
+            if score >= float(BLS.get('ma5_buy_score_min', 50.0)) and _buy_red_ok(sec):
+                note = ('ma_pullback px=%.2f low2=%.2f ref=%.2f ma5=%.2f ma5ref=%.2f '
+                        'band=%.2f%% ma5b4=%.2f score=%.1f l2=%.2f%% red=%.2f tags=%s') % (
+                    px, ref_px, ref_px, ma5, ma5_ref, band * 100.0, (_ma5_base4(sec) or 0.0),
+                    score, _l2_big_ratio(sec) * 100.0, _red_ratio(sec), ','.join(_tags(sec)))
+                if place_order(context, sec, 'buy', note=note, mode='pullback',
+                               ratio=float(BLS.get('ma5_buy_ratio', 0.10))):
+                    g.ma5_touched.add(sec)
                     g.daily['bought'].append(sec); g.buy_log[sec] = now
                     _save_state()
                     if len(g.daily['bought']) >= BLS['daily_max_buy']:
                         break
+            else:
+                g.ma5_touched.add(sec)   # 首次进入MA5带但评分/风控不达标：当日不再追补
 
 
 def try_core_buy(context):
@@ -3965,7 +4230,7 @@ def _board_top_gainer(sec):
 def _first_zt_ms(sec):
     # 首触时刻归一（YYYYMMDDHHMMSSmmm 毫秒整数, 与逐笔 business_time / 快照 hsTimeStamp 同格式）：
     # 逐笔/快照 ms 优先；缺省把帧 ts（epoch 秒）归一到同格式, 避免 17 位与 13 位 epoch 混比错序。
-    f = g.first_zt.get(sec) or {}
+    f = (g.first_zt or {}).get(sec) or {}
     ms = f.get('ms')
     if ms:
         try:
@@ -4103,7 +4368,7 @@ def _try_reboard_buy(context):
     if not limit:
         log.info('[reboard] %s sealed -> skip board queue' % _sn(sec)); return
     if place_order(context, sec, 'buy', note='reboard_buy break_cnt=%d l2_big=%.2f%% px=%.2f limit=%.2f' % (
-        int((g.first_zt.get(sec) or {}).get('break_cnt') or 0), big_r * 100.0 if big_r >= 0 else 0.0, last_px(sec) or 0.0, limit), mode='board',
+        int(((g.first_zt or {}).get(sec) or {}).get('break_cnt') or 0), big_r * 100.0 if big_r >= 0 else 0.0, last_px(sec) or 0.0, limit), mode='board',
         ratio=BLS.get('board_buy_budget_ratio', 0.20)):
         g.daily['bought'].append(sec); g.buy_log[sec] = time.time()
         g.reboard_fired = True
@@ -5135,7 +5400,7 @@ def tick_sell_manager(context):
             continue
         if isinstance(getattr(g, 'sold_log', None), dict) and (now - g.sold_log.get(sec, 0)) < sl:
             continue
-        ft = g.first_zt.get(sec) or {}
+        ft = (g.first_zt or {}).get(sec) or {}
         # \u70b8\u677f\u5356\u51fa\uff1a\u6da8\u505c\u9996\u89e6\u540e\u6389\u51fa\u6da8\u505c\u4ef7\uff08break \u9996\u89e6\u53d1 -> \u5356\uff0c\u73b0\u4ef7\u9650\u4ef7\u9632\u8fc7\u5ea6\u6740\u4ef7\uff09
         if BLS.get('break_sell_enabled', True) and ft.get('break'):
             _bc = int(ft.get('break_cnt') or 0)
@@ -6681,6 +6946,10 @@ def load_state():
             g.pending = {k: dict(v) for k, v in (st.get('pending') or {}).items()}   # v0.64 同日重启恢复在途委托
             g.buy_commit = dict(st.get('buy_commit') or {})   # v0.64 同日重启恢复买入承诺
             g.lb_senti = dict(st.get('lb_senti') or {})   # v0.65 同日重启恢复连板盘中情绪动态
+            g.ma5_touch_day = st.get('ma5_touch_day')
+            g.ma5_touched = set(st.get('ma5_touched') or [])   # v0.69 同日重启恢复当日首触去重
+            g.ma5_lifecycle_day = st.get('ma5_lifecycle_day')
+            g.ma5_lows = {k: list(v or [])[:2] for k, v in (st.get('ma5_lows') or {}).items()}
         else:
             g.auction_c = getattr(g, 'auction_c', None) or {}
             g.first_zt = getattr(g, 'first_zt', None) or {}
@@ -6692,11 +6961,14 @@ def load_state():
             g.l2_big = {}; g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}
             g.buy_commit = {}     # 跨日清空在途买单承诺
             g.lb_senti = {}       # v0.65 跨日清空连板盘中情绪动态
+            g.ma5_touch_day = None; g.ma5_touched = set()   # v0.69 跨日清空低吸首触去重
+            g.ma5_lifecycle_day = None; g.ma5_lows = {}     # v0.70 跨日清空次低价状态
             g.exp_day = None   # v0.53 跨日：首帧日切正常触发
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = {'bought': [], 'sold': []}; g.state_day = None
-        g.exp_fired = set()
+        g.exp_fired = set(); g.ma5_touch_day = None; g.ma5_touched = set()
+        g.ma5_lifecycle_day = None; g.ma5_lows = {}
 
 
 def _save_state():
@@ -6728,7 +7000,11 @@ def _save_state():
                          'p7c_sold': sorted(getattr(g, 'p7c_sold', None) or []),
                          'pending': {k: dict(v) for k, v in (getattr(g, 'pending', None) or {}).items()},   # v0.64 在途委托持久化
                          'buy_commit': dict(getattr(g, 'buy_commit', None) or {}),
-                         'lb_senti': dict(getattr(g, 'lb_senti', None) or {})}, f, protocol=2)   # v0.65 连板盘中情绪动态持久化
+                         'lb_senti': dict(getattr(g, 'lb_senti', None) or {}),
+                         'ma5_touch_day': getattr(g, 'ma5_touch_day', None),
+                         'ma5_touched': sorted(getattr(g, 'ma5_touched', None) or []),
+                         'ma5_lifecycle_day': getattr(g, 'ma5_lifecycle_day', None),
+                         'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {})}, f, protocol=2)
     except Exception as e:
         _warn('save_state fail %r' % e)
 

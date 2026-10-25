@@ -514,30 +514,64 @@ ok('T26c 既有交易日文件名仍做兑底', any('expectation_2026-10-16.csv'
 _sw = ns['_selfwatch_paths']()
 ok('T26 selfwatch 候选含 upload_file/', any('upload_file/selfwatch.csv' in x for x in _sw))
 
-# T26d 5日线低吸（ma_pullback）对齐 AXquant：CORE+BS 双标签 + 5日内首次回踩 MA5
-ns = fresh(); ns['g'].watch = ['600001.XSHG', '600002.XSHG', '600003.XSHG']; ns['g'].pool_static = []
+# T26d v0.70 5D低吸：CORE + 生命周期次低价进入MA5±2% + score>=50 -> 10%
+ns = fresh(); ns['g'].watch = ['600001.XSHG', '600002.XSHG', '600003.XSHG', '600004.XSHG']; ns['g'].pool_static = []
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 0, 0)   # 低吸窗口内（10:30 前）
-ns['_tags'] = lambda sec: {'600001.XSHG': ['CORE', 'BS'], '600002.XSHG': [], '600003.XSHG': ['CORE']}.get(sec, [])
-ns['_ensure_ma5'] = lambda sec: 10.0; ns['last_px'] = lambda sec: 9.5
-ns['score_now'] = lambda sec: 60.0; ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
-ns['BLS']['ma5_core_only'] = True; ns['BLS']['ma5_require_bs'] = True; ns['BLS']['ma5_first_5d'] = True
+ns['_tags'] = lambda sec: {'600001.XSHG': ['CORE'], '600002.XSHG': [], '600003.XSHG': ['CORE'], '600004.XSHG': ['CORE']}.get(sec, [])
+ns['_ensure_ma5'] = lambda sec: 10.0
+ns['_ma5_at_price'] = lambda sec, px: 10.0
+ns['_ma5_base4'] = lambda sec: 10.0
+prices = {'600001.XSHG': 9.7, '600002.XSHG': 9.7, '600003.XSHG': 9.7, '600004.XSHG': 9.7}
+ns['last_px'] = lambda sec: prices.get(sec)
+ns['score_now'] = lambda sec: {'600001.XSHG': 50.0, '600002.XSHG': 60.0, '600003.XSHG': 60.0, '600004.XSHG': 49.0}.get(sec, 0.0)
+ns['_l2_big_ratio'] = lambda sec: 0.12 if sec == '600001.XSHG' else -1.0
+ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
+ns['BLS']['ma5_core_only'] = True; ns['BLS']['ma5_require_bs'] = False; ns['BLS']['ma5_first_5d'] = True
+ns['BLS']['ma5_second_low_enabled'] = True; ns['BLS']['ma5_touch_band'] = 0.02
+ns['BLS']['ma5_buy_score_min'] = 50.0; ns['BLS']['ma5_buy_ratio'] = 0.10
 ns['BLS']['daily_max_buy'] = 10
 ns['_ma5_first_5d'] = lambda sec: True
 pcalls = []
-ns['place_order'] = lambda c, sec, side=None, note='', **k: pcalls.append((sec, note)) or True
+ns['place_order'] = lambda c, sec, side=None, note='', **k: pcalls.append((sec, note, k.get('ratio'))) or True
 ns['_save_state'] = lambda *a, **k: None
 ns['try_ma5_buy'](ns['_CTX'])
+ok('T26d 只有一个样本不触发(次低价未形成)', pcalls == [])
+prices['600001.XSHG'] = 10.0; prices['600004.XSHG'] = 10.0
+ns['try_ma5_buy'](ns['_CTX'])
 ok('T26d 非CORE(杂毛)低吸被拦截', all(c[0] != '600002.XSHG' for c in pcalls))
-ok('T26d 缺BS(非100日新高)低吸被拦截', all(c[0] != '600003.XSHG' for c in pcalls))
-ok('T26d CORE+BS+首回踩 才触发低吸', len(pcalls) == 1 and pcalls[0][0] == '600001.XSHG' and 'ma_pullback' in pcalls[0][1])
+ok('T26d 无BS但CORE可低吸(BS硬门移除)', any(c[0] == '600001.XSHG' for c in pcalls))
+ok('T26d 次低价9.7偏离MA5 3% -> 拦截', all(c[0] != '600003.XSHG' for c in pcalls))
+ok('T26d 评分49低于低吸门50拦截', all(c[0] != '600004.XSHG' for c in pcalls))
+ok('T26d CORE+次低价进入MA5±2%+score50 -> 10%低吸',
+   len(pcalls) == 1 and pcalls[0][0] == '600001.XSHG' and 'ma_pullback' in pcalls[0][1] and abs(pcalls[0][2] - 0.10) < 1e-9)
+ok('T26d 低吸日志含次低价/MA5带/四日基准/L2占比',
+   'low2=10.00' in pcalls[0][1] and 'band=0.00%' in pcalls[0][1] and
+   'ma5b4=' in pcalls[0][1] and 'l2=12.00%' in pcalls[0][1])
+
+# T26d2 次低价恰好落在MA5±2%边界仍触发
+ns = fresh(); ns['g'].watch = ['600001.XSHG']; ns['g'].pool_static = []
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 0, 0)
+ns['_tags'] = lambda sec: ['CORE']; ns['_ma5_first_5d'] = lambda sec: True
+ns['_ensure_ma5'] = lambda sec: 10.0; ns['_ma5_at_price'] = lambda sec, px: 10.0
+ns['_ma5_base4'] = lambda sec: 10.0; ns['_l2_big_ratio'] = lambda sec: -1.0
+ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
+ns['score_now'] = lambda sec: 50.0
+ns['BLS']['ma5_second_low_enabled'] = True; ns['BLS']['ma5_touch_band'] = 0.02
+ns['BLS']['ma5_buy_score_min'] = 50.0; ns['BLS']['daily_max_buy'] = 10
+prices = [9.7, 9.8]; ns['last_px'] = lambda sec: prices.pop(0)
+pcalls = []; ns['place_order'] = lambda c, sec, side=None, note='', **k: pcalls.append(sec) or True
+ns['_save_state'] = lambda *a, **k: None
+ns['try_ma5_buy'](ns['_CTX']); ns['try_ma5_buy'](ns['_CTX'])
+ok('T26d2 次低价边界-2.00%触发', pcalls == ['600001.XSHG'])
 
 # T26e 非5日内首次回踩(重复低吸)被拦截
 ns = fresh(); ns['g'].watch = ['600001.XSHG']; ns['g'].pool_static = []
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 0, 0)   # 低吸窗口内（10:30 前）
-ns['_tags'] = lambda sec: ['CORE', 'BS']
-ns['_ensure_ma5'] = lambda sec: 10.0; ns['last_px'] = lambda sec: 9.5
+ns['_tags'] = lambda sec: ['CORE']
+ns['_ensure_ma5'] = lambda sec: 10.0; ns['_ma5_at_price'] = lambda sec, px: 10.0
+ns['last_px'] = lambda sec: 9.8
 ns['score_now'] = lambda sec: 60.0; ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
-ns['BLS']['ma5_core_only'] = True; ns['BLS']['ma5_require_bs'] = True; ns['BLS']['ma5_first_5d'] = True
+ns['BLS']['ma5_core_only'] = True; ns['BLS']['ma5_require_bs'] = False; ns['BLS']['ma5_first_5d'] = True
 ns['BLS']['daily_max_buy'] = 10
 ns['_ma5_first_5d'] = lambda sec: False
 pcalls = []
@@ -545,6 +579,37 @@ ns['place_order'] = lambda c, sec, side=None, note='', **k: pcalls.append(sec) o
 ns['_save_state'] = lambda *a, **k: None
 ns['try_ma5_buy'](ns['_CTX'])
 ok('T26e 非5日内首次回踩被拦截', pcalls == [])
+
+# T26f v0.70 次低价首次进入MA5带后不达标，当日不再追补；次日重新解锁
+ns = fresh(); ns['g'].watch = ['600001.XSHG']; ns['g'].pool_static = []
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 0, 0)
+ns['_tags'] = lambda sec: ['CORE']
+ns['_ma5_first_5d'] = lambda sec: False
+ns['_ensure_ma5'] = lambda sec: 10.0; ns['_ma5_at_price'] = lambda sec, px: 10.0
+ns['_ma5_base4'] = lambda sec: 10.0
+prices = {'px': 9.7}; ns['last_px'] = lambda sec: prices['px']
+ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
+ns['_l2_big_ratio'] = lambda sec: -1.0
+ns['BLS']['ma5_core_only'] = True; ns['BLS']['ma5_require_bs'] = False; ns['BLS']['ma5_first_5d'] = False
+ns['BLS']['ma5_second_low_enabled'] = True; ns['BLS']['ma5_touch_band'] = 0.02
+ns['BLS']['ma5_buy_score_min'] = 50.0; ns['BLS']['daily_max_buy'] = 10
+pcalls = []
+ns['place_order'] = lambda c, sec, side=None, note='', **k: pcalls.append(sec) or True
+ns['_save_state'] = lambda *a, **k: None
+ns['score_now'] = lambda sec: 49.0
+ns['try_ma5_buy'](ns['_CTX'])
+ok('T26f 次低价9.7未进入MA5带 -> 不消耗首触', pcalls == [] and not ns['g'].ma5_touched)
+prices['px'] = 10.0
+ns['try_ma5_buy'](ns['_CTX'])
+ns['score_now'] = lambda sec: 60.0
+ns['try_ma5_buy'](ns['_CTX'])
+ok('T26f 次低价进入MA5带score49 -> 当日后补不买', pcalls == [] and '600001.XSHG' in ns['g'].ma5_touched)
+ns['get_trading_day'] = lambda: datetime.date(2026, 10, 17)
+prices['px'] = 9.7
+ns['try_ma5_buy'](ns['_CTX'])
+prices['px'] = 10.0
+ns['try_ma5_buy'](ns['_CTX'])
+ok('T26f 次日首触状态重置并触发', pcalls == ['600001.XSHG'])
 
 # T27 持仓来源与多字段：get_positions()(amount/enable_amount/cost_basis) + 柜台式(current_amount) 兜底
 ns = fresh()
@@ -588,7 +653,7 @@ ns['g'].spot['600825.XSHG']['last_px'] = 11.0
 ok('T29 _limitup_days 权威11+今日续板=12', ns['_limitup_days']('600825.XSHG') == 12)
 
 
-# --- T30 ma5 = 最近5个已完日收盘均值(而非全历史), 修复 docs/24 ①---
+# --- T30 v0.69 动态 MA5 = 最近4个已完成日收盘 + 当前价 ---
 class _Mean:
     def __init__(self, v): self._v = v
     def mean(self): return sum(self._v) / len(self._v)
@@ -599,8 +664,14 @@ class _Col:
     def __init__(self, v): self._iloc = _Iloc(v); self._v = v
     @property
     def iloc(self): return self._iloc
+    def __iter__(self): return iter(self._v)
+    def __len__(self): return len(self._v)
+    def __getitem__(self, i):
+        return _Mean(self._v[i]) if isinstance(i, slice) else self._v[i]
 class _FakeDF:
-    def __init__(self, closes): self._close = _Col(closes); self._n = len(closes)
+    def __init__(self, closes, index=None):
+        self._close = _Col(closes); self._n = len(closes)
+        self.index = index if index is not None else []
     def __getitem__(self, k): return self._close if k == 'close' else None
     @property
     def close(self): return self._close
@@ -608,9 +679,31 @@ class _FakeDF:
 
 ns = fresh()
 ns['g'].last_ma5 = {}
-ns['_hist_1d'] = lambda sec: _FakeDF([1,2,3,4,5,6,7,8,9,10])   # 今天=10, 最近5完日=[5,6,7,8,9]
-ok('T30 ma5=最近5日均(7.0) 非全历史(5.0)', abs(ns['_ensure_ma5']('600001.XSHG') - 7.0) < 1e-9)
-ok('T30 ma5 缓存命中', abs(ns['_ensure_ma5']('600001.XSHG') - 7.0) < 1e-9)
+ns['_hist_1d'] = lambda sec: _FakeDF(
+    [1,2,3,4,5,6,7,8,9,10],
+    index=[datetime.date(2026,10,1) + datetime.timedelta(days=i) for i in range(9)] + [datetime.date(2026,10,15)])
+ns['last_px'] = lambda sec: 11.0
+ok('T30 get_price不含今日 -> 近4完日+现价', abs(ns['_ensure_ma5']('600001.XSHG') - 9.0) < 1e-9)
+ok('T30 base4缓存命中', abs(ns['_ma5_base4']('600001.XSHG') - 8.5) < 1e-9)
+ns['last_px'] = lambda sec: 16.0
+ok('T30 同帧价格变化 -> 动态MA5实时变化', abs(ns['_ensure_ma5']('600001.XSHG') - 10.0) < 1e-9)
+
+ns = fresh()
+ns['g'].last_ma5 = {}
+ns['_hist_1d'] = lambda sec: _FakeDF(
+    [1,2,3,4,5,6,7,8,9,10],
+    index=[datetime.date(2026,10,7) + datetime.timedelta(days=i) for i in range(9)] + [datetime.date(2026,10,16)])
+ns['last_px'] = lambda sec: 10.0
+ok('T30 末日为今日时剔除未完成日线', abs(ns['_ensure_ma5']('600001.XSHG') - 8.0) < 1e-9)
+
+ns = fresh()
+ns['g'].last_ma5 = {}
+ns['_hist_1d'] = lambda sec: _FakeDF(
+    [9.91,10.90,11.99,13.19,14.51],
+    index=[datetime.date(2026,10,16),datetime.date(2026,10,19),datetime.date(2026,10,20),
+           datetime.date(2026,10,21),datetime.date(2026,10,22)])
+ns['last_px'] = lambda sec: 15.96
+ok('T30 603278现价15.96 -> MA5=13.31', abs(ns['_ensure_ma5']('603278.XSHG') - 13.31) < 1e-9)
 
 # --- T31 跨重启持久化 first_zt / auction_c (修复 docs/24 ②) ---
 ns = fresh()
@@ -1217,15 +1310,18 @@ ok('T55 板块前三 -> 首板放行', out == ['600001.XSHG'])
 # --- T56 生命周期窗口（v0.24：首板9:40前 / 低吸13:30前 / 其它10:00前） ---
 ns = fresh(); ns['g'].watch = ['600001.XSHG']; ns['g'].pool_static = []
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 31, 0)
-ns['_tags'] = lambda sec: ['CORE', 'BS']; ns['_ensure_ma5'] = lambda sec: 10.0; ns['last_px'] = lambda sec: 9.5
+ns['_tags'] = lambda sec: ['CORE']; ns['_ensure_ma5'] = lambda sec: 10.0
+ns['_ma5_at_price'] = lambda sec, px: 10.0; ns['last_px'] = lambda sec: 9.8
 ns['score_now'] = lambda sec: 60.0; ns['_red_ratio'] = lambda sec: 0.7; ns['trade_open'] = lambda sec: True
-ns['_ma5_first_5d'] = lambda sec: True
+ns['_ma5_first_5d'] = lambda sec: True; ns['BLS']['ma5_second_low_enabled'] = True
+ns['BLS']['ma5_touch_band'] = 0.02
 out = []
 ns['place_order'] = lambda c, sec, side=None, note='', **k: out.append(sec) or True
 ns['_save_state'] = lambda *a, **k: None
 ns['try_ma5_buy'](ns['_CTX'])
 ok('T56 10:31 后低吸拦截', out == [])
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 0, 0)
+ns['try_ma5_buy'](ns['_CTX'])
 ns['try_ma5_buy'](ns['_CTX'])
 ok('T56 10:00 低吸放行', out == ['600001.XSHG'])
 
@@ -1242,7 +1338,7 @@ ok('T56 10:01 后核心票拦截', out == [])
 ns = fresh(); ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 1, 0)
 ns['g'].exp_file = {'600001.XSHG': {'side': 'buy'}}
 calls = []
-ns['_attempt_expected_buy'] = lambda c, code: calls.append(code)
+ns['_attempt_expected_buy'] = lambda c, code, direction=None: calls.append(code)
 ns['_try_expected_buys'](ns['_CTX'])
 ok('T56 10:01 后预期买入拦截', calls == [])
 ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 31, 0)
@@ -1903,7 +1999,7 @@ n['g'].watch = ['600072.XSHG']; n['g'].pool_static = []
 n['g'].now_dt = datetime.datetime(2026,10,16,10,0,0)
 n['g'].exp_file['600072.XSHG'] = {'side':'buy','role_detail':'mid_consecutive_limit_up'}
 n['g'].zt_lianban = {'600072.XSHG': {'board_cnt': 3}}
-n['_tags'] = lambda sec: ['CORE','BS']
+n['_tags'] = lambda sec: ['CORE']
 n['_ma5_first_5d'] = lambda sec: True
 n['last_px'] = lambda sec: 10.0
 n['_ensure_ma5'] = lambda sec: 10.5
@@ -1912,7 +2008,7 @@ n['score_now'] = lambda sec: 60.0
 n['trade_open'] = lambda sec: True
 n['BLS']['daily_max_buy'] = 10
 n['BLS']['ma5_core_only'] = True
-n['BLS']['ma5_require_bs'] = True
+n['BLS']['ma5_require_bs'] = False
 n['BLS']['ma5_first_5d'] = True
 n['_save_state'] = lambda *a, **k: None
 pc = []
@@ -2895,9 +2991,15 @@ ok('T92o 切低位状态机', _d2.get('phase') == 'rotate_low'
 ok('T92o 状态机滞回', (_d1.get('phase') == 'watch' and _d2.get('phase') == 'rotate_low'))
 ok('T92o 参与闸门切低位', ns['_lb_senti_buy_gate']('600101.XSHG') == (True, 'low_ok(rotate_low)')
    and ns['_lb_senti_buy_gate']('603278.XSHG') == (False, 'mid_high_skip(rotate_low)'))
-ok('T92o 方向加权', ns['_lb_senti_direction_bonus']('600101.XSHG') > 0
-   and ns['_lb_senti_direction_bonus']('603278.XSHG') < 0
-   and ns['_lb_senti_direction_bonus']('603100.XSHG') < 0)
+_dir_lo = ns['_exp_direction_eval']('600101.XSHG')
+_dir_mid = ns['_exp_direction_eval']('603278.XSHG')
+_dir_hi = ns['_exp_direction_eval']('603100.XSHG')
+ok('T92o 方向加权', _dir_lo.get('kind') == 'neutral' and _dir_lo.get('hard_skip') is False
+   and _dir_mid.get('kind') == 'avoid' and _dir_mid.get('hard_skip') is True
+   and _dir_hi.get('kind') == 'attack_high' and abs(float(_dir_hi.get('score')) - 0.8) < 1e-9)
+ok('T92o 方向不重复计分', all(
+   abs(float(ns['_lb_senti_direction_bonus'](_c)) - float(ns['_exp_direction_eval'](_c).get('score') or 0.0)) < 1e-9
+   for _c in ('600101.XSHG', '603278.XSHG', '603100.XSHG')))
 
 # T92p 10:00 冻结快照 + 降频缩放不归零 + P8 中高位兑现指导 + 持久化恢复
 ns = fresh(); g = _lb_senti_fix(ns, now='10:00')
@@ -3658,22 +3760,32 @@ g.first_zt = {'600001.XSHG': {'break': True, 'ts': 1000.0}}
 g.break_sold = {'600001.XSHG'}; g.seal_sold = set(); g.break2_sold = set()
 g.l2_big = {'600002.XSHG': {'amt': 1.0, 'buy': 1.0, 'sell': 0.0, 'un': 0.0, 'seen': {10, 20}, 'max': 1.0}}
 g.l2_big_wm = {'600002.XSHG': 93010000}; g.l2_dir_dist = {'0': 1}
+g.ma5_touch_day = '2026-10-16'; g.ma5_touched = {'600001.XSHG'}
+g.ma5_lifecycle_day = '2026-10-16'; g.ma5_lows = {'600001.XSHG': [9.70, 9.80]}
 ns['_save_state']()
 g.exp_day = None; g.first_zt = {}; g.break_sold = set(); g.l2_big = {}; g.l2_big_wm = {}; g.l2_dir_dist = {}
+g.ma5_touch_day = None; g.ma5_touched = set(); g.ma5_lifecycle_day = None; g.ma5_lows = {}
 ns['load_state']()
 ok('T110 同日重启恢复 exp_day', g.exp_day == '2026-10-16')
 ok('T110 同日重启保留 break_sold/first_zt', g.break_sold == {'600001.XSHG'} and g.first_zt.get('600001.XSHG', {}).get('break') is True)
 ok('T110 同日重启保留 l2_big/wm/seen', abs(g.l2_big['600002.XSHG']['buy'] - 1.0) < 1e-9 and g.l2_big['600002.XSHG']['seen'] == {10, 20} and g.l2_big_wm['600002.XSHG'] == 93010000)
+ok('T110 同日重启恢复 MA5次低价/首触状态',
+   g.ma5_touch_day == '2026-10-16' and g.ma5_touched == {'600001.XSHG'} and
+   g.ma5_lifecycle_day == '2026-10-16' and g.ma5_lows.get('600001.XSHG') == [9.7, 9.8])
 _st = pickle.load(open(ns['_TMP'] + '/buysell_core_state.pkl', 'rb'))
 _st['day'] = '2026-10-15'
 pickle.dump(_st, open(ns['_TMP'] + '/buysell_core_state.pkl', 'wb'))
 g.exp_day = '2026-10-16'; g.break_sold = {'X'}
 ns['load_state']()
-ok('T110 跨日重置 exp_day/break_sold', g.exp_day is None and g.break_sold == set())
+ok('T110 跨日重置 exp_day/break_sold/MA5次低价',
+   g.exp_day is None and g.break_sold == set() and g.ma5_lifecycle_day is None and g.ma5_lows == {})
 g.exp_day = '2026-10-16'; g.one_word_marked_open = True; g.break_sold = {'600001.XSHG'}
+g.ma5_lifecycle_day = '2026-10-16'; g.ma5_lows = {'600001.XSHG': [9.7, 9.8]}
 ok('T110 _maybe_roll_day 同日返回False不清空', ns['_maybe_roll_day']() is False and g.one_word_marked_open is True and g.break_sold == {'600001.XSHG'})
 g.exp_day = '2026-10-15'; g.one_word_marked_open = True; g.break_sold = {'600001.XSHG'}
-ok('T110 _maybe_roll_day 跨日返回True并清空', ns['_maybe_roll_day']() is True and g.exp_day == '2026-10-16' and g.break_sold == set() and g.one_word_marked_open is False)
+ok('T110 _maybe_roll_day 跨日返回True并清空',
+   ns['_maybe_roll_day']() is True and g.exp_day == '2026-10-16' and g.break_sold == set() and
+   g.one_word_marked_open is False and g.ma5_lifecycle_day == '2026-10-16' and g.ma5_lows == {})
 
 # T111 v0.53 持仓监控全覆盖：P4 预期三态 / P5 评分清仓 / P6 评分半仓并入 3s tick（sold_log 冷却去重）
 def _tick_sell_ns(entry_type='normal', auction_status=None, intraday_status=None, score=None):

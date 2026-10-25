@@ -5,8 +5,8 @@
 方案：PTrade 客户端侧 API（docs/22）—— get_engine() 建连 -> get_positions() 拉全部持仓，
 收盘后仍可查（持仓/可用数量是账户侧数据，不依赖盘中行情）。与 AXquant 走 QMT 桥不同。
 
-稳定性（2026-10-22 起）：API 调用带守护线程超时（单次 25s、最多 2 次），清算期 zeromq
-空结果/挂起不再卡死进程；失败或空结果自动回退读 PTrade 手工导出
+稳定性（2026-10-25 起）：API 调用隔离到独立子进程（单次 25s）；超时由父进程直接终止子进程并回退。
+独立进程避免 ZeroMQ 上下文污染；失败或空结果自动回退读 PTrade 手工导出
 D:/PROJ/PT/data/export/Hold_YYYYMMDD.csv（GBK，表头即空仓，不存在时取最新 Hold_*.csv），
 positions JSON 的 source 标记 ptrade_quant_api / ptrade_export_fallback。
 
@@ -26,13 +26,18 @@ import datetime
 import io
 import json
 import os
+import subprocess
 import sys
+import tempfile
+import time
+import traceback
 
 API_DIR = r"D:/gjzq/ptrade/Libs/Python/api"
 _HERE = os.path.dirname(os.path.abspath(__file__))          # .../research/expectation
 _PT_ROOT = os.path.dirname(os.path.dirname(_HERE))           # .../PT
 DEFAULT_OUT = os.path.join(_PT_ROOT, "data", "positions")
 EXPORT_DIR = os.path.join(_PT_ROOT, "data", "export")
+TMP_DIR = os.path.join(_PT_ROOT, "data", "tmp")
 
 
 def _norm_symbol(sym: str) -> str:
@@ -109,29 +114,88 @@ def _api_fetch_once(api_dir: str):
     return records, portfolio
 
 
+def _api_fetch_worker(api_dir: str, out_path: str) -> int:
+    """子进程入口：单次拉取后用临时文件回传，父进程可硬超时终止。"""
+    try:
+        records, portfolio = _api_fetch_once(api_dir)
+        payload = {"ok": True, "records": records, "portfolio": portfolio}
+        _ensure_parent(out_path)
+        tmp = out_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, out_path)
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return 2
+
+
 def _api_fetch_bounded(api_dir: str, attempts: int = 2, timeout_sec: float = 25.0):
-    """有界调用 PTrade API：守护线程 + join 超时，清算期 zeromq 挂起不阻塞进程。"""
-    import threading
-    import time
+    """在独立子进程中调用 PTrade API，超时立即终止且不做并发重连。"""
+    if attempts < 1:
+        return [], {}
+    _ensure_parent(os.path.join(TMP_DIR, "placeholder"))
 
     for i in range(1, attempts + 1):
-        box = {}
-        def _run():
+        fd, out_path = tempfile.mkstemp(
+            prefix="ptrade_api_", suffix=".json", dir=TMP_DIR
+        )
+        os.close(fd)
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--api-worker",
+            "--api-dir",
+            api_dir,
+            "--worker-out",
+            out_path,
+        ]
+        try:
             try:
-                box["records"], box["portfolio"] = _api_fetch_once(api_dir)
+                proc = subprocess.run(
+                    cmd,
+                    cwd=api_dir if os.path.isdir(api_dir) else _PT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_sec,
+                )
+            except subprocess.TimeoutExpired:
+                print(
+                    "[sync] PTrade API 第 %d/%d 次调用超时(>%ss)，已终止子进程并回退"
+                    % (i, attempts, timeout_sec),
+                    file=sys.stderr,
+                )
+                return [], {}
             except Exception as exc:
-                box["error"] = repr(exc)
-        t = threading.Thread(target=_run, daemon=True, name="ptrade-sync")
-        t.start()
-        t.join(timeout_sec)
-        if not t.is_alive():
-            if "error" not in box:
-                return box.get("records", []), box.get("portfolio", {})
-            print("[sync] PTrade API 第 %d/%d 次失败: %s"
-                  % (i, attempts, box["error"]), file=sys.stderr)
-        else:
-            print("[sync] PTrade API 第 %d/%d 次调用超时(>%ss)，已放弃等待"
-                  % (i, attempts, timeout_sec), file=sys.stderr)
+                print("[sync] PTrade API 子进程启动失败: %r" % exc, file=sys.stderr)
+                return [], {}
+
+            if proc.returncode == 0 and os.path.isfile(out_path):
+                try:
+                    with open(out_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f) or {}
+                    if payload.get("ok"):
+                        return payload.get("records") or [], payload.get("portfolio") or {}
+                except Exception as exc:
+                    print("[sync] PTrade API 结果解析失败: %r" % exc, file=sys.stderr)
+
+            err = (proc.stderr or proc.stdout or "").strip()
+            if len(err) > 600:
+                err = err[-600:]
+            print(
+                "[sync] PTrade API 第 %d/%d 次失败 rc=%s: %s"
+                % (i, attempts, proc.returncode, err or "(no output)"),
+                file=sys.stderr,
+            )
+        finally:
+            try:
+                if os.path.isfile(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
+
         if i < attempts:
             time.sleep(2)
     return [], {}
@@ -301,7 +365,14 @@ def main(argv=None) -> int:
     p.add_argument("--date", default="", help="YYYY-MM-DD")
     p.add_argument("--out", default="", help="输出文件（默认 data/positions/positions_<date>.json）")
     p.add_argument("--api-dir", default=API_DIR, help="PTradeQuantApi.py 所在目录")
+    p.add_argument("--api-worker", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--worker-out", default="", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
+    if a.api_worker:
+        if not a.worker_out:
+            print("--worker-out is required in --api-worker mode", file=sys.stderr)
+            return 2
+        return _api_fetch_worker(a.api_dir, a.worker_out)
     run_sync(date=a.date, out=a.out, api_dir=a.api_dir)
     return 0
 
