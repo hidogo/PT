@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import sys
 
@@ -28,12 +29,52 @@ import closeout_review as cr       # noqa: E402
 import run_expectation_build as rb # noqa: E402
 from bridge import axquant_contract as axc # noqa: E402
 
+SCRIPT_VERSION = "v0.72"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
+
 
 def _resolve_next_date(td: str, next_date: str) -> str:
     if next_date:
         return next_date.strip()
     d = datetime.date.fromisoformat(td)
     return bridge.calendar.next_trading_day(d).isoformat()
+
+
+def _marker_path(out_root: str, trade_date: str) -> str:
+    # 完成标记按日存放：计划任务兜底据此判定「复盘任务链是否已跑过」，避免重复复盘
+    return os.path.join(out_root, "state", "oneclick_after_close_%s.done" % trade_date)
+
+
+def _skip_if_done(out_root: str, trade_date: str, enabled: bool) -> bool:
+    if not enabled:
+        return False
+    fp = _marker_path(out_root, trade_date)
+    if os.path.isfile(fp):
+        print("[oneclick] 当日完成标记已存在 -> 跳过（复盘任务链已跑过）：%s" % fp)
+        return True
+    return False
+
+
+def _write_done_marker(out_root: str, trade_date: str, next_td: str, files: dict) -> None:
+    try:
+        fp = _marker_path(out_root, trade_date)
+        _d = os.path.dirname(fp)
+        if _d and not os.path.isdir(_d):
+            os.makedirs(_d)
+        payload = {
+            "script": "run_one_click_after_close",
+            "version": SCRIPT_VERSION,
+            "trade_date": trade_date,
+            "next_trade_date": next_td,
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "files": files,
+        }
+        tmp = fp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, fp)
+        print("[oneclick] 完成标记: %s" % fp)
+    except Exception as e:
+        print("[oneclick] 写完成标记失败(不影响产出): %r" % e)
 
 
 def main(argv=None) -> int:
@@ -51,12 +92,26 @@ def main(argv=None) -> int:
     p.add_argument("--skip-sync", action="store_true", help="跳过持仓同步（仅复盘+构建）")
     p.add_argument("--require-provider", action="store_true", help="missing provider input -> abort")
     p.add_argument("--api-dir", default="", help="PTradeQuantApi.py 所在目录")
+    p.add_argument("--skip-if-done", action="store_true",
+                   help="当日已完成(存在完成标记)则直接 rc=0 退出；供计划任务兜底，避免与复盘任务链重复运行")
     a = p.parse_args(argv)
 
     td = a.date or datetime.date.today().isoformat()
     next_td = _resolve_next_date(td, a.next_date)
+    if not a.date:
+        try:
+            if not bridge.calendar.is_trading_day(datetime.date.fromisoformat(td)):
+                print("[oneclick] %s 非交易日 -> 跳过（计划任务兜底不跑）" % td)
+                return 0
+        except Exception as e:
+            print("[oneclick] 交易日历判定失败(继续): %r" % e)
     print("[oneclick] 收盘复盘日=%s 预期交易日(T+1)=%s source=%s out=%s"
           % (td, next_td, a.source or "(自动)", a.out_dir or bridge.PTRADE_BRIDGE_DIR))
+
+    print("[oneclick] %s" % SCRIPT_VERSION)
+    _out_root = a.out_dir or bridge.PTRADE_BRIDGE_DIR
+    if _skip_if_done(_out_root, td, a.skip_if_done):
+        return 0
 
     
     # 步骤0：数据提供方（AXquant）就绪校验 —— 前置显性化，避免读到陈旧/缺失输入
@@ -164,6 +219,13 @@ def main(argv=None) -> int:
     except Exception as _e:
         print("[oneclick] maintain_bridge_dir 失败(不影响预期/上传): %r" % _e)
 
+    if rc == 0:
+        _write_done_marker(_out, td, next_td, {
+            "expectation_latest": _latest_csv,
+            "expectation_t1": _src_csv,
+            "zt_lianban_latest": _zt_csv,
+            "sentiment_latest": os.path.join(_out, "sentiment_latest.csv"),
+        })
     return rc
 
 

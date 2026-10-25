@@ -3,7 +3,7 @@
 """盘前一键：生成今日待上传文件 + 校验 + 上传勾选清单（无需登录，不重跑收盘复盘）。
 
 T-1 收盘已跑过 run_one_click_after_close 生成 position_expectation_<T>.jsonl 的前提下，
-T 日 09:00 验证/补跑、 09:20 前完成上传：（收盘一键固化为交易日 16:30 执行）
+T 日 09:00 验证/补跑、 09:15 前完成上传：（收盘一键为交易日 16:30 兜底，复盘任务链完成后也会触发）
 步骤2c “盘前供给核对”：预期(日期=T)、名单(日期=T-1)、情绪(日期=T-1，红盘比优先 position_review 全市场)逐项确认；
 若 16:30 时 AXquant 复盘未完成（情绪 WARN 回退天梯样本），09:00 补跑自动修正。
   步骤0  提供方(AXquant)就绪探活            axc.probe_report / missing
@@ -34,6 +34,8 @@ sys.path.insert(0, _HERE)
 import bridge  # noqa: E402
 import run_expectation_build as rb  # noqa: E402
 from bridge import axquant_contract as axc  # noqa: E402
+
+SCRIPT_VERSION = "v0.72"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
 
 
 def _resolve_defaults(td: str, nt: str) -> tuple:
@@ -96,6 +98,63 @@ def _copy_alias(src_csv: str, gen_csv: str, latest_csv: str) -> None:
             print("[premarket] 写 %s 失败: %r" % (_fp, _e))
 
 
+def _sha1_of(path: str) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _first_row(path: str) -> dict:
+    import csv as _csv
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rows = list(_csv.reader(f))
+    except Exception:
+        return {}
+    if len(rows) < 2:
+        return {}
+    hdr = [x.strip().lower() for x in rows[0]]
+    return dict(zip(hdr, rows[1][:len(hdr)]))
+
+
+def _check_upload_file(label: str, path: str, expect_date: str) -> tuple:
+    """上传前硬校验(单文件)：存在 + 行数>0 + date 列 == expect_date。返回 (失败计数 0/1, 说明)。"""
+    if not os.path.isfile(path):
+        return (1, "%-22s 缺失 -> FAIL" % label)
+    rows = _rows_of(path)
+    if rows <= 0:
+        return (1, "%-22s rows=%d -> FAIL(空表不可上传)" % (label, rows))
+    dt = str((_first_row(path) or {}).get("date") or "")
+    if expect_date and dt != expect_date:
+        return (1, "%-22s rows=%d date=%s -> FAIL(期望 %s)" % (label, rows, dt or "(无)", expect_date))
+    return (0, "%-22s rows=%d date=%s -> OK" % (label, rows, dt or "-"))
+
+
+def _check_expectation_meta(latest_csv: str, meta_fp: str) -> tuple:
+    """预期 CSV 与 archive meta 的 row_count/sha1 硬校验（防上传前被旧文件覆盖）。返回 (失败计数 0/1, 说明)。"""
+    rows = _rows_of(latest_csv)
+    if not os.path.isfile(latest_csv) or rows <= 0:
+        return (1, "预期 CSV(latest) rows=%d -> FAIL(缺失/空表)" % rows)
+    if not os.path.isfile(meta_fp):
+        return (0, "预期 CSV(latest) rows=%d -> OK(无 meta，仅行数校验)" % rows)
+    try:
+        with open(meta_fp, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception as e:
+        return (1, "预期 CSV(latest) meta 读取失败 %r -> FAIL" % e)
+    mrow = meta.get("row_count")
+    msha = str(meta.get("sha1") or "")
+    sha = _sha1_of(latest_csv)
+    if mrow is not None and int(mrow) != rows:
+        return (1, "预期 CSV(latest) rows=%d meta_rows=%s -> FAIL(行数不一致，疑似被覆盖)" % (rows, mrow))
+    if msha and msha != sha:
+        return (1, "预期 CSV(latest) sha1=%s meta_sha1=%s -> FAIL(内容与 meta 不一致)" % (sha[:12], msha[:12]))
+    return (0, "预期 CSV(latest) rows=%d sha1=%s -> OK(与 meta 一致)" % (rows, sha[:12]))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="run_one_click_premarket",
@@ -113,6 +172,7 @@ def main(argv=None) -> int:
     td, nt = _resolve_defaults(a.date, a.next_date)
     out = a.out_dir or bridge.PTRADE_BRIDGE_DIR
     print("[premarket] 复盘日(T-1)=%s 验证日(T)=%s out=%s" % (td, nt, out))
+    print("[premarket] %s" % SCRIPT_VERSION)
     rc = 0
 
     # 步骤0：提供方就绪探活
@@ -138,9 +198,11 @@ def main(argv=None) -> int:
     _nrows = _rows_of(_src_csv)
     _local_exp = bridge.expectation_store.default_expectation_path(nt)
     _src = a.source or (_local_exp if os.path.isfile(_local_exp) else axc.paths(td, nt)["expectation_source"])
+    _exp_expected = True
     if _rc == 0 and _nrows > 0:
         _copy_alias(_src_csv, _gen_csv, _latest_csv)
     elif _source_is_empty_marker(_src):
+        _exp_expected = False
         # 空仓 marker：今日无持仓预期属正常，不上传、不覆盖既有文件
         print("[premarket] 预期源为「空仓 marker」-> 今日无持仓预期，不上传预期文件（正常，不覆盖 %s）" % os.path.basename(_gen_csv))
     else:
@@ -229,7 +291,7 @@ def main(argv=None) -> int:
         rc = rc or 5
         print("  [供给] 存在缺项/date 不符 (rc=%d) -> 按上方提示补跑（收盘一键 / AXquant 复盘后重跑）" % rc)
     else:
-        print("  [供给] 盘前供给全部就绪 -> 等 09:20 前定时上传")
+        print("  [供给] 盘前供给全部就绪 -> 等 09:15 前定时上传")
 
     # 步骤2d: 自选股同步（默认执行；客户端未登录/无 XML 时保留既有文件并提示）
     if not a.skip_selfwatch:
@@ -266,8 +328,31 @@ def main(argv=None) -> int:
     except Exception as _e:
         print("[premarket] maintain_bridge_dir 失败(不影响预期/上传): %r" % _e)
 
+    # 步骤3c：上传前硬校验（v0.72）—— 行数>0 + date 对齐 + 预期 CSV 与 archive meta 的 row_count/sha1 一致
+    print("[premarket] 步骤3c 上传前硬校验（行数 / date / sha1 vs meta）...")
+    _hard = 0
+    for _lbl, _fp, _exp in (
+        ("涨停/连板(latest)", _zt_csv, td),
+        ("情绪基线(latest)", os.path.join(out, "sentiment_latest.csv"), td),
+    ):
+        _bad, _msg = _check_upload_file(_lbl, _fp, _exp)
+        print("  [硬校验] " + _msg)
+        _hard += _bad
+    _meta_fp = os.path.join(out, "archive", "expectation_%s.csv.meta.json" % nt)
+    if _exp_expected:
+        _bad, _msg = _check_expectation_meta(_latest_csv, _meta_fp)
+        print("  [硬校验] " + _msg)
+        _hard += _bad
+    else:
+        print("  [硬校验] 预期 CSV(latest) 空仓 marker -> SKIP(正常无预期，不上传)")
+    if _hard:
+        rc = rc or 6
+        print("  [硬校验] %d 项未通过 -> 禁止上传，先补齐/重跑（rc=%d）" % (_hard, rc))
+    else:
+        print("  [硬校验] 全部通过 -> 可在 09:15 前勾选上传")
+
     # 步骤4：上传勾选清单
-    print("[premarket] 步骤4 上传勾选清单（T 日 09:20 前完成上传）")
+    print("[premarket] 步骤4 上传勾选清单（T 日 09:15 前完成上传；硬校验未通过不可上传）")
     files = [
         ("预期 CSV(验证日命名)", os.path.join(out, "expectation_%s.csv" % nt)),
         ("预期 CSV(生成日命名)", _gen_csv),
