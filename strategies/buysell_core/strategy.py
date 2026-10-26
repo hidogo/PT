@@ -2755,10 +2755,10 @@ def _load_zt_lianban():
                 "is_st": bool(int(_fnum(rec.get("is_st"))) or 0),
                 "reason": (rec.get("reason") or "").strip(),
                 "unique_high": bool(int(_fnum(rec.get("unique_high"))) or 0) if has_unq else False,
-                "follower_count": int(_fnum(rec.get("follower_count"))) if has_flw else 0,
+                "follower_count": int(_fnum(rec.get("follower_count"))) if has_flw else 0,  # v0.78 C 仅记录字段，决策用动态 follower（_dyn_theme_status）
                 "theme": theme,
-                "theme_count": int(_fnum(rec.get("theme_count"))) if has_theme else 0,
-                "theme_max_board": int(_fnum(rec.get("theme_max_board"))) if has_theme else 0,
+                "theme_count": int(_fnum(rec.get("theme_count"))) if has_theme else 0,      # v0.78 C 仅记录字段，决策用 alive_count/max_board_dyn
+                "theme_max_board": int(_fnum(rec.get("theme_max_board"))) if has_theme else 0,  # v0.78 C 仅记录字段，决策用 alive_count/max_board_dyn
                 "theme_rank": int(_fnum(rec.get("theme_rank"))) if has_theme else 0,
                 "themes": themes,
             }
