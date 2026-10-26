@@ -4536,5 +4536,74 @@ for _sec in zt:
 d_d1b = ns['_lb_senti_auction']()
 ok('T129 D1 就绪后 ready=True 有率', d_d1b.get('ready') is True and d_d1b.get('mid_open_rate') is not None)
 
+# --- T130 v0.79 P1 zt_lianban 防收缩 + 唯一身位口径验证（600838/600094 场景） ---
+def _zt_csv_130(path, rows, with_unq=False, date='2026-10-15'):
+    if with_unq:
+        head = ('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,'
+                'unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes')
+    else:
+        head = ('date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,'
+                'theme,theme_count,theme_max_board,theme_rank,themes')
+    lines = [head]
+    for r in rows:
+        code, bc, theme = r[:3]
+        if with_unq:
+            uq = r[3]
+            lines.append('%s,%s,n,%d,09:30,100.00,10.0,0,r,%d,0,%s,1,1,1,%s' % (date, code, bc, uq, theme, theme))
+        else:
+            lines.append('%s,%s,n,%d,09:30,100.00,10.0,0,r,%s,1,1,1,%s' % (date, code, bc, theme, theme))
+    with io.open(path, 'wt', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+
+# T130a 兜底唯一身位（无权威列，按 theme 分组）：同题材 600838(4)/600094(2)/300949(1) -> 仅最高唯一授
+ns = fresh(); g = ns['g']
+_ztp = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')
+_zt_csv_130(_ztp, [('600838.XSHG', 4, '地产/基建'), ('600094.XSHG', 2, '地产/基建'), ('300949.XSHE', 1, '地产/基建')])
+ns['_load_zt_lianban']()
+g.spot = {
+    '600838.XSHG': {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0, 'trade_status': 'OPEN'},
+    '600094.XSHG': {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0, 'trade_status': 'OPEN'},
+    '300949.XSHE': {'preclose_px': 10.0, 'last_px': 12.0, 'up_px': 12.0, 'trade_status': 'OPEN'},
+}
+ok('T130a 兜底授唯一仅 600838(组内最高唯一)',
+   g.zt_lianban['600838.XSHG']['unique_high'] is True
+   and g.zt_lianban['600094.XSHG']['unique_high'] is False
+   and g.zt_lianban['300949.XSHE']['unique_high'] is False)
+ok('T130a 中位规避 600094(2板非唯一) 生效', ns['_mid_board_avoid']('600094.XSHG') is True)
+ok('T130a 唯一豁免 600838 放行', ns['_mid_board_avoid']('600838.XSHG') is False)
+_d130 = ns['_dyn_theme_status']()
+ok('T130a 动态层一致：地产组 leader=600838', (_d130.get('地产/基建') or {}).get('leader') == '600838.XSHG')
+
+# T130b 权威列与兜底一致：600094=0 拦截 / 600838=1 放行（R1 修正后 AXquant 输出 0 即恢复中位规避）
+# 同 ns 重载带权威列文件（覆盖 zt_lianban，spot 保留）
+_zt_csv_130(_ztp, [('600838.XSHG', 4, '地产/基建', 1), ('600094.XSHG', 2, '地产/基建', 0), ('300949.XSHE', 1, '地产/基建', 0)], with_unq=True)
+ns['_load_zt_lianban']()
+ok('T130b 权威列 600094=0 -> 中位拦截', ns['_mid_board_avoid']('600094.XSHG') is True)
+ok('T130b 权威列 600838=1 -> 放行', ns['_mid_board_avoid']('600838.XSHG') is False)
+
+# T130c merge 防收缩：首载 10 -> 09:25 重读 6 行(>=50%) -> 新字段胜出 + 旧有保留
+ns = fresh(); g = ns['g']
+_ztp = os.path.join(ns['_TMP'], 'zt_lianban_latest.csv')   # 新实例新 TMP
+_rows10 = [('6002%02d.XSHG' % (0 + i), 1, 't1') for i in range(10)]
+_zt_csv_130(_ztp, _rows10)
+ns['_load_zt_lianban']()
+ok('T130c 首载 10', len(g.zt_lianban) == 10)
+_rows6 = [('6002%02d.XSHG' % (0 + i), 2, 't1') for i in range(6)]
+_zt_csv_130(_ztp, _rows6)
+n130c = ns['_load_zt_lianban'](merge=True)
+ok('T130c merge 总数保持 10', n130c == 10 and len(g.zt_lianban) == 10)
+ok('T130c 新文件字段胜出', g.zt_lianban['600200.XSHG']['board_cnt'] == 2)
+ok('T130c 旧有缺失保留', '600208.XSHG' in g.zt_lianban and g.zt_lianban['600208.XSHG']['board_cnt'] == 1)
+
+# T130d 日期守卫：重读文件 date!=现有 -> 拒绝
+_zt_csv_130(_ztp, [('600300.XSHG', 1, 't1')], date='2026-10-14')
+n130d = ns['_load_zt_lianban'](merge=True)
+ok('T130d 日期守卫拒绝重载', n130d == 10 and '600300.XSHG' not in g.zt_lianban)
+
+# T130e 收缩护栏：重读 4 行(<10 的 50%) -> 完全拒绝
+_zt_csv_130(_ztp, [('6003%02d.XSHG' % i, 1, 't1') for i in range(4)])
+n130e = ns['_load_zt_lianban'](merge=True)
+ok('T130e 收缩护栏拒绝(4<50% of 10)', n130e == 10 and '600300.XSHG' not in g.zt_lianban and len(g.zt_lianban) == 10)
+
 print('ALL DONE')
 

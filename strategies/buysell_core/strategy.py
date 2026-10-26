@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.78（2026-10-26）
-# 部署核对：日志首行 `buysell_core init version=v0.78 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.79（2026-10-26）
+# 部署核对：日志首行 `buysell_core init version=v0.79 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.78"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
+STRATEGY_VERSION = "v0.79"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
 
 
 def _warn(msg):
@@ -2715,9 +2715,14 @@ def _zt_lianban_paths():
             cands.append(r + "zt_lianban_" + prev + ".csv")
     return cands
 
-def _load_zt_lianban():
+def _load_zt_lianban(merge=False):
     # 读 T-1 涨停/连板名单（docs/33 导出契约）：zt_lianban_latest.csv / zt_lianban_<date>.csv；缺失不崩。
-    g.zt_lianban = {}
+    # v0.79 P1 防收缩：盘中重读 merge=True（新文件 code 字段胜出 + 旧有缺失保留 + 日期守卫 + 收缩护栏）；
+    # 首载(09:10 before_trading_start)保持全量替换。上传时间契约：9:15 前完成（09:25 竞价终态重读命中）。
+    if not merge:
+        g.zt_lianban = {}
+    elif not getattr(g, 'zt_lianban', None):
+        g.zt_lianban = {}   # merge 且尚无现有一致视为全量（如盘中重启后首次加载）
     fp = None; rows = None
     for cand in _zt_lianban_paths():
         try:
@@ -2728,7 +2733,7 @@ def _load_zt_lianban():
         except Exception:
             continue
     if fp is None or not rows:
-        return 0
+        return len(g.zt_lianban)
     try:
         hdr = [x.strip().lower() for x in rows[0]]
         has_unq = 'unique_high' in hdr
@@ -2736,6 +2741,25 @@ def _load_zt_lianban():
         has_theme = 'theme' in hdr
         g.zt_unq_authoritative = has_unq    # v0.37 文件带权威唯一列（AXquant 同源预计算）-> 优先读列
         g.zt_theme_authoritative = has_theme  # v0.38 文件带权威题材列（theme.buckets 同源）
+        # v0.79 日期身份守卫（merge 且现有非空）：文件 date 列非空且 != 现有 date -> 拒绝（防旧文件回填覆盖）
+        if merge and g.zt_lianban:
+            _dat = None
+            if 'date' in hdr:
+                _di = hdr.index('date')
+                for r in rows[1:]:
+                    if len(r) > _di and str(r[_di]).strip():
+                        _dat = str(r[_di]).strip()
+                        break
+            if _dat:
+                _cur = None
+                for _rec in g.zt_lianban.values():
+                    if (_rec.get('date') or '').strip():
+                        _cur = str(_rec['date']).strip()
+                        break
+                if _cur and _dat != _cur:
+                    log.info("[zt-lianban] merge skip(date=%s != %s) %s keep=%d" % (_dat, _cur, fp, len(g.zt_lianban)))
+                    return len(g.zt_lianban)
+        _new = {}
         themed = 0
         for r in rows[1:]:
             rec = dict(zip(hdr, r))
@@ -2746,7 +2770,7 @@ def _load_zt_lianban():
             themes = (rec.get("themes") or "").strip()
             if theme:
                 themed += 1
-            g.zt_lianban[code] = {
+            _new[code] = {
                 "date": (rec.get("date") or "").strip(),
                 "board_cnt": int(_fnum(rec.get("board_cnt"))),
                 "limit_up_time": (rec.get("limit_up_time") or "").strip(),
@@ -2762,14 +2786,29 @@ def _load_zt_lianban():
                 "theme_rank": int(_fnum(rec.get("theme_rank"))) if has_theme else 0,
                 "themes": themes,
             }
-        n_unq = _annotate_zt_uniqueness()   # v0.34b 兜底标注；v0.37 文件权威列优先
-        _build_zt_theme_index()             # v0.55 静态锚：题材索引（themes 全量）
-        log.info("[zt-lianban] loaded %s -> %d unique_high=%d themed=%d"
-                 % (fp, len(g.zt_lianban), n_unq, themed))
-        return len(g.zt_lianban)
+        if merge and g.zt_lianban:
+            # v0.79 防收缩护栏：新文件行数 < 现有 50% -> 视为异常覆盖，完全保留现有
+            if len(_new) * 2 < len(g.zt_lianban):
+                log.info("[zt-lianban] merge skip(shrink %d<50%% of %d) %s keep=%d" % (len(_new), len(g.zt_lianban), fp, len(g.zt_lianban)))
+                return len(g.zt_lianban)
+            _old = set(g.zt_lianban)
+            g.zt_lianban.update(_new)   # 新文件 code 字段胜出；旧有但新文件缺失的 code 保留
+            _keep = len(_old - set(_new))
+            n_unq = _annotate_zt_uniqueness()
+            _build_zt_theme_index()
+            log.info("[zt-lianban] merged %s old=%d new=%d total=%d keep_old=%d unique_high=%d themed=%d"
+                     % (fp, len(_old), len(_new), len(g.zt_lianban), _keep, n_unq, themed))
+            return len(g.zt_lianban)
+        else:
+            g.zt_lianban = _new
+            n_unq = _annotate_zt_uniqueness()   # v0.34b 兜底标注；v0.37 文件权威列优先
+            _build_zt_theme_index()             # v0.55 静态锚：题材索引（themes 全量）
+            log.info("[zt-lianban] loaded %s -> %d unique_high=%d themed=%d"
+                     % (fp, len(g.zt_lianban), n_unq, themed))
+            return len(g.zt_lianban)
     except Exception as e:
         log.info("[zt-lianban] skip(invalid) %s: %r" % (fp, e))
-        return 0
+        return len(g.zt_lianban)
 
 def _annotate_zt_uniqueness():
     # v0.34b 云端唯一高度板兜底标注（对齐 AXquant 收盘地位重算的唯一身位判定）：
@@ -6926,7 +6965,7 @@ def auction_pre_confirm(context):
     if getattr(g, 'exp_day', None) != day:
         g.exp_day = day
     _load_expectation(merge=True)  # 幂等重读：命中 9:15 前上传的当日文件（C 合并防收缩）
-    _load_zt_lianban()
+    _load_zt_lianban(merge=True)   # v0.79 P1 防收缩：命中 9:20 上传（新文件胜出 + 旧有保留 + 日期/收缩守卫）
     _load_boards()               # v0.36d 板块映射文件 09:25 重读（命中 9:20 上传）
     _synth_pool_expect()         # v0.27：涨停池竞价三态初步确认（超预期->观察）
     _dyn_unq_auction_eval()      # v0.38 竞价唯一预判（同身位竞品不及预期 -> 扫板前提，0 盘中 RPC）

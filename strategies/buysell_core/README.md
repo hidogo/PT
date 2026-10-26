@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.78（2026-10-26）
+- 当前版本：v0.79（2026-10-26）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.78 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.79 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,24 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.79（2026-10-26）zt_lianban 盘中重读防收缩（P1）+ 唯一身位口径验证（R1 前置）
+- 背景：09:25 `auction_pre_confirm` 重读 `_load_zt_lianban` 为全量替换，若上传文件被误覆盖为收缩版会丢候选；
+  且复盘 `unique_high` 权威列（AXquant reason 关联分组）与 PT 消费的 themes 全量归并口径不一致，
+  600094（2 板，地产组最高实为 600838 4 板、AI 组 3 只 2 板并列）被误标 unique_high=1 -> 漏过中位规避。
+- 修改（`_load_zt_lianban(merge=False)`）：
+  - 09:25 调用改 `_load_zt_lianban(merge=True)`；merge 语义：新文件 code 字段胜出 + 旧有但新文件缺失的 code 保留
+    （对齐 `_load_expectation` C 合并），首载保持全量替换。
+  - 日期身份守卫：重读文件 `date` 列非空且 != 现有 date -> 拒绝重载（防旧文件回填覆盖）。
+  - 防收缩护栏：新文件行数 < 现有 50% -> 视为异常覆盖，完全保留现有并打告警。
+  - merge 且尚无现有（如盘中重启后首次加载）时视为全量，`g.zt_lianban` 缺属性不再抛。
+- R1（AXquant 侧，待对接）：`unique_high` 判定分组口径改为 themes 全量归并（与 PT `_annotate_zt_uniqueness`
+  兜底逐条一致）——同题材最高身位唯一授 1，600094 应收 0、600838 收 1。本版已用 T130a/b 锁定 PT 兜底与
+  权威列消费行为，AXquant 修正后中位规避即恢复。
+- 验证：selftest_exp_rt 全量 778 PASS（新增 T130 共 12 例：兜底唯一身位/权威列一致/merge 防收缩/日期守卫/收缩护栏）；
+  selftest_ops_oneclick 28 PASS；pytest 50 passed；py3.10 编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v0.79`；
+  盘中核对 09:25 `[zt-lianban] merged old=.. new=.. keep_old=..` 仅在重读出现。
 
 ### v0.78（2026-10-26）连板盘中情绪状态机可达性(A) + 统一方向闸(B) + 三列停产(C) + 竞价就绪校验(D)
 - 背景：10-26 云端 `[lb-senti] 10:00 t100 freeze phase=watch` —— 状态机 10:00 前常被
