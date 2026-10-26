@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem PT scheduled task entry: after-close one-click (no pause; log appended to Logs\oneclick_after_close.log)
 rem Used as a fallback only: if the AXquant review chain already ran today, --skip-if-done exits rc=0 immediately.
 setlocal

@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.71（2026-10-25）
+- 当前版本：v0.77（2026-10-26）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.71 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.77 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,107 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.77（2026-10-26）ST 全链路兜底补全：tick 板块成员通道 / 首板买入 / 下单闸
+- 背景：10-26 早盘 ST西王 000639 二触（09:31:39）发出首板 SIM 信号（云端 v0.71 无 ST 剔除）。
+  本地 v0.75 的 `_is_st` 只在 tick 目标列表（uni/static/near/watch 四通道）生效，
+  但板块成员通道（`_tick_targets` 内 `tick_board_scan` 追加）、`_try_first_board_buy`、
+  `place_order`/`place_expected_order` 三处无 ST 兜底 —— 经板块通道进来的新票仍会漏。
+- 修改：
+  - `_tick_targets` 板块成员追加：`not (_skip_st and _is_st(_m))` 过滤（ST 不进 tick 候选）。
+  - `_try_first_board_buy`：`_is_st` 早退 + `[st-skip]` 日志（首板闸门兜底）。
+  - `place_order` 买入侧 / `place_expected_order`：`_is_st` 兜底（覆盖首板/回封/弹性/低吸/预期全部下单入口）。
+- 验证：`selftest_exp_rt.py` T128 新增 8 例（名称兜底/zt 权威/首板拦截/下单闸拦截/板块成员通道剔除，750 PASS）；
+  pytest 50 passed；py_compile 通过。
+
+### v0.76（2026-10-26）重启重建 first_zt 修复：不阻塞 / 破板可重建 / ms 口径修正
+- 背景：14:49 盘中重启日志仅出现 `[restart-rebuild] 登记待重建首触 59 家`，之后无任何
+  `恢复首触`；14:50-14:59 仍大量 `state=first(src=tx)` 下午补记（大名城 `tx_ms=14:26:03` 等）。
+- 根因：`_rebuild_first_zt_tick` 每帧固定取 `pending[:5]`，对 spot 缺失（`last<=0`/`up_px<=0`）
+  或当前未封板的票直接 `continue`，不设重试也不推进队列；候选来自 watch+static 全部，
+  tick 帧只对 `_tick_targets()` 做快照，多数候选 `g.spot` 无数据，前 5 只卡住即永久阻塞。
+  同时 `first_ts`（逐笔首笔时间）被直接当作涨停首触 ms，会把盘中票的首笔成交误记为涨停首触。
+- 修改：
+  - 重建不要求“当前仍封板”：只要有 `up_px` 即回看最早涨停价成交，破板票也能补当日首触。
+  - 缺 `up_px` 的票先批量补快照（一次 RPC），仍缺则 30s 重试，冷却票不占单帧 cap，
+    队列不再被无快照票永久阻塞。
+  - `ms` 只取 `_parse_tx_zt_ms` 最早涨停价成交；失败才降级快照 `hsTimeStamp`，
+    记录 `src=restart_rebuild_fallback`；不再使用 tickdir `first_ts`。
+  - 新增 60s heartbeat `[restart-rebuild] pending=N done=M wait=W` 与逐笔失败告警。
+  - `handle_data` 1m 兜底消化重建队列（`restart_rebuild_1m_enabled=True`），tick 禁用/丢帧仍可恢复。
+- 新参数：`first_zt_rebuild_heartbeat_sec=60.0`、`restart_rebuild_1m_enabled=True`。
+- 验证：`tests/test_buysell_core_exp_direction.py` 新增 5 个 v0.76 用例并修订 2 个旧口径用例（50 passed）；
+  py_compile 通过。重传云端后重启应见 `[restart-rebuild] 恢复首触 ... src=restart_rebuild`，
+  且下午不再出现 `state=first(src=tx)` 补记。
+
+### v0.75（2026-10-26）盘中定期保存 / 重启重建 first_zt / 全链路剔除 ST
+- 背景：12:52 盘中重启后，上午已首触票（海量数据、良品铺子、和泰机电等）13:00-13:05
+  被重新识别 `state=first(src=tx)`，`tx_ms` 只回看最近 200 笔窗口，拿不到上午真实首笔；
+  同时 scan/watch/near 仍可能收录 ST。
+- 修改：
+  - A 盘中定期保存：`state_save_interval=60.0`，`handle_data` 帧末节流 `_save_state()`，
+    `first_zt/l2_big/买卖标记`持续落盘，重启恢复到分钟级而非事件级。
+  - B 重启重建 first_zt（首次实现，队列阻塞与 ms 口径由 v0.76 修复）：`_l2_big_seed` 累计器记录 `first_ts`；`before_trading_start`
+    同日重启分支调 `_rebuild_first_zt_queue()` 登记缺失首触票（排除 ST），tick 帧按
+    `first_zt_rebuild_cap=5` 分批 `_rebuild_first_zt_tick()`；ms 优先级：
+    tickdir `first_ts`（>=09:30）→ `get_individual_transaction` 批量回看 → 快照
+    `hsTimeStamp`；失败 30s 重试；记录 `src=restart_rebuild`，幂等不重复补录。
+  - C 全链路剔除 ST：`skip_st_pool=True`，`_is_st()` 优先 `zt_lianban.is_st`、
+    名单外名称前缀兜底并按交易日缓存；`_warm_name_map()` 批量预热名称（一次列表 RPC）；
+    应用到 `_scan_market/_tick_targets/_tick_seed_cands/_sync_pool_static/_pool/重启重建`；
+    持仓 ST 保留在 `pos` 卖出监控。
+- 验证：`tests/test_buysell_core_exp_direction.py` 新增 7 个 v0.75 用例（45 passed）；
+  `selftest_exp_rt.py` 全量 ALL DONE；py_compile 通过。
+- 待重传：v0.73+v0.74+v0.75+v0.76+v0.77 一起打包重传 strategy.py，核对日志首行
+  `buysell_core init version=v0.77`；盘中核对 `[restart-rebuild]` 只在重启后出现、
+  `market_scan`/near 不含 ST、再次重启 first_zt 不重复补录。
+
+### v0.74（2026-10-26）首笔灵敏度：near_scan 近涨停快速通道 + 帧内最早一笔
+- 背景：10-26 日志 `market_scan bar=10:31 pool=5224 watch=6 off=300 cap=300`，`scan_batch=300` 每分钟只扫 300 只，
+  全市场一轮约 17 分钟；新发酵票首触滞后 5-17 分钟（良品铺子 `tx_ms=10:17:58`、`[firstzt] 10:35:02`），
+  主导瓶颈是候选池覆盖滞后而非帧内 ms 精度。
+- 修改：
+  - `scan_batch 300 -> 600` + 开盘 10 分钟热点优先（`scan_hot_first=True`）：昨日涨停/自选/预期/固定池先扫，
+    开盘 10 分钟扫完全市场一轮（6000>=5224），黄金窗口不再等 17 分钟轮询。
+  - `near_scan` 近涨停快速通道：`_scan_market` 命中 `chg>=scan_near_chg(7.0)` 或贴板即入补充池，
+    跨轮保留 `scan_near_keep_rounds=3`，上限 `scan_near_cap=20`；已 `first_zt` 移出，`market_scan` 日志加 `near=N`。
+  - `_tick_targets`：`near_scan` 未首触票排在 watch 前纳入 3s 帧目标，上限 `tick_near_cap=12`；
+    新票从 7% 起被盯住，达 `up*0.98` 立即拉逐笔回看最早一笔。
+  - `_tick_seed_cands`：L2 播种候选 = 逐笔 near + near_scan 未首触票（未到 0.98 也补历史大单）。
+  - `_tx_frame_zt_ms`：多行 DataFrame/Series/沙盒 iloc 改为扫描最早一笔涨停价成交（原取 `iloc[-1]`）；
+    `tx_zt_batch` 帧推送命中票用同帧 raw 回填更早 ms（0 额外 API）。
+- 验证：`tests/test_buysell_core_exp_direction.py` 新增 6 个 v0.74 用例（38 passed）；
+  `selftest_exp_rt.py` 全量 ALL DONE；T47 沙盒 DataFrame 形态同步覆盖。
+- 已并入 v0.75 重传包，核对日志首行 `buysell_core init version=v0.75`。
+
+### v0.73（2026-10-26）首帧误弃/一字重标/竞价唯一可信门/L2 逐票播种
+- 背景：10-26 实盘发现四类失真——一字封死与开盘数秒票被 `below_vwap` 首帧永久误弃；一字票仍按普通超预期路径走；
+  竞价板块映射未就绪时竞品=0 造成“假唯一”；核心苗子 L2 首帧无播种历史，把“无数据”误读为“无大单”。
+- 修改：
+  - `_below_vwap_confirm`：贴板豁免（`px>=up*0.998`）、首帧宽限 `vwap_weak_grace_sec=30`、连续弱
+    `vwap_weak_confirm_sec=6` 两帧确认才弃，恢复即清 pending，允许回封恢复；`_eval_intraday` 与 `_exp_rt_status` 统一消费。
+  - `_resync_buy_entry_type`：开盘按现价重标 buy 候选 `one_word/normal`，一字走封单三态分支（防 below_vwap 误弃）；
+    持仓卖出侧不重标。
+  - `_dyn_unq_auction_eval`：概念板块映射失败 `mapped=False` 不判唯一（防竞品=0 假唯一），
+    `dyn_unq_require_board_map=True`；竞价唯一成员上限 `dyn_unq_auction_member_cap=15`。
+  - `_l2_big_seed_onjoin` 改逐票节流：每票首见即种、空结果下帧重试、单帧上限
+    `l2_big_seed_onjoin_max_per_frame=5`；tick 首封瞬间未播种补种；播种后补打 `[l2-big-seed]` 摘要。
+- 纪律不变：技术三态 `CX/CM/PM/CS` 仍是硬条件，方向分不能升级 `PM/CS`；仓位比例与 10:00 后降频缩放不变。
+- 验证：`tests/test_buysell_core_exp_direction.py` 新增 10 个 v0.73 用例（32 passed）；
+  `selftest_exp_rt.py` T94 版本同步通过，T117 更新为逐票节流口径，全量 ALL DONE。
+- 已并入 v0.74 重传包，核对日志首行 `buysell_core init version=v0.74`。
+
+### v0.72（2026-10-26）watch 阶段方向分预确认：样本不足不再抹零
+- 背景：v0.71 首日实盘（10-26）`lb_senti` 开盘 30 分钟停留在 `watch`（中高位触板样本不足），
+  `_exp_direction_eval` 对 watch 一律输出 `neutral`，27 条 `[exp-dir]` 全部 `score=0.0`，早盘方向分失效。
+- 修改：`watch` 阶段仍按「静态 unique_high / 动态唯一龙头 / 已确认发酵前排」输出 `attack_high / attack_low`
+  （reason 分别记 `origin_leader_watch_preconfirm / new_theme_front_watch / theme_ferment_front_watch`），
+  `watch` 不做 `hard_skip`，避免样本不足误杀早盘灵敏度。
+- 纪律不变：`high_diverg / ice_wait` 明确阶段仍只放行低位；`rotate_low` 仅允许原题材唯一存活龙头例外；
+  仓位 `board_buy_budget_ratio / exp_order_pct` 与 `size_mult=1.0` 不变；技术三态 `CX/CM/PM/CS` 仍独立，
+  方向不能把 `PM/CS` 升级为买入。
+- 验证：`tests/test_buysell_core_exp_direction.py` 新增 7 个 watch 预确认/纪律场景（静态/动态唯一龙头、
+  新题材前端、存量题材前端、watch 普通中位股 neutral、ice_wait/high_diverg 中位仍 avoid），合计 21 项通过。
 
 ### v0.71（2026-10-25）预期买入方向裁判：进攻高位/切低位统一消费
 - 新增 `_exp_direction_eval`：基于 `high_continue/high_diverg/rotate_low/ice_wait/watch`、动态题材龙头、新题材发酵前排与身位档，输出 `attack_high / attack_low / neutral / avoid`。

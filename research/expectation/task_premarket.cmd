@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem PT scheduled task entry: premarket one-click (no pause; log appended to Logs\oneclick_premarket.log)
 rem Deadline: upload must be finished before 09:15; step 3c hard-check blocks upload on rows/date/sha1 mismatch.
 setlocal

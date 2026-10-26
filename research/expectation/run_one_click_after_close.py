@@ -29,7 +29,7 @@ import closeout_review as cr       # noqa: E402
 import run_expectation_build as rb # noqa: E402
 from bridge import axquant_contract as axc # noqa: E402
 
-SCRIPT_VERSION = "v0.72"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
+SCRIPT_VERSION = "v0.72b"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
 
 
 def _resolve_next_date(td: str, next_date: str) -> str:

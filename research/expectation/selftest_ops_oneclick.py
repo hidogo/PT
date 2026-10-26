@@ -38,8 +38,8 @@ def _load(mod_name):
 ac = _load("run_one_click_after_close")
 pm = _load("run_one_click_premarket")
 
-ok("T1 版本号 v0.72(收盘)", ac.SCRIPT_VERSION == "v0.72")
-ok("T1 版本号 v0.72(盘前)", pm.SCRIPT_VERSION == "v0.72")
+ok("T1 版本号 v0.72c(收盘)", ac.SCRIPT_VERSION == "v0.72b")
+ok("T1 版本号 v0.72c(盘前)", pm.SCRIPT_VERSION == "v0.72c")
 
 # --- T2 完成标记：幂等跳过（复盘任务链已跑过）---
 tmp = tempfile.mkdtemp(prefix="pt_ops_")
@@ -48,7 +48,7 @@ ac._write_done_marker(tmp, "2026-10-26", "2026-10-27", {"k": "v"})
 ok("T2 有标记则跳过", ac._skip_if_done(tmp, "2026-10-26", True) is True)
 ok("T2 未开启时不跳过", ac._skip_if_done(tmp, "2026-10-26", False) is False)
 _mk = json.load(io.open(ac._marker_path(tmp, "2026-10-26"), encoding="utf-8"))
-ok("T2 标记字段齐备", _mk.get("version") == "v0.72" and _mk.get("next_trade_date") == "2026-10-27"
+ok("T2 标记字段齐备", _mk.get("version") == ac.SCRIPT_VERSION and _mk.get("next_trade_date") == "2026-10-27"
    and bool(_mk.get("generated_at")) and _mk.get("files") == {"k": "v"})
 ok("T2 日期不同不跳过", ac._skip_if_done(tmp, "2026-10-27", True) is False)
 
@@ -128,6 +128,42 @@ try:
 finally:
     ac.datetime = _orig_dt
 ok("T6 非交易日 -> rc=0 跳过", _rc == 0)
+
+
+# --- T7 dated 文件已归档：不误报为缺失 ---
+_d7 = tempfile.mkdtemp(prefix="pt_ops_arc_")
+os.makedirs(os.path.join(_d7, "archive"), exist_ok=True)
+_f7 = os.path.join(_d7, "expectation_2026-10-26.csv")
+ok("T7 无根文件且无归档 -> 空", pm._archived_note(_f7, _d7) == "")
+_w(os.path.join(_d7, "archive", "expectation_2026-10-26.csv"), "code,name\n600838.XSHG,A\n")
+ok("T7 已归档 -> 提示仅上传 latest", "已归档" in pm._archived_note(_f7, _d7))
+
+# --- T8 板块映射周更（v0.72c，周一固定）+ run 幂等 ---
+eb = _load("export_boards")
+_d8 = tempfile.mkdtemp(prefix="pt_ops_brd_")
+_f8 = os.path.join(_d8, "boards_latest.csv")
+_w(_f8, "board_name,board_type,member_code\n人工智能,concept,600001.XSHG\n")
+# 周一(2026-10-26) -> 到期刷新；文件缺失也到期
+ok("T8 周一固定到期", eb.boards_refresh_due(datetime.date(2026, 10, 26), _f8)[0] is True)
+ok("T8 非周一跳过", eb.boards_refresh_due(datetime.date(2026, 10, 27), _f8)[0] is False)
+ok("T8 文件缺失到期", eb.boards_refresh_due(datetime.date(2026, 10, 27), os.path.join(_d8, "none.csv"))[0] is True)
+# 距上次 >=14 天兜底（防周一休市/失更）
+_old = os.path.join(_d8, "old_boards.csv")
+_w(_old, "board_name,board_type,member_code\n人工智能,concept,600001.XSHG\n")
+_future = datetime.date(2026, 11, 10)   # 与 old_boards mtime(今天) 相差 >=14 天
+ok("T8 >=14天兜底到期", eb.boards_refresh_due(_future, _old)[0] is True)
+# run()：内容未变 UNCHANGED（不覆盖 mtime）；内容变化 WROTE
+_m8 = os.path.join(_d8, "ths_board_mapping.json")
+json.dump([{"board_name": "人工智能", "board_type": "concept", "code": "600001.SH", "board_rank": 1}], open(_m8, "w", encoding="utf-8"))
+_d8b = tempfile.mkdtemp(prefix="pt_ops_brd2_")
+_r1 = eb.run(mapping_path=_m8, out_dir=_d8b)
+ok("T8 run WROTE", _r1["status"] == "WROTE" and _r1["boards"] == 1)
+_r2 = eb.run(mapping_path=_m8, out_dir=_d8b)
+ok("T8 run UNCHANGED 不覆盖", _r2["status"] == "UNCHANGED" and _r2["boards"] == 1)
+json.dump([{"board_name": "人工智能", "board_type": "concept", "code": "600001.SH", "board_rank": 1},
+           {"board_name": "AI算力", "board_type": "concept", "code": "600002.SH", "board_rank": 1}], open(_m8, "w", encoding="utf-8"))
+_r3 = eb.run(mapping_path=_m8, out_dir=_d8b)
+ok("T8 run 内容变化 WROTE", _r3["status"] == "WROTE" and _r3["boards"] == 2)
 
 print("TOTAL pass=%d fail=%d" % (_p, _f))
 raise SystemExit(1 if _f else 0)

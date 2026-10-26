@@ -9,6 +9,7 @@ T 日 09:00 验证/补跑、 09:15 前完成上传：（收盘一键为交易日
   步骤0  提供方(AXquant)就绪探活            axc.probe_report / missing
   步骤1  生成预期 CSV                        expectation_<T>.csv + latest（复用 run_expectation_build）
   步骤2  生成涨停/连板名单                    zt_lianban_latest.csv（T-1 数据，复用 export_lianban）
+  步骤2e 概念板块映射周更检查              周一固定刷新 boards_latest.csv（低频，UNCHANGED 跳过）
   步骤3  产出一致性核对                      预期 CSV<->源 jsonl；名单<->涨停池
   步骤4  上传勾选清单                        本地文件 -> 云端落点 -> 盘中核对关键字
 
@@ -35,7 +36,7 @@ import bridge  # noqa: E402
 import run_expectation_build as rb  # noqa: E402
 from bridge import axquant_contract as axc  # noqa: E402
 
-SCRIPT_VERSION = "v0.72"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
+SCRIPT_VERSION = "v0.72c"   # 板块周更（周一固定）：步骤2e 概念板块映射每周一检查刷新（低频，内容未变跳过覆盖）
 
 
 def _resolve_defaults(td: str, nt: str) -> tuple:
@@ -153,6 +154,13 @@ def _check_expectation_meta(latest_csv: str, meta_fp: str) -> tuple:
     if msha and msha != sha:
         return (1, "预期 CSV(latest) sha1=%s meta_sha1=%s -> FAIL(内容与 meta 不一致)" % (sha[:12], msha[:12]))
     return (0, "预期 CSV(latest) rows=%d sha1=%s -> OK(与 meta 一致)" % (rows, sha[:12]))
+
+def _archived_note(fp: str, out_root: str) -> str:
+    """目录瘦身会把 dated 文件移入 archive/（只上传 _latest）：返回归档说明，供清单避免误判缺失。"""
+    _arc = os.path.join(out_root, "archive", os.path.basename(fp))
+    if os.path.isfile(_arc) and _rows_of(_arc) > 0:
+        return "已归档(仅上传 _latest) archive/%s" % os.path.basename(_arc)
+    return ""
 
 
 def main(argv=None) -> int:
@@ -301,6 +309,22 @@ def main(argv=None) -> int:
         except Exception as e:
             print("[premarket] sync_selfwatch 失败(不影响预期/名单): %r" % e)
 
+    # 步骤2e: 概念板块映射周更（周一固定，低频；复用 export_boards，内容未变 UNCHANGED 跳过）
+    print("[premarket] 步骤2e 概念板块映射周更检查（周一固定） ...")
+    try:
+        import export_boards as _ebo
+        _boards_fp = os.path.join(out, "boards_latest.csv")
+        _due, _age = _ebo.boards_refresh_due(datetime.date.today(), _boards_fp)
+        if _due:
+            _age_txt = ("%.1f 天" % _age) if _age is not None else "缺失"
+            print("  [boards] 周一/到期 -> 刷新板块映射（上一版 age=%s）" % _age_txt)
+            _br = _ebo.run(out_dir=out)   # 默认 concept + rank-limit 5
+            print("  [boards] %s rows=%d boards=%d" % (_br["status"], _br["rows"], _br["boards"]))
+        else:
+            print("  [boards] 非周一 -> 跳过（保持低频，上一版 age=%.1f 天）" % (_age or 0.0))
+    except Exception as e:
+        print("[premarket] 板块周更检查失败(不影响预期/名单): %r" % e)
+
     # 步骤3：产出一致性核对
     print("[premarket] 步骤3 产出一致性核对 ...")
     _exp_csv = os.path.join(out, "expectation_latest.csv")
@@ -363,7 +387,10 @@ def main(argv=None) -> int:
     ]
     for label, fp in files:
         rows = _rows_of(fp)
-        state = ("%d 行" % rows) if rows >= 0 else "缺失"
+        if rows >= 0:
+            state = "%d 行" % rows
+        else:
+            state = _archived_note(fp, out) or "缺失"
         print("  待上传  %-22s %s" % (label, fp))
         print("          -> 状态: %s" % state)
     print("  云端落点(定时上传绑定 %s 后, 策略 _research_roots 自动依次查找):" % out)

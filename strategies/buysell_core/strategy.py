@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.71（2026-10-25）
-# 部署核对：日志首行 `buysell_core init version=v0.71 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.77（2026-10-26）
+# 部署核对：日志首行 `buysell_core init version=v0.77 ...`（init 打印 STRATEGY_VERSION）
+# v0.77 ST 三处兜底：tick 板块成员通道 / 首板买入 / 下单闸（place_order+place_expected_order）
+# v0.76 重启重建修复：不依赖当前封板/不因缺快照阻塞队列，ms 只取涨停价最早成交
+# v0.75 重启恢复：盘中 60s 节流持久化 + 重启重建缺失 first_zt + 全链路剔除 ST
+# v0.74 首笔灵敏度：near_scan 近涨停快速通道 + 开盘热点优先 + scan_batch 600 + 帧内最早一笔回填
 # 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.71"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-25）
+STRATEGY_VERSION = "v0.77"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
 
 
 def _warn(msg):
@@ -50,9 +54,22 @@ BLS = {
     # 全市场入池扫描（候选 B；失败回退 universe）
     'scan_enabled': True,
     'max_watch': 50,                # 入池上限标的数
-    'scan_batch': 300,              # 一次 get_snapshot(列表) 的批规模（单向）
+    'scan_batch': 600,              # 一次 get_snapshot(列表) 的批规模（单向；v0.74 600/分钟保证开盘10分钟扫完全市场一轮）
     'per_stock_cap': 60,            # 若列表不可用，逐只扫描上限
     'scan_min_chg': 3.0,            # 入池最小涨幅 %
+    'skip_st_pool': True,           # v0.75 全链路剔除 ST：scan/watch/near/pool 不含 ST；持仓 ST 保留卖出监控
+    'state_save_interval': 60.0,    # v0.75 盘中定期保存状态节流秒（handle_data 帧末）
+    'first_zt_rebuild_cap': 5,      # v0.75 重启重建 first_zt 单帧上限（防拖帧）
+    'first_zt_rebuild_tx_count': 200,  # v0.75 重启重建逐笔回看条数（API 上限 200）
+    'first_zt_rebuild_retry_sec': 30.0,  # v0.75 重建失败逐票重试节流（数据未就绪/回看失败 30s 后再试）
+    'first_zt_rebuild_heartbeat_sec': 60.0,  # v0.76 [restart-rebuild] 进度 heartbeat 节流
+    'restart_rebuild_1m_enabled': True,      # v0.76 handle_data 1m 兜底消化重建队列（tick 禁用/丢帧）
+    # v0.74 近涨停快速通道（docs/30）：scan 命中后跨轮保留，tick 3s 帧优先跟踪
+    'scan_near_chg': 7.0,           # 近涨停快速入池涨幅阈值 %
+    'scan_near_cap': 20,            # near_scan 补充池上限（按涨幅+时间淘汰）
+    'scan_near_keep_rounds': 3,     # near_scan 跨轮保留轮次（约 3 分钟）
+    'tick_near_cap': 12,            # 每帧 near_scan 纳入 tick 目标上限（防拖帧）
+    'scan_hot_first': True,         # 开盘 10 分钟热点优先：昨日涨停/自选/预期/固定池先扫
     # 预期三态（候选 D，docs/17）
     'fast_up_ratio': 0.01,          # two_1m 快速上攻：价站上 open*(1+r)
     'seal_exceed_ratio': 1.2,       # 一字板封单 >= 基准*1.2 -> 超预期
@@ -140,10 +157,16 @@ BLS = {
     'exp_buy_window_min': 30,          # 预期买入窗口：开盘 N 分钟内（10:00 前，其它类）
     'pool_expect_enabled': True,         # v0.27 涨停池预期三态初步确认（竞价超预期->观察，窗口内分最高/最主动优先）
     'pool_expect_skip_st': True,         # v0.28 涨停池合成过滤 ST（is_st 字段消费）
+    'vwap_weak_grace_sec': 30,           # v0.73 分时 VWAP 弱化首帧宽限（09:30-09:30:30 不判 CS）
+    'vwap_weak_confirm_sec': 6,          # v0.73 VWAP 弱化两帧确认（连续弱 N 秒才弃，允许回封恢复）
+    'vwap_weak_at_limit_exempt': True,   # v0.73 贴板/封死豁免 VWAP 弱化（px>=up*0.998）
+    'exp_entry_type_resync': True,       # v0.73 开盘重标 buy 候选 one_word/normal（防一字走普通超预期路径）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 200000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
     'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
+    'dyn_unq_require_board_map': True, # v0.73 竞价唯一需板块成员映射成功（防竞品=0 假唯一）
+    'dyn_unq_auction_member_cap': 15,   # v0.73 竞价唯一板块成员参与上限（兜底口径）
     'l2_big_enabled': True,            # v0.47 L2 大单占比（近涨停候选逐笔累计）
     'l2_big_amt_min': 1000000.0,       # 单笔大单阈值(元)
     'l2_big_amt_unit': 'shares',         # v0.48 business_amount 单位: shares(股)/lots(手)/yuan(元)
@@ -155,6 +178,10 @@ BLS = {
     'l2_big_seed_onjoin_enabled': True,   # v0.67 盘中新入池触板票补播种（_near 首见 60s 节流回看）
     'l2_tickdir_pages_onjoin': 5,      # v0.67 盘中入池播种页数（约1000分笔，覆盖入池前成交窗口）
     'l2_big_seed_onjoin_interval_sec': 60,  # v0.67 盘中入池播种节流秒（防同帧/频繁重种）
+    'l2_big_seed_onjoin_px_sec': 0,     # v0.73 逐票入池播种节流（0=每票当日首见即种，不被全局节流阻塞）
+    'l2_big_seed_onjoin_max_per_frame': 5,  # v0.73 单帧逐票播种上限（防拖帧）
+    'l2_big_seed_on_firstzt': True,     # v0.73 首封瞬间未播种补种（覆盖直接跳进首封的票）
+    'l2_big_seed_log': True,            # v0.73 播种后补打 [l2-big-seed] 摘要（盘中核对）
     'l2_big_log_sec': 300,             # v0.67 [l2-big] 探针重复打印间隔秒（首帧立即，之后按间隔重打）
     'l2_big_ratio_min': 0.10,          # 大单占比>=10% 加分/封单豁免
     'l2_big_bonus': 5.0,               # 大单占比达标加分(分)
@@ -413,6 +440,7 @@ class DataHub(object):
     def tx_zt_batch(self, secs, frame_data):
         # 近涨停候选逐笔涨停价成交统一入口：先帧推送（0 调用），缺者按 3s 帧 token 批量拉取一次；
         # 返回 {sec: 最早涨停价成交 ms}；up_px 消费时从 g.spot 取，避免缓存污染
+        # v0.74 帧推送命中票也用同帧 raw 回填更早首笔（0 额外 API），ms 尽量贴近真实首笔
         self._maybe_reset()
         secs = [s for s in (secs or []) if s]
         if not secs:
@@ -431,6 +459,10 @@ class DataHub(object):
             ms = _parse_tx_zt_ms(sec, raw.get(sec) or [], fields)
             if ms is not None:
                 out[sec] = ms
+        for sec in [s for s in out if raw.get(s)]:
+            raw_ms = _parse_tx_zt_ms(sec, raw.get(sec) or [], fields)
+            if raw_ms is not None and raw_ms < out[sec]:
+                out[sec] = raw_ms
         try:
             _tx_big_feed(secs, fields, raw)   # v0.47 L2 大单累计（同帧 raw）
         except Exception:
@@ -565,7 +597,7 @@ def initialize(context):
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
     g.rt_stats = {}   # v0.43 灵敏度日结采样（检测->下单时延，after_trading_end 打 [rt-summary]）
-    g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}   # v0.47 L2 大单累计 / v0.51 方向分布 / v0.52 播种水印 / v0.67 入池播种+探针节流（均按日重置）
+    g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}   # v0.47 L2 大单累计 / v0.51 方向分布 / v0.52 播种水印 / v0.67 入池播种+探针节流 / v0.73 VWAP 弱化确认（均按日重置）
     g.hist = {}         # sec -> (ts, df)  1d 历史缓存
     g.bs_codes = {}     # sec -> (ts, 板块成分代码)（首板闸门：板块内涨幅最高）
     g.first_board_fired = set()  # 首板打板当日去重（tick 首触 / 1m 兜底共用）
@@ -580,6 +612,10 @@ def initialize(context):
     g.pool_all = []     # 全市场 A 股代码（按交易日刷新）
     g.pool_day = None
     g.watch = []        # 入池候选（动态，买入/打分迭代目标）
+    g.near_scan = {}    # v0.74 sec -> {'ts','round','chg'} 近涨停快速通道（scan 命中后跨轮保留）
+    g.scan_order = []   # v0.74 每日扫描顺序（开盘 10 分钟热点优先）
+    g.scan_order_day = None
+    g.scan_round = 0    # v0.74 扫描轮次计数（near_scan 清理用）
     g.selfwatch = []   # 手动/文件同步 自选股（实时同步 selfwatch.csv）
     g.pool_static = [] # 固定股池 = 自选股 ∪ 超预期确认推荐池(side=buy)
     g.last_scan = 0
@@ -590,6 +626,12 @@ def initialize(context):
     g.seal_base = {}    # sec -> 当日首次封单量基准
     g.seal_bid_base = {}  # sec -> 当日首次封单委托笔数基准（L2）
     g.first_zt = {}     # sec -> 涨停首笔成交感知状态（tick_data，仅交易）
+    g.first_zt_rebuild_pending = []   # v0.75 同日重启待重建首触队列（tick 帧分批消化）
+    g.first_zt_rebuild_retry_ts = {}  # v0.75 重建失败逐票重试节流（防每帧重复拉 API）
+    g.restart_rebuild_hb_ts = 0.0     # v0.76 重建进度 heartbeat 节流时间戳
+    g.last_save_ts = 0.0              # v0.75 盘中定期保存节流时间戳
+    g.st_set = set(); g.st_day = None # v0.75 ST 名单按交易日缓存（名称兜底）
+    g.st_skip_log_ts = 0.0            # v0.75 [st-skip] 日志节流
     g.dyn_unq = None    # v0.38 盘中动态唯一+跟风+扫板状态（按日重置，随 g 持久化）
     g.break_sold = set()  # sec -> 炸板事件卖出首触发标记（v0.26，跨重启持久化）
     g.seal_sold = set()   # sec -> 封单大减事件卖出首触发标记（v0.26）
@@ -681,6 +723,7 @@ def before_trading_start(context, data):
         try:
             _mark_one_word_open()   # v0.31c 盘中重启：重标一字板（免5s门槛不丢）
             _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])), pages=int(BLS.get('l2_tickdir_pages_restart', 10)))   # v0.52a 重启补种加大页数（覆盖9:30-10:30活跃窗口至09:25竞价）
+            _rebuild_first_zt_queue()   # v0.75 重启登记缺失 first_zt（tick 帧分批重建，防下午补 first/tx_ms 失真）
         except Exception:
             pass
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
@@ -697,7 +740,9 @@ def _maybe_roll_day():
     g.exp_day = day
     g.ma5_touch_day = day; g.ma5_touched = set()
     g.ma5_lifecycle_day = day; g.ma5_lows = {}
-    g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
+    g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
+    g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0   # v0.74 跨日重置近涨停通道与扫描游标
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0   # v0.75/76 跨日重置重启恢复队列、heartbeat 与保存节流
     return True
 
 
@@ -725,8 +770,17 @@ def handle_data(context, data):
     if _maybe_roll_day():
         for sec in list(get_positions()):
             _hold_exp_init(sec, force=True)   # v0.32 跨日重算持仓预期条目
+    try:
+        if BLS.get('restart_rebuild_1m_enabled', True):
+            _rebuild_first_zt_tick()   # v0.76 1m 兜底：tick 禁用/丢帧仍消化重启重建队列
+    except Exception as _e:
+        _warn('restart-rebuild(1m) fail: %r' % _e)
     sell_manager(context)
     _try_expected_buys(context)
+    _now = time.time()
+    if _now - float(getattr(g, 'last_save_ts', 0.0) or 0.0) >= float(BLS.get('state_save_interval', 60.0)):
+        g.last_save_ts = _now
+        _save_state()   # v0.75 盘中定期保存：重启恢复到分钟级而非事件级
     if len(g.daily['bought']) >= BLS['daily_max_buy']:
         return
     if BLS['ma5_pullback']:
@@ -1440,6 +1494,42 @@ def _below_vwap(sec):
     px = last_px(sec)
     return bool(px and vwap and px < vwap)
 
+def _below_vwap_confirm(sec):
+    # v0.73 分时 VWAP 弱化确认：首帧宽限 + 贴板豁免 + 两帧确认，防 09:30 数据未稳定永久误弃；
+    # 连续弱 N 秒才判 CS；期间回封/回站 VWAP 即取消 pending。
+    try:
+        s = g.spot.get(sec)
+        vwap = float(s.get("wavg_px") or 0.0) if s else 0.0
+        up = float(s.get("up_px") or 0.0) if s else 0.0
+        px = last_px(sec)
+        if not (px and vwap and px < vwap):
+            p = getattr(g, 'below_vwap_pending', None)
+            if p:
+                p.pop(sec, None)
+            return False
+        pending = getattr(g, 'below_vwap_pending', None)
+        if pending is None:
+            pending = {}; g.below_vwap_pending = pending
+        if BLS.get('vwap_weak_at_limit_exempt', True) and up > 0 and px >= up * 0.998:
+            pending.pop(sec, None)
+            return False
+        age = _sec_age()
+        grace = float(BLS.get('vwap_weak_grace_sec', 30))
+        confirm = float(BLS.get('vwap_weak_confirm_sec', 6))
+        if age <= grace:
+            if sec not in pending:
+                pending[sec] = age
+                log.info('[exp-rt] %s below_vwap 首帧待确认 vwap=%.3f px=%.3f age=%.0fs (不判弱)' % (_sn(sec), vwap, px, age))
+            return False
+        first_age = float(pending.get(sec) or 0.0)
+        if not first_age or age - first_age < confirm:
+            return False
+        pending.pop(sec, None)
+        log.info('[exp-rt] %s below_vwap 连续弱确认 vwap=%.3f px=%.3f age=%.0fs -> 放弃' % (_sn(sec), vwap, px, age))
+        return True
+    except Exception:
+        return False
+
 def _eval_auction(sec):
     e = g.exp.setdefault(sec, {})
     if e.get("entry_type") == "one_word":
@@ -1457,7 +1547,7 @@ def _eval_intraday(sec, auction_status):
         return CS, ["from_auction"]
     if _two_1m_break(sec) and auction_status in (PX, CX):
         return CX, ["two_1m_break"]
-    if _below_vwap(sec):
+    if _below_vwap_confirm(sec):
         return CS, ["break_vwap"]
     return CM, ["held_vwap"]
 
@@ -2232,6 +2322,80 @@ def _norm_sec(code):
         return num + '.XBJ'
     return num
 
+
+def _is_st(sec):
+    # v0.75 全链路 ST 判定：zt_lianban 权威 is_st 优先；名单外按名称前缀兜底；
+    # 命中结果按交易日缓存 g.st_set；skip_st_pool=False 时一律返回 False 保持旧行为。
+    sec = str(sec or '')
+    if not sec or not BLS.get('skip_st_pool', True):
+        return False
+    zt = (getattr(g, 'zt_lianban', None) or {}).get(sec)
+    if zt is not None:
+        try:
+            return bool(zt.get('is_st'))
+        except Exception:
+            pass
+    day = str(get_trading_day())
+    st_set = getattr(g, 'st_set', None)
+    if st_set is None or getattr(g, 'st_day', None) != day:
+        st_set = set(); g.st_set = st_set; g.st_day = day
+    if sec in st_set:
+        return True
+    nm = getattr(g, '_name_map', None)
+    if nm is None:
+        nm = {}; g._name_map = nm
+    if sec not in nm:
+        try:
+            _got = get_stock_name(sec)
+            nm[sec] = str(_got or '').strip()
+        except Exception:
+            nm[sec] = ''
+    _name = (nm.get(sec) or '').strip().upper()
+    if _name.startswith('*ST') or _name.startswith('ST') or _name.startswith('S*ST') or _name.startswith('SST'):
+        st_set.add(sec)
+        return True
+    return False
+
+
+def _warm_name_map(secs):
+    # v0.75 ST 名称兜底批量预热：get_stock_name 支持列表，一次 RPC 覆盖整批，避免逐只名称查询拖帧
+    secs = [s for s in (_norm_sec(c) for c in (secs or [])) if s]
+    if not secs:
+        return
+    nm = getattr(g, '_name_map', None)
+    if nm is None:
+        nm = {}; g._name_map = nm
+    todo = [s for s in secs if s not in nm]
+    if not todo:
+        return
+    try:
+        got = get_stock_name(todo) or {}
+        if isinstance(got, dict):
+            for _c, _v in got.items():
+                _cc = _norm_sec(_c)
+                if not _cc:
+                    continue
+                if isinstance(_v, dict):
+                    _v = _v.get('stock_name') or ''
+                nm[_cc] = str(_v or '').strip()
+        elif isinstance(got, (list, tuple)):
+            for _row in got:
+                try:
+                    if isinstance(_row, dict):
+                        _cc = _norm_sec(_row.get('code') or _row.get('security') or '')
+                        _v = _row.get('stock_name') or _row.get('name') or ''
+                    elif len(_row) >= 2:
+                        _cc = _norm_sec(_row[0]); _v = _row[1]
+                    else:
+                        continue
+                    if _cc:
+                        nm[_cc] = str(_v or '').strip()
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
 def _research_roots():
     # 云端研究根 + 定时上传自建 upload_file/ + data/ 兜底（见 docs-02/33；upload_file 为定时上传任务自建目录）
     base = get_research_path()
@@ -2271,6 +2435,9 @@ def _sync_pool_static():
             buy_codes.append(code)
     buy_codes.sort(key=lambda c: 0 if 'exceed' in str((getattr(g, 'exp_file', {}).get(c) or {}).get('expected_status') or '') else 1)
     pool = list(dict.fromkeys([x for x in (_norm_sec(c) for c in (sw + buy_codes)) if x]))
+    if BLS.get('skip_st_pool', True):
+        _warm_name_map(pool)
+        pool = [x for x in pool if not _is_st(x)]
     g.pool_static = pool
     log.info('[pool] selfwatch=%d expect_buy=%d pool_static=%d' % (len(sw), len(buy_codes), len(pool)))
 
@@ -2278,8 +2445,17 @@ def _sync_pool_static():
 def _pool():
     # 当前买入/打分迭代目标：动态 watch ∪ 固定池(自选股+预期推荐)；空回落 universe
     out = [x for x in (_norm_sec(s) for s in (list(g.watch or []) + list(g.pool_static or []))) if x]
+    if BLS.get('skip_st_pool', True):
+        _warm_name_map(out)
+        out = [x for x in out if not _is_st(x)]
     out = list(dict.fromkeys(out))
-    return out or BLS['universe']
+    if out:
+        return out
+    uni = [x for x in BLS['universe'] if x]
+    if BLS.get('skip_st_pool', True):
+        _warm_name_map(uni)
+        uni = [x for x in uni if not _is_st(x)]
+    return uni or BLS['universe']
 
 
 def _get_snapshot_many(codes, cap):
@@ -2301,8 +2477,25 @@ def _get_snapshot_many(codes, cap):
     return out
 
 
+def _hot_scan_set():
+    # v0.74 开盘热点优先：昨日涨停/自选/预期/固定池先扫（黄金窗口不浪费在冷门票）
+    hot = set(getattr(g, 'zt_lianban', None) or {})
+    for c in (getattr(g, 'selfwatch', None) or []):
+        _c = _norm_sec(c)
+        if _c:
+            hot.add(_c)
+    for c in (getattr(g, 'pool_static', None) or []):
+        hot.add(c)
+    for c in (getattr(g, 'exp_file', None) or {}):
+        hot.add(c)
+    return hot
+
+
 def _scan_market():
     # 全市场扫描：按涨幅/接近涨停过滤，取 top max_watch 入池（缓存按交易日）
+    # v0.74：scan_batch=600 + 开盘热点优先 -> 开盘 10 分钟扫完全市场一轮；
+    # near_scan 近涨停快速通道：命中 chg>=scan_near_chg 即跨轮保留，tick 3s 帧优先跟踪，
+    # 新发酵票首触不再等 17 分钟轮询。
     day = str(get_trading_day())
     if g.pool_day != day:
         try:
@@ -2313,14 +2506,19 @@ def _scan_market():
             g.pool_all = []
     if not g.pool_all:
         return BLS['universe']
-    cap = int(BLS['scan_batch'])
-    total = len(g.pool_all)
-    if cap > total:
-        cap = total
+    if getattr(g, 'scan_order_day', None) != day or not g.scan_order:
+        order = list(g.pool_all)
+        if BLS.get('scan_hot_first', True) and _min_age() <= int(BLS.get('first_board_minute', 10)):
+            hot = [c for c in order if c in _hot_scan_set()]
+            order = hot + [c for c in order if c not in hot]
+        g.scan_order = order
+        g.scan_order_day = day
+    total = len(g.scan_order)
+    cap = min(int(BLS['scan_batch']), total)
     offset = g.scan_offset % max(total, 1)
-    window = g.pool_all[offset:offset + cap]
+    window = g.scan_order[offset:offset + cap]
     if len(window) < cap and total:
-        window = window + (g.pool_all + g.pool_all)[offset + cap:offset + cap + (cap - len(window))]
+        window = window + (g.scan_order + g.scan_order)[offset + cap:offset + cap + (cap - len(window))]
     g.scan_offset = (offset + cap) % max(total, 1)
     sn = {}
     try:
@@ -2339,8 +2537,48 @@ def _scan_market():
         near_limit = 1.0 if (up > 0 and px >= up * 0.998) else 0.0
         rows.append({'code': code, 'chg': chg, 'limit': near_limit,
                      'proxy': chg + 20.0 * near_limit})
+    if BLS.get('skip_st_pool', True):
+        _warm_name_map([r['code'] for r in rows])
+        _pre_st = len(rows)
+        rows = [r for r in rows if not _is_st(r['code'])]
+        _n_st = _pre_st - len(rows)
+        if _n_st and time.time() - float(getattr(g, 'st_skip_log_ts', 0.0) or 0.0) >= 300.0:
+            g.st_skip_log_ts = time.time()
+            log.info('[st-skip] scan rows=%d skip_st=%d' % (_pre_st, _n_st))
     rows.sort(key=lambda r: r['proxy'], reverse=True)
     watch = [x for x in (_norm_sec(r['code']) for r in rows[:int(BLS['max_watch'])]) if x]
+    # v0.74 near_scan 维护：命中近涨停阈值入补充池；跨轮保留；已 first_zt 移除；超上限按涨幅+时间淘汰
+    g.scan_round = int(getattr(g, 'scan_round', 0) or 0) + 1
+    cur_round = g.scan_round
+    keep_rounds = int(BLS.get('scan_near_keep_rounds', 3))
+    near_cap = int(BLS.get('scan_near_cap', 20))
+    near = getattr(g, 'near_scan', None)
+    if near is None:
+        near = {}; g.near_scan = near
+    ft = getattr(g, 'first_zt', None) or {}
+    if BLS.get('skip_st_pool', True):
+        _warm_name_map(list(near))
+        for code in [x for x in near if _is_st(x)]:
+            near.pop(code, None)   # 存量 near_scan 也剔除 ST（防旧状态残留）
+    for code in [x for x in near if x in ft]:
+        near.pop(code, None)
+    for code in [x for x in near if (near[x].get('round') or 0) < cur_round - keep_rounds]:
+        near.pop(code, None)
+    near_chg = float(BLS.get('scan_near_chg', 7.0))
+    for r in rows:
+        code = _norm_sec(r['code'])
+        if not code or code in ft:
+            continue
+        if r['chg'] >= near_chg or r['limit']:
+            rec = near.get(code)
+            near[code] = {'ts': rec.get('ts') if rec else time.time(),
+                          'round': cur_round, 'chg': r['chg']}
+    if len(near) > near_cap:
+        ranked = sorted(near.items(), key=lambda kv: (-(kv[1].get('chg') or 0.0), kv[1].get('ts') or 0.0))
+        near = dict(ranked[:near_cap])
+        g.near_scan = near
+    near_secs = [c for c in near if c not in ft]
+    watch = list(dict.fromkeys(watch + near_secs))
     if watch:
         g.watch = watch
     return (watch or BLS['universe'])
@@ -2351,8 +2589,9 @@ def _sync_watch(context):
         watch = _scan_market()
         if watch:
             g.watch = list(dict.fromkeys(watch))
-        log.info('market_scan bar=%s pool=%d watch=%d off=%d cap=%d' % (
+        log.info('market_scan bar=%s pool=%d watch=%d near=%d off=%d cap=%d' % (
             _hhmm(), len(g.pool_all or []), len(g.watch),
+            len(getattr(g, 'near_scan', None) or {}),
             getattr(g, 'scan_offset', 0), int(BLS.get('scan_batch', 300))))
     except Exception as e:
         _warn('market_scan fail: %r' % e)
@@ -3245,6 +3484,8 @@ def _exp_original_theme_leader(sec):
 def _exp_direction_eval(sec):
     # v0.71 预期买入方向裁判：attack_high/attack_low 仅排序 +0.8；avoid 直接不参与。
     # 技术三态 CX/CM/PM/CS 不在此函数内改变，仓位比例也不消费 direction score。
+    # v0.72 watch 预确认：样本不足时仍按静态唯一龙头/已确认发酵前排给出进攻方向，
+    # 避免开盘 30 分钟方向分全部为 0；high_diverg/ice_wait 仍只放行低位。
     out = {
         'kind': 'neutral', 'score': 0.0, 'hard_skip': False, 'size_mult': 1.0,
         'theme': '', 'role': 'outside', 'stage': 'watch', 'phase': 'watch', 'reason': '',
@@ -3293,21 +3534,28 @@ def _exp_direction_eval(sec):
 
         out['phase'] = ph
         bonus = float(BLS.get('exp_direction_attack_bonus', 0.8) or 0.0)
-        if old_leader and ph == 'high_continue':
+        # watch 阶段不视为“方向不明”：静态/动态唯一龙头与已确认发酵前排仍给进攻分；
+        # 但 watch 不做 hard_skip，避免样本不足误杀早盘灵敏度。
+        leader_ok = (ph == 'high_continue'
+                     or (ph == 'rotate_low' and BLS.get('exp_direction_rotate_leader_exception', True))
+                     or ph == 'watch')
+        front_ok = (ph not in ('high_diverg', 'ice_wait') or tier == 'low')
+        if old_leader and leader_ok:
+            _reason = ('origin_leader_watch_preconfirm' if ph == 'watch'
+                       else 'origin_leader_rotate_exception' if ph == 'rotate_low'
+                       else 'origin_leader_high_continue')
             out.update(kind='attack_high', score=bonus, theme=old_leader, role='leader',
                        stage=(fm.get(old_leader) or {}).get('stage') or 'watch',
-                       reason='origin_leader_high_continue')
-        elif old_leader and ph == 'rotate_low' and BLS.get('exp_direction_rotate_leader_exception', True):
-            out.update(kind='attack_high', score=bonus, theme=old_leader, role='leader',
-                       stage=(fm.get(old_leader) or {}).get('stage') or 'watch',
-                       reason='origin_leader_rotate_exception')
-        elif new_front:
+                       reason=_reason)
+        elif new_front and front_ok:
+            _reason = 'new_theme_front_watch' if ph == 'watch' else 'new_theme_front'
             out.update(kind='attack_low', score=bonus, theme=new_front, role='front',
-                       stage=new_front_stage, reason='new_theme_front')
-        elif old_front:
+                       stage=new_front_stage, reason=_reason)
+        elif old_front and front_ok:
             _kind = 'attack_low' if tier == 'low' else 'attack_high'
+            _reason = 'theme_ferment_front_watch' if ph == 'watch' else 'theme_ferment_front'
             out.update(kind=_kind, score=bonus, theme=old_front, role='front',
-                       stage=old_front_stage, reason='theme_ferment_front')
+                       stage=old_front_stage, reason=_reason)
         elif hot_rear and BLS.get('exp_direction_hot_front_only', True):
             out.update(kind='avoid', theme=hot_rear, role='rear', stage='hot',
                        reason='hot_rear')
@@ -3615,6 +3863,31 @@ def _confirm_expected(code):
         return (CS if actual < 0 else PM), actual
     return PM, actual   # meet/未标注 -> 等盘中确认
 
+def _resync_buy_entry_type(code):
+    # v0.73 开盘重标 side=buy 候选入口类型：一字开板 -> one_word（走封单三态，防 below_vwap 误弃）；
+    # 文件标 one_word 但实时已开板 -> 回落 normal。仅改 buy 候选，不动持仓卖出路径。
+    if not BLS.get('exp_entry_type_resync', True):
+        return str((g.exp.get(code) or {}).get('entry_type') or 'normal')
+    en = g.exp_file.get(code) or {}
+    if str(en.get('side') or (g.exp.get(code) or {}).get('side') or 'hold') != 'buy':
+        return str((g.exp.get(code) or {}).get('entry_type') or en.get('entry_type') or 'normal')
+    e = g.exp.setdefault(code, {})
+    cur = str(e.get('entry_type') or en.get('entry_type') or 'normal')
+    if str(cur).lower().startswith('one_word'):
+        cur = 'one_word'
+    ow = _is_one_word_open(code)
+    if ow and cur != 'one_word':
+        e['entry_type'] = 'one_word'
+        en['entry_type'] = 'one_word'
+        log.info('[exp-rt] %s entry_type=%s -> one_word(开盘重标)' % (_sn(code), cur))
+        return 'one_word'
+    if not ow and cur == 'one_word':
+        e['entry_type'] = 'normal'
+        en['entry_type'] = 'normal'
+        log.info('[exp-rt] %s entry_type=one_word -> normal(已开板重标)' % _sn(code))
+        return 'normal'
+    return cur
+
 def _exp_rt_status(code):
     # 预期买入实时三态（v0.14 两阶段）：tick/bar 均可调，返回 (state, reason)
     #   超预期：竞价达标 -> PM(observe 观察)；分时确认(两分钟上攻 或 一分钟冲涨停,且不破VWAP) -> CX(买入)；破VWAP -> CS 放弃
@@ -3625,7 +3898,7 @@ def _exp_rt_status(code):
     for _k in ('entry_type', 'side', 'expected_status', 'expected_auction_change_pct', 'seal_amount_t0', 'sell_policy_hint'):
         if en.get(_k) is not None:
             e[_k] = en[_k]
-    entry = str(e.get("entry_type") or en.get("entry_type") or "normal")
+    entry = _resync_buy_entry_type(code)
     exp_status = str(e.get("expected_status") or en.get("expected_status") or "")
     au, _ra = _eval_auction(code)
     e["auction_status"] = au
@@ -3648,9 +3921,9 @@ def _exp_rt_status(code):
                     or (actual == 0.0 and (_op0 <= 0 or not _auction_ready(code)))):
                 return PM, "await_intraday_confirm"
             return CS, "auction_not_met(%.1f%%)" % actual    # 竞价初判未超预期 -> 放弃
-        if (_two_1m_break(code) or _limit_up_within_1m(code)) and not _below_vwap(code):
+        if (_two_1m_break(code) or _limit_up_within_1m(code)) and not _below_vwap_confirm(code):
             return CX, "intraday_exceed(%.1f%%)" % actual   # 分时确认超预期(两分钟上攻/一分钟冲涨停) -> 买
-        if _below_vwap(code):
+        if _below_vwap_confirm(code):
             return CS, "below_vwap_weak"                    # 分时转弱 -> 放弃
         return PM, "observe_auction_exceed %.1f%%" % actual   # 竞价超预期初步确认 -> 观察，等分时
     if "miss" in exp_status:
@@ -3762,6 +4035,22 @@ def _dyn_unq_auction_unique(sec):
         return False
     a = (st.get('auction') or {}).get(sec) or {}
     return bool(a.get('unique'))
+
+def _auction_board_of(sec):
+    # v0.73 竞价唯一板块归属：概念板块文件映射优先；概念未命中时回退任意板块成员，
+    # 避免“板块映射缺失 -> 竞品=0 -> 假唯一”。
+    try:
+        for b in _concept_boards_of(sec):
+            if _board_members_file(b, 1):
+                return b
+        if getattr(g, 'stock_boards', None):
+            for b in (g.stock_boards.get(sec) or []):
+                if _board_members_file(b, 1):
+                    return b
+    except Exception:
+        pass
+    return None
+
 def _dyn_unq_auction_eval():
     # 竞价唯一预判（09:25/09:31 各算一次，0 盘中 RPC）：对 side=buy 预期条目统计
     # 同板块同身位（board_cnt）竞品中竞价超预期(pending_exceed)家数 -> 0 则本票竞价唯一。
@@ -3776,11 +4065,10 @@ def _dyn_unq_auction_eval():
     cboard = {}
     board_of = {}
     for c in entries:
-        for b in _concept_boards_of(c):
-            if _board_members_file(b, 1):
-                cboard[c] = b
-                board_of.setdefault(b, []).append(c)
-                break
+        b = _auction_board_of(c)
+        if b:
+            cboard[c] = b
+            board_of.setdefault(b, []).append(c)
     for c, en in entries.items():
         st_ = str(en.get('expected_status') or '')
         exceed = 'exceed' in st_
@@ -3788,9 +4076,10 @@ def _dyn_unq_auction_eval():
             log.info('[dyn-unq] %s 中位股不参与唯一预判 -> skip' % _sn(c))
             continue
         b = cboard.get(c)
+        mapped = bool(b)
         lvl = _auction_level(c)
         peer_n = 0; peer_ex = 0
-        for p in (board_of.get(b) or []) if b else []:
+        for p in (board_of.get(b) or []) if mapped else []:
             if p == c:
                 continue
             if _auction_level(p) != lvl:
@@ -3798,11 +4087,16 @@ def _dyn_unq_auction_eval():
             peer_n += 1
             if 'exceed' in str((g.exp_file.get(p) or {}).get('expected_status') or ''):
                 peer_ex += 1
+        unique = (exceed and peer_ex == 0
+                  and (mapped or not BLS.get('dyn_unq_require_board_map', True)))
         st['auction'][c] = {'exceed': exceed, 'level': lvl, 'peer_cnt': peer_n,
-                            'peer_exceed': peer_ex, 'unique': (exceed and peer_ex == 0)}
+                            'peer_exceed': peer_ex, 'mapped': mapped, 'unique': unique}
         if exceed:
-            log.info('[dyn-unq] 竞价唯一预判 %s 身位=%s 竞品=%d/超预期=%d -> %s' % (
-                _sn(c), lvl, peer_n, peer_ex, '唯一' if peer_ex == 0 else '并列'))
+            if mapped:
+                log.info('[dyn-unq] 竞价唯一预判 %s 身位=%s 竞品=%d/超预期=%d -> %s' % (
+                    _sn(c), lvl, peer_n, peer_ex, '唯一' if peer_ex == 0 else '并列'))
+            else:
+                log.info('[dyn-unq] %s 板块未映射/成员缺失 -> 不判唯一 (竞品无法评估)' % _sn(c))
     st['auction_done'] = True
     return len(st['auction'])
 
@@ -4270,6 +4564,8 @@ def _try_first_board_buy(context, sec, rank_secs=None):
         return
     if len(g.daily['bought']) >= BLS['daily_max_buy']:
         return
+    if BLS.get('skip_st_pool', True) and _is_st(sec):
+        log.info('[st-skip] %s ST股首板拦截(first_board)' % _sn(sec)); return
     if _is_one_word_open(sec):
         return                       # 除一字板
     if not _is_first_board(sec):
@@ -5781,18 +6077,26 @@ def _l2_probe(context):
         _warn('l2 probe fail: %r' % e)
 
 def _tick_targets():
-    # tick 采集目标：持仓 + universe 恒有 + watch 前 N（控 3s 帧负担，避免丢帧）
+    # tick 采集目标：持仓 + universe 恒有 + near_scan 近涨停补充 + watch 前 N（控 3s 帧负担，避免丢帧）
+    # v0.74 near_scan 优先于 watch：新发酵票从 scan 命中起即被 3s 帧盯住，首触不再等整轮轮询
     # v0.36 帧缓存：同一 3s 帧内多消费（snapshot/gear 限额动态化）复用，避免重复 get_positions
     tok = int(time.time() / 3.0)
     _c = getattr(g, 'tick_targets_cache', None) or {}
     if _c.get('tok') == tok:
         return _c['secs']
     pos = list(get_positions())
-    uni = [x for x in BLS['universe'] if x not in pos]
-    static = [x for x in (g.pool_static or []) if x not in pos and x not in uni]
+    _skip_st = BLS.get('skip_st_pool', True)
+    if _skip_st:
+        _warm_name_map(list(BLS['universe']) + (g.pool_static or []) + list((getattr(g, 'near_scan', None) or {}).keys()) + (g.watch or []))
+    uni = [x for x in BLS['universe'] if x not in pos and not (_skip_st and _is_st(x))]
+    static = [x for x in (g.pool_static or []) if x not in pos and x not in uni and not (_skip_st and _is_st(x))]
+    ft = getattr(g, 'first_zt', None) or {}
+    near_cap = int(BLS.get('tick_near_cap', 12))
+    near = [x for x in (getattr(g, 'near_scan', None) or {})
+            if x not in pos and x not in uni and x not in static and x not in ft and not (_skip_st and _is_st(x))][:near_cap]
     cap = int(BLS.get('tick_watch_cap', 15))
-    watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static][:cap]
-    out = pos + uni + static + watch
+    watch = [x for x in (g.watch or []) if x not in pos and x not in uni and x not in static and x not in near and not (_skip_st and _is_st(x))][:cap]
+    out = pos + uni + near + static + watch
     if BLS.get('tick_board_scan', True) and _min_age() <= int(BLS.get('first_board_minute', 10)):
         # v0.48 B1 仅首板窗口生效（09:30-09:40 后并入无交易价值, 防午后帧预算超限）
         try:
@@ -5801,7 +6105,7 @@ def _tick_targets():
                 _cap_m = int(BLS.get('tick_board_member_cap', 10))
                 for _b in top3:
                     for _m in _board_members_file(_b, _cap_m):
-                        if _m and _m not in out and _m not in pos:
+                        if _m and _m not in out and _m not in pos and not (_skip_st and _is_st(_m)):
                             out.append(_m)
         except Exception:
             pass
@@ -5821,6 +6125,17 @@ def _snap_vol(s):
             except Exception:
                 return 0.0
     return 0.0
+
+
+def _tick_seed_cands(_near):
+    # v0.74 近涨停 L2 播种候选：逐笔 near + near_scan 未首触票（未到 0.98 也补历史大单，防无数据当无大单）
+    out = list(_near or [])
+    ft = getattr(g, 'first_zt', None) or {}
+    _skip_st = BLS.get('skip_st_pool', True)
+    for s in (getattr(g, 'near_scan', None) or {}):
+        if s not in ft and s not in out and not (_skip_st and _is_st(s)):
+            out.append(s)
+    return out
 
 
 def _parse_tx_zt_ms(sec, rows, fields):
@@ -5908,7 +6223,7 @@ def _tx_big_feed(secs, fields, raw):
         if not rows:
             continue
         a = acc.setdefault(sec, {'amt': 0.0, 'buy': 0.0, 'sell': 0.0, 'un': 0.0,
-                                 'bn': 0, 'sn': 0, 'un_n': 0, 'seen': set(), 'max': 0.0})
+                                 'bn': 0, 'sn': 0, 'un_n': 0, 'seen': set(), 'max': 0.0, 'first_ts': None})
         seen = a['seen']
         if len(seen) >= _cap:
             continue
@@ -6038,7 +6353,7 @@ def _l2_big_seed(secs, pages=None):
             if i_b < 0:
                 log.info('[tickdir] %s fields 缺 business_balance 跳过' % _sn(sec)); continue
             a = acc.setdefault(sec, {'amt': 0.0, 'buy': 0.0, 'sell': 0.0, 'un': 0.0,
-                                     'bn': 0, 'sn': 0, 'un_n': 0, 'seen': set(), 'max': 0.0})
+                                     'bn': 0, 'sn': 0, 'un_n': 0, 'seen': set(), 'max': 0.0, 'first_ts': None})
             w = wm.get(sec, 0); w_new = w; big = 0; first_ts = None; n = 0; seen_ts = set()
             for row in rows:
                 try:
@@ -6078,6 +6393,7 @@ def _l2_big_seed(secs, pages=None):
                 else:
                     a['un'] += bal
                     a['un_n'] = a.get('un_n', 0) + 1
+            a['first_ts'] = first_ts
             wm[sec] = w_new
             if sec not in seeded:
                 seeded.add(sec)
@@ -6087,27 +6403,181 @@ def _l2_big_seed(secs, pages=None):
         _warn('l2_big_seed fail %r' % e)
 
 
+def _rebuild_first_zt_queue():
+    # v0.75 同日重启登记：候选 = 买入池 + 持仓 + 预期文件，缺失 first_zt 且非 ST 的票排队，
+    # 由 tick 帧分批重建（ms 优先用 _l2_big_seed 回看首笔，其次逐笔回看，最后快照时间戳）。
+    cands = [x for x in dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])]
+    pending = getattr(g, 'first_zt_rebuild_pending', None)
+    if pending is None:
+        pending = []; g.first_zt_rebuild_pending = pending
+    ft = getattr(g, 'first_zt', None) or {}
+    added = 0
+    for sec in cands:
+        if sec in ft or sec in pending or _is_st(sec):
+            continue
+        pending.append(sec)
+        added += 1
+    if added:
+        log.info('[restart-rebuild] 登记待重建首触 %d 家（新增 %d）' % (len(pending), added))
+
+
+def _rebuild_first_zt_tick():
+    # v0.76 tick/1m 消化重建队列：不要求“当前仍封板”（当日已涨停即可重建），
+    # 缺涨停价的票批量补快照（一次 RPC），仍缺则 30s 后重试且不阻塞后续批次；
+    # ms 只取 _parse_tx_zt_ms 最早涨停价成交，失败才降级快照 hsTimeStamp；
+    # 记录 src=restart_rebuild / restart_rebuild_fallback，幂等（已有记录/ST 跳过）。
+    pending = getattr(g, 'first_zt_rebuild_pending', None)
+    if not pending:
+        return
+    cap = int(BLS.get('first_zt_rebuild_cap', 5))
+    now = time.time()
+    retry = getattr(g, 'first_zt_rebuild_retry_ts', None)
+    if retry is None:
+        retry = {}; g.first_zt_rebuild_retry_ts = retry
+    ft = getattr(g, 'first_zt', None)
+    if ft is None:
+        ft = {}; g.first_zt = ft
+    retry_sec = float(BLS.get('first_zt_rebuild_retry_sec', 30.0))
+    done = set()
+    wait = set()
+    got = []
+    # 本帧可处理票：已有记录/ST 移出；冷却中的票不占 cap，避免无快照票阻塞后续批次。
+    batch = []
+    for sec in pending:
+        if sec in ft:
+            done.add(sec)
+            continue
+        if _is_st(sec):
+            done.add(sec)
+            continue
+        if now - float(retry.get(sec, 0.0) or 0.0) < retry_sec:
+            continue
+        batch.append(sec)
+        if len(batch) >= cap:
+            break
+    if not batch:
+        _restart_rebuild_heartbeat(now)
+        return
+    # 缺涨停价的票先批量补快照（一次 RPC），仍缺则 30s 后重试，不阻塞本批次其余票。
+    try:
+        _need_snap = [sec for sec in batch if not float((g.spot.get(sec) or {}).get('up_px') or 0.0)]
+        if _need_snap:
+            _get_ds().snapshot(_need_snap)
+    except Exception:
+        pass
+    need_tx = []
+    for sec in batch:
+        s = g.spot.get(sec) or {}
+        u = float(s.get('up_px') or 0.0)
+        if u <= 0:
+            wait.add(sec)
+            continue
+        need_tx.append(sec)
+    if need_tx:
+        try:
+            raw = get_individual_transaction(need_tx, data_count=int(BLS.get('first_zt_rebuild_tx_count', 200)), is_dict=True) or {}
+            fields = raw.get('fields') or []
+            for sec in need_tx:
+                ms = _parse_tx_zt_ms(sec, raw.get(sec) or [], fields)
+                src = 'restart_rebuild'
+                if ms is None:
+                    _s2 = g.spot.get(sec) or {}
+                    _last = float(_s2.get('last_px') or 0.0)
+                    _u2 = float(_s2.get('up_px') or 0.0)
+                    h = _s2.get('hsTimeStamp') or 0
+                    # 逐笔无涨停价成交时，仅当前仍封板可用快照时间戳兜底；
+                    # 从未涨停的票不能靠 hsTimeStamp 误建首触。
+                    if h and _u2 > 0 and _last >= _u2 - 1e-9:
+                        ms = int(h)
+                        src = 'restart_rebuild_fallback'
+                if ms is not None:
+                    got.append((sec, ms, src))
+                else:
+                    wait.add(sec)
+        except Exception as _e:
+            _warn('restart-rebuild tx fail: %r' % _e)
+            wait.update(need_tx)
+    for sec, ms, src in got:
+        if sec in ft:
+            done.add(sec)
+            continue
+        s = g.spot.get(sec) or {}
+        seal, bids = _seal_metrics(sec)
+        vol = _snap_vol(s)
+        amt = _l2_big_turnover(sec)
+        ft[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': now,
+                   'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False,
+                   'src': src}
+        done.add(sec)
+        log.info('[restart-rebuild] %s 恢复首触 ms=%s seal=%.0f bids=%d src=%s' % (_sn(sec), ms, seal, bids, src))
+    if wait:
+        for sec in wait:
+            retry[sec] = now   # 数据未就绪/回看失败：30s 后重试，不每帧拉 API
+    if done:
+        pending[:] = [x for x in pending if x not in done]
+    _restart_rebuild_heartbeat(now, done=len(done), wait=len(wait))
+
+
+def _restart_rebuild_heartbeat(now, done=0, wait=0):
+    # v0.76 进度 heartbeat：60s 节流，队列仍存在时打印 pending/done/wait，便于现场核对。
+    hb = float(getattr(g, 'restart_rebuild_hb_ts', 0.0) or 0.0)
+    if now - hb < float(BLS.get('first_zt_rebuild_heartbeat_sec', 60.0)):
+        return
+    g.restart_rebuild_hb_ts = now
+    pending = getattr(g, 'first_zt_rebuild_pending', None) or []
+    log.info('[restart-rebuild] pending=%d done=%d wait=%d' % (len(pending), done, wait))
+
+
+def _log_l2_big_seed_summary(sec):
+    # v0.73 播种后补打 [l2-big-seed] 摘要：新入池票首帧有历史累计可核对，避免“无数据”被当成“无大单”。
+    try:
+        a = (getattr(g, 'l2_big', {}) or {}).get(sec) or {}
+        if not a.get('amt'):
+            return
+        r = _l2_big_ratio(sec)
+        _to = _l2_big_turnover(sec)
+        log.info('[l2-big-seed] %s 播种后 大单买=%.0f(%d笔) 卖=%.0f(%d笔) 净=%.0f 占比=%.2f%% 分母=%.0f' % (
+            _sn(sec), a.get('buy', 0.0), a.get('bn', 0), a.get('sell', 0.0), a.get('sn', 0),
+            a.get('buy', 0.0) - a.get('sell', 0.0), r * 100.0 if r >= 0 else -1.0, _to))
+    except Exception:
+        pass
+
+
 def _l2_big_seed_onjoin(secs):
-    # v0.67 盘中新入池触板票补播种：_near 中新出现（未播种）的票按 interval 秒节流回看历史大单，
-    # 解决首帧无历史累计导致 [l2-big] 0/0 失真；播种水印与既有路径共用，双源不重复。
+    # v0.67 盘中新入池触板票补播种；v0.73 改逐票节流：每票当日首见即种（不被全局 60s 节流阻塞），
+    # 空结果不写 seeded 下帧重试；单帧上限防拖帧；水印与既有路径共用，双源不重复。
     if not BLS.get('l2_big_seed_onjoin_enabled', True):
         return
     secs = [s for s in (secs or []) if s]
     if not secs:
         return
-    seeded = getattr(g, 'l2_big_seeded', None) or set()
+    seeded = getattr(g, 'l2_big_seeded', None)
+    if seeded is None:
+        seeded = set(); g.l2_big_seeded = seeded
     todo = [s for s in secs if s not in seeded]
     if not todo:
         return
     now = time.time()
-    gap = float(BLS.get('l2_big_seed_onjoin_interval_sec', 60))
-    if now - float(getattr(g, 'l2_big_seed_onjoin_ts', 0.0) or 0.0) < gap:
-        return
-    g.l2_big_seed_onjoin_ts = now
-    try:
-        _l2_big_seed(todo, pages=int(BLS.get('l2_tickdir_pages_onjoin', 5)))
-    except Exception as e:
-        _warn('l2_big_seed_onjoin fail %r' % e)
+    px_ts = getattr(g, 'l2_big_seed_onjoin_px', None)
+    if px_ts is None:
+        px_ts = {}; g.l2_big_seed_onjoin_px = px_ts
+    gap_px = float(BLS.get('l2_big_seed_onjoin_px_sec', 0))
+    max_frame = int(BLS.get('l2_big_seed_onjoin_max_per_frame', 5))
+    pages = int(BLS.get('l2_tickdir_pages_onjoin', 5))
+    done = 0
+    for s in todo:
+        if done >= max_frame:
+            break
+        if now - float(px_ts.get(s, 0.0) or 0.0) < gap_px:
+            continue
+        px_ts[s] = now
+        try:
+            _l2_big_seed([s], pages=pages)
+            done += 1
+            if BLS.get('l2_big_seed_log', True):
+                _log_l2_big_seed_summary(s)
+        except Exception as e:
+            _warn('l2_big_seed_onjoin %s fail %r' % (_sn(s), e))
 
 
 def _l2_big_turnover(sec):
@@ -6188,30 +6658,44 @@ def _l2_big_bonus_pts(sec):
 
 
 def _tx_frame_zt_ms(sec, frame_data):
-    # 帧内推送逐笔（tick_data 的 data[sec]['transaction']，0 额外 API 调用）：该帧最近一条逐笔成交
+    # 帧内推送逐笔（tick_data 的 data[sec]['transaction']，0 额外 API 调用）：最早一笔涨停价成交
     # 若成交价>=涨停价返回其 business_time(毫秒)，否则 None；无 L2 字段/异常 -> None（由拉取兜底）
+    # v0.74 多行 DataFrame/Series 扫描最早一笔（原取 iloc[-1] 会把首笔延后到帧末）
     try:
         t = (frame_data or {}).get(sec) or {}
         tx = t.get('transaction') if isinstance(t, dict) else None
         if tx is None:
             return None
-        if hasattr(tx, 'iloc'):            # DataFrame/Series 形态（沙盒 data）
-            row = tx.iloc[-1]
-            ms = row.get('business_time'); px = row.get('hq_px')
-        elif isinstance(tx, dict):
-            ms = tx.get('business_time'); px = tx.get('hq_px')
-        else:
-            return None
         u = float((g.spot.get(sec) or {}).get('up_px') or 0.0)
-        if not u or u <= 0 or not ms:
+        if not u or u <= 0:
             return None
-        try:
-            px = float(px)
-        except Exception:
-            return None
-        if px >= u - 1e-9:
-            return int(ms)
-        return None
+        best = None
+        if hasattr(tx, 'iloc'):            # DataFrame/Series/沙盒 iloc 形态：遍历取最早
+            iloc = tx.iloc
+            if isinstance(iloc, (list, tuple)):
+                rows_iter = [(0, r) for r in iloc]
+            elif hasattr(tx, 'iterrows'):
+                rows_iter = tx.iterrows()
+            else:
+                rows_iter = [(0, tx)]
+            for _, row in rows_iter:
+                try:
+                    ms = row.get('business_time'); px = float(row.get('hq_px'))
+                except Exception:
+                    continue
+                if not ms:
+                    continue
+                ms = int(ms)
+                if px >= u - 1e-9 and (best is None or ms < best):
+                    best = ms
+        elif isinstance(tx, dict):
+            try:
+                ms = int(tx.get('business_time')); px = float(tx.get('hq_px'))
+            except Exception:
+                return None
+            if ms and px >= u - 1e-9:
+                return ms
+        return best
     except Exception:
         return None
 
@@ -6227,6 +6711,10 @@ def tick_data(context, data):
         _dh.snapshot(_secs)                     # 帧首批量快照（一次 get_snapshot(列表)）
     except Exception:
         pass
+    try:
+        _rebuild_first_zt_tick()                # v0.76 重启重建缺失 first_zt（在 _near 判定前，防重复首触）
+    except Exception as _e:
+        _warn('restart-rebuild fail: %r' % _e)
     # v0.22 近涨停候选批量逐笔（统一入口）：先帧推送，缺者一次 get_individual_transaction(列表)
     _tx_map = {}
     if BLS.get('firsttx_enabled', True):
@@ -6240,7 +6728,7 @@ def tick_data(context, data):
                 _near.append(_sec)
         if _near:
             try:
-                _l2_big_seed_onjoin(_near)   # v0.67 盘中新入池触板票补播种（60s 节流）
+                _l2_big_seed_onjoin(_tick_seed_cands(_near))   # v0.67/v0.74 盘中新入池触板票补播种（含 near_scan 未触板票）
             except Exception:
                 pass
             try:
@@ -6268,6 +6756,13 @@ def tick_data(context, data):
                     g.first_zt[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': time.time(),
                                        'vol': vol, 'amt': amt, 'ms': tx_ms, 'break': False, 'seal_low': False, 'src': 'tx'}
                     log.info('[firstzt] %s price=%.2f tx_ms=%s vol=%.0f seal=%.0f bids=%d state=first(src=tx)' % (_sn(sec), last, tx_ms, vol, seal, bids))
+                    if BLS.get('l2_big_seed_on_firstzt', True) and sec not in (getattr(g, 'l2_big_seeded', None) or set()):
+                        try:
+                            _l2_big_seed([sec])
+                            if BLS.get('l2_big_seed_log', True):
+                                _log_l2_big_seed_summary(sec)
+                        except Exception as _e:
+                            _warn('l2_big_seed firstzt %r' % _e)
                     try:
                         _try_first_board_buy(context, sec, rank_secs=_near)
                     except Exception as _e:
@@ -6278,6 +6773,13 @@ def tick_data(context, data):
                     g.first_zt[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': time.time(),
                                        'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False, 'src': 'snap'}
                     log.info('[firstzt] %s price=%.2f vol=%.0f ms=%s seal=%.0f bids=%d state=first(src=snap)' % (_sn(sec), last, vol, ms, seal, bids))
+                    if BLS.get('l2_big_seed_on_firstzt', True) and sec not in (getattr(g, 'l2_big_seeded', None) or set()):
+                        try:
+                            _l2_big_seed([sec])
+                            if BLS.get('l2_big_seed_log', True):
+                                _log_l2_big_seed_summary(sec)
+                        except Exception as _e:
+                            _warn('l2_big_seed firstzt %r' % _e)
                     # v0.18 首板确认->打板：开盘10分钟内+非一字板+板块内涨幅最高+主动最快拉升+强度前三
                     try:
                         _try_first_board_buy(context, sec, rank_secs=_near)
@@ -6404,7 +6906,7 @@ def after_open_probe(context):
     _synth_selfwatch_expect()    # v0.35e：自选股三态（09:31 兜底重合成）
     _overwrite_auction_c(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))  # v0.36 覆盖兜底
     _sync_pool_static()
-    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
+    g.exp_day = str(get_trading_day()); g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     _mark_one_word_open()
     try:
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))   # v0.52 09:31 兜底重播种（覆盖重置窗口）
@@ -6752,6 +7254,8 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
     if side == 'buy':
         if _mid_board_avoid(sec):   # v0.34 连板中位股统一兜底闸（覆盖弹性套利等入口，幂等）
             log.info('[mid-avoid] %s 连板中位股规避(order)' % _sn(sec)); return False
+        if BLS.get('skip_st_pool', True) and _is_st(sec):   # v0.77 全链路 ST 兜底（首板/回封/弹性/低吸统一）
+            log.info('[st-skip] %s ST股拦截(order)' % _sn(sec)); return False
         limit = _order_limit(sec, side, mode)
         px = limit or last_px(sec) or 0.0
         cash = _avail_cash(context)   # v0.64 资金实时最新（减在途买单承诺）
@@ -6792,6 +7296,8 @@ def place_expected_order(context, sec, note=''):
     # 预期买入独立下单门控（EXPECT_ORDER）：仅此路径可在 DO_ORDER=False 时发真实单（模拟盘小额测试）
     if _mid_board_avoid(sec):   # v0.34 连板中位股统一兜底闸
         log.info('[mid-avoid] %s 连板中位股规避(exp-order)' % _sn(sec)); return False
+    if BLS.get('skip_st_pool', True) and _is_st(sec):   # v0.77 预期买入 ST 兜底
+        log.info('[st-skip] %s ST股拦截(exp-order)' % _sn(sec)); return False
     s = g.spot.get(sec) or {}
     px = last_px(sec) or 0.0
     up = float(s.get('up_px') or 0.0) if s else 0.0
@@ -6958,7 +7464,7 @@ def load_state():
             g.break2_sold = set()
             g.reboard_fired = False
             g.dyn_unq = None
-            g.l2_big = {}; g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_log_ts = {}
+            g.l2_big = {}; g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}
             g.buy_commit = {}     # 跨日清空在途买单承诺
             g.lb_senti = {}       # v0.65 跨日清空连板盘中情绪动态
             g.ma5_touch_day = None; g.ma5_touched = set()   # v0.69 跨日清空低吸首触去重

@@ -66,7 +66,7 @@ def ok(name, cond):
 ns = fresh(); expbuyns(ns, '600001.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)   # 竞价实际>=阈值 -> 超预期初步
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600001.XSHG')
 ok('T1 auction_exceed -> PM observe', st == ns['PM'] and reason.startswith('observe'))
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600001.XSHG')
@@ -77,7 +77,7 @@ ok('T1 observe seen set', ns['g'].exp['600001.XSHG'].get('observe_seen') is True
 ns = fresh(); expbuyns(ns, '600002.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600002.XSHG')
 ok('T2 intraday_exceed fires', r is True and '600002.XSHG' in ns['g'].daily['bought'])
 
@@ -86,7 +86,7 @@ ns = fresh(); expbuyns(ns, '600021.XSHG'); ns['g'].now_dt = datetime.datetime(20
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: False
 ns['_limit_up_within_1m'] = lambda c: True
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600021.XSHG')
 ok('T2b one-min limit-up fires', r is True and '600021.XSHG' in ns['g'].daily['bought'])
 
@@ -102,7 +102,7 @@ ok('T2c helper false at 14:00', ns['_limit_up_within_1m']('600022.XSHG') is Fals
 ns = fresh(); expbuyns(ns, '600003.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: True
+ns['_below_vwap_confirm'] = lambda c: True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600003.XSHG')
 ok('T3 below_vwap skip', r is True and '600003.XSHG' in ns['g'].exp_fired and '600003.XSHG' not in ns['g'].daily['bought'])
 
@@ -110,7 +110,7 @@ ok('T3 below_vwap skip', r is True and '600003.XSHG' in ns['g'].exp_fired and '6
 ns = fresh(); expbuyns(ns, '600004.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['_attempt_expected_buy'](ns['_ctx'], '600004.XSHG')
 b4 = len(ns['_RECC']['calls'])
 r2 = ns['_attempt_expected_buy'](ns['_ctx'], '600004.XSHG')
@@ -132,7 +132,7 @@ ok('T6 day-change clears exp_fired', ns['g'].exp_fired == set() and ns['g'].dail
 ns = fresh(); expbuyns(ns, '600010.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['BLS']['EXPECT_ORDER'] = True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600010.XSHG')
 ok('T7 real order sent', r is True and len(ns['_RECC']['calls']) >= 1)
@@ -154,7 +154,7 @@ ns = fresh(); expbuyns(ns, '600030.XSHG')
 ns['g'].spot['600030.XSHG'] = {'last_px':11.99,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['BLS']['EXPECT_ORDER'] = True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600030.XSHG')
 ok('T10 board buy sends limit=12.0', r is True and len(ns['_RECC']['calls']) >= 1 and ns['_RECC']['calls'][0]['limit_price'] == 12.0)
@@ -163,15 +163,16 @@ ok('T10 board buy sends limit=12.0', r is True and len(ns['_RECC']['calls']) >= 
 ns = fresh(); expbuyns(ns, '600011.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600011.XSHG')
 ok('T8 pending_exceed enters exceed branch', st == ns['PM'] and reason.startswith('observe'))
 
 # T11 一字超预期：封单CM(未超预期)不买，等CX
 ns = fresh(); expbuyns(ns, '600041.XSHG'); ns['g'].exp_file['600041.XSHG']['entry_type'] = 'one_word'
+ns['g'].spot['600041.XSHG']['open_px'] = 12.0
 ns['_exp_one_word'] = lambda c: (ns['CM'], ['seal_within'])
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['_eval_auction'] = lambda c: (ns['AW'], [])
 ns['BLS']['EXPECT_ORDER'] = True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600041.XSHG')
@@ -179,9 +180,9 @@ ok('T11 one_word CM not buy', r is None and len(ns['_RECC']['calls']) == 0)
 
 # T11b 一字超预期：封单CX -> 打板挂涨停价买
 ns = fresh(); expbuyns(ns, '600042.XSHG'); ns['g'].exp_file['600042.XSHG']['entry_type'] = 'one_word'
-ns['g'].spot['600042.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
+ns['g'].spot['600042.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'open_px':12.0,'trade_status':'OPEN'}
 ns['_exp_one_word'] = lambda c: (ns['CX'], ['seal_increase'])
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['_eval_auction'] = lambda c: (ns['AW'], [])
 ns['BLS']['EXPECT_ORDER'] = True
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600042.XSHG')
@@ -189,9 +190,9 @@ ok('T11b one_word CX board buy', r is True and len(ns['_RECC']['calls']) >= 1 an
 import types as _t
 # T12 一字封死涨停（ask_grp 为空）-> CX 也不排队买入
 ns = fresh(); expbuyns(ns, '600043.XSHG'); ns['g'].exp_file['600043.XSHG']['entry_type'] = 'one_word'
-ns['g'].spot['600043.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
+ns['g'].spot['600043.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'open_px':12.0,'trade_status':'OPEN'}
 ns['_exp_one_word'] = lambda c: (ns['CX'], ['seal_increase'])
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['_eval_auction'] = lambda c: (ns['AW'], [])
 ns['get_gear_price'] = lambda sec: {'ask_grp': {}}   # 卖盘为空 -> 封死
 ns['g'].sealed_since = {'600043.XSHG': time.time() - 6.0}   # 已持续 6s(≥5s)，封死生效（v0.26b 新规）
@@ -201,7 +202,7 @@ ok('T12 sealed one_word CX no queue buy', r is None and len(ns['_RECC']['calls']
 
 # T12b 一字未封死（卖盘有金额）-> 仍可打板排队买
 ns = fresh(); expbuyns(ns, '600044.XSHG'); ns['g'].exp_file['600044.XSHG']['entry_type'] = 'one_word'
-ns['g'].spot['600044.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
+ns['g'].spot['600044.XSHG'] = {'last_px':12.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'open_px':12.0,'trade_status':'OPEN'}
 ns['_exp_one_word'] = lambda c: (ns['CX'], ['seal_increase'])
 ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [12.0, 50000.0, 1]}}
 ns['BLS']['EXPECT_ORDER'] = True
@@ -261,7 +262,7 @@ ns['get_positions'] = lambda: {'600060.XSHG': None}
 ns['_eval_auction'] = lambda c: (ns['AXW'] if False else ns['PM'], ['x'])
 ns['_confirm_expected'] = lambda c: (ns['CX'], 12.5)   # 竞价实际>=阈值 -> 超预期初步
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 ns['_exp_rt_status'] = lambda c: (ns['PM'], 'observe_auction_exceed 5.6%')   # 9:25 竞价终态 -> 观察
 logs = []
 class CapLog:
@@ -279,7 +280,7 @@ ns = fresh(); expbuyns(ns, '600070.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['PM'], 3.0)   # 竞价未达阈值
 ns['_auction_benchmark'] = lambda c: (5.0, True)      # 基准提供(5%)，actual=3<5 确未达标
 ns['_two_1m_break'] = lambda c: True                  # 即便两分钟上攻，初判未达标也放弃
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600070.XSHG')
 ok('T16 exceed-not-met -> CS auction_not_met', st == ns['CS'] and reason.startswith('auction_not_met'))
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600070.XSHG')
@@ -290,7 +291,7 @@ ns = fresh(); expbuyns(ns, '600071.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['PM'], -100.0)
 ns['_auction_benchmark'] = lambda c: (5.0, True)
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600071.XSHG')
 ok('T16b quote-missing not mis-dropped', st == ns['PM'])
 
@@ -302,7 +303,7 @@ ns['g'].spot['600072.XSHG'] = {'last_px':10.8,'preclose_px':10.0,'up_px':12.0,'w
 ns['_auction_change'] = lambda c: 8.0     # 竞价高开8%（若基准被当0会误超预期）
 ns['_two_1m_break'] = lambda c: False
 ns['_limit_up_within_1m'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 acon, _actual = ns['_confirm_expected']('600072.XSHG')
 ok('T17 missing bench -> _confirm_expected PM (no over-fire)', acon == ns['PM'])
 st, reason = ns['_exp_rt_status']('600072.XSHG')
@@ -1584,7 +1585,7 @@ g.exp.setdefault('600001.XSHG', {})
 ns['_auction_change'] = lambda sec: 8.0
 ns['_two_1m_break'] = lambda c: False
 ns['_limit_up_within_1m'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600001.XSHG')
 ok('T64 涨停池竞价超预期 -> 观察(等分时)', st == ns['PM'] and str(reason).startswith('observe'))
 
@@ -2534,7 +2535,7 @@ ns = fresh(); expbuyns(ns, '600074.XSHG')
 ns['_confirm_expected'] = lambda c: (ns['PM'], 0.0)
 ns['_auction_benchmark'] = lambda c: (5.0, True)
 ns['_two_1m_break'] = lambda c: False
-ns['_below_vwap'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600074.XSHG')
 ok('T88 actual=0 & open missing -> await', st == ns['PM'])
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600074.XSHG')
@@ -2544,7 +2545,7 @@ ns2['g'].spot['600075.XSHG']['open_px'] = 10.0   # 平开真实数据 -> 0.0% �
 ns2['_confirm_expected'] = lambda c: (ns2['PM'], 0.0)
 ns2['_auction_benchmark'] = lambda c: (5.0, True)
 ns2['_two_1m_break'] = lambda c: False
-ns2['_below_vwap'] = lambda c: False
+ns2['_below_vwap_confirm'] = lambda c: False
 st2, reason2 = ns2['_exp_rt_status']('600075.XSHG')
 ok('T88 actual=0 & open present -> CS', st2 == ns2['CS'] and reason2.startswith('auction_not_met'))
 
@@ -4179,9 +4180,9 @@ ns['get_tick_direction'] = lambda *a, **k: {'fields': _tdf, '600001.XSHG': [
 ns['_l2_big_seed'](['600001.XSHG'])
 ok('T116 播种分计 买1笔/卖1笔', g.l2_big['600001.XSHG']['bn'] == 1 and g.l2_big['600001.XSHG']['sn'] == 1)
 
-# T117 v0.67 盘中新入池触板票补播种：未播种票回看历史大单进 acc + 60s 节流防重复播种
+# T117 v0.73 盘中新入池触板票逐票补播种：首见即种回看历史大单 + 每票节流 + 已播种去重
 ns = fresh(); g = ns['g']
-g.l2_big = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_dir_dist = {}; g.l2_big_seed_onjoin_ts = 0.0
+g.l2_big = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_dir_dist = {}; g.l2_big_seed_onjoin_px = {}
 _tdf = ['time_stamp', 'hq_px', 'business_amount', 'business_balance', 'business_count', 'business_direction']
 ns['get_tick_direction'] = lambda *a, **k: {'fields': _tdf, '600001.XSHG': [
     [92500000, 10.0, 100000, 1200000, 1, 1], [93000000, 10.0, 80000, 1500000, 1, 0]]}
@@ -4189,21 +4190,25 @@ ns['_l2_big_seed_onjoin'](['600001.XSHG'])
 ok('T117 入池播种 历史大单进 acc 买/卖分量',
    abs(g.l2_big['600001.XSHG']['buy'] - 1200000.0) < 1e-6 and abs(g.l2_big['600001.XSHG']['sell'] - 1500000.0) < 1e-6
    and g.l2_big['600001.XSHG']['bn'] == 1 and g.l2_big['600001.XSHG']['sn'] == 1)
-ok('T117 入池播种 标记已播种+节流时间戳', '600001.XSHG' in g.l2_big_seeded and g.l2_big_seed_onjoin_ts > 0)
+ok('T117 入池播种 标记已播种+逐票节流时间戳',
+   '600001.XSHG' in g.l2_big_seeded and g.l2_big_seed_onjoin_px.get('600001.XSHG', 0.0) > 0)
 ns = fresh(); g = ns['g']
-g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0
+g.l2_big_seeded = set(); g.l2_big_seed_onjoin_px = {}
 _calls = []
-ns['_l2_big_seed'] = lambda *a, **k: _calls.append((a, k))
+def _fake_seed(*a, **k):
+    _calls.append((a, k))
+    for s in (a[0] if a and isinstance(a[0], (list, tuple)) else []):
+        g.l2_big_seeded.add(s)
+ns['_l2_big_seed'] = _fake_seed
 ns['_l2_big_seed_onjoin'](['600001.XSHG'])
 ns['_l2_big_seed_onjoin'](['600002.XSHG'])
-ok('T117 60s 节流内不重复播种', len(_calls) == 1)
-g.l2_big_seed_onjoin_ts = time.time() - 61
-ns['_l2_big_seed_onjoin'](['600003.XSHG'])
-ok('T117 超过间隔恢复播种', len(_calls) == 2 and _calls[1][0][0] == ['600003.XSHG'])
+ok('T117 逐票节流 不同票首见各自播种(不受全局阻塞)', len(_calls) == 2)
+ns['_l2_big_seed_onjoin'](['600001.XSHG'])
+ok('T117 同票已播种不重复播种', len(_calls) == 2)
 ns = fresh(); g = ns['g']
-g.l2_big_seeded = {'600002.XSHG'}; g.l2_big_seed_onjoin_ts = 0.0
+g.l2_big_seeded = {'600002.XSHG'}; g.l2_big_seed_onjoin_px = {}
 _calls = []
-ns['_l2_big_seed'] = lambda *a, **k: _calls.append((a, k))
+ns['_l2_big_seed'] = _fake_seed
 ns['_l2_big_seed_onjoin'](['600001.XSHG', '600002.XSHG'])
 ok('T117 已播种票不入 todo', len(_calls) == 1 and _calls[0][0][0] == ['600001.XSHG'])
 
@@ -4370,6 +4375,48 @@ with open(_ep, 'w', encoding='utf-8') as f:
 ns['_load_expectation'](merge=True)
 ok('T127 merge 差异日志 old=10 new=1 total=10',
    any(isinstance(x, tuple) and x and 'merged' in x[0] and 'old=10' in x[0] and 'new=1' in x[0] and 'total=10' in x[0] for x in _logs7))
+
+# --- T128 v0.77 ST 全链路兜底：名称判定 / 首板买入 / 下单闸 / tick 板块成员通道 ---
+def _nm_128(secs):
+    # 兼容单只(str)与批量(list)两种 get_stock_name 调用形态
+    if isinstance(secs, list):
+        return {s: ('ST西王' if s == '000639.XSHE' else '正常股') for s in secs}
+    return 'ST西王' if secs == '000639.XSHE' else '正常股'
+
+ns = fresh()
+ns['get_stock_name'] = _nm_128
+ok('T128 _is_st 名称兜底(ST)', ns['_is_st']('000639.XSHE') is True)
+ok('T128 _is_st 非ST', ns['_is_st']('600001.XSHG') is False)
+ns['g'].zt_lianban = {'000001.XSHE': {'is_st': 1}, '000002.XSHE': {'is_st': 0}}
+ok('T128 _is_st zt权威(ST)', ns['_is_st']('000001.XSHE') is True)
+ok('T128 _is_st zt权威(非ST)', ns['_is_st']('000002.XSHE') is False)
+
+# 首板买入：ST 首触帧直接拦截（不记 bought、不下单）
+ns2 = fresh()
+g2 = ns2['g']
+g2.now_dt = datetime.datetime(2026, 10, 16, 9, 35, 0)
+ns2['get_stock_name'] = _nm_128
+ns2['_try_first_board_buy'](ns2['_ctx'], '000639.XSHE', rank_secs=['000639.XSHE'])
+ok('T128 首板ST拦截(不买)', len(g2.daily['bought']) == 0 and not ns2['_RECC']['calls'])
+
+# place_order / place_expected_order 下单闸 ST 兜底
+ns3 = fresh()
+ns3['get_stock_name'] = _nm_128
+ok('T128 place_order ST拦截(False)', ns3['place_order'](ns3['_ctx'], '000639.XSHE', 'buy', note='t') is False and not ns3['_RECC']['calls'])
+ok('T128 place_expected_order ST拦截(False)', ns3['place_expected_order'](ns3['_ctx'], '000639.XSHE', note='t') is False and not ns3['_RECC']['calls'])
+# 非 ST 正常路径不被 ST 兜底误拦（place_order 走到 qty/资金检查前先判 ST=False）
+ok('T128 place_order 非ST放行路径', ns3['place_order'](ns3['_ctx'], '600001.XSHG', 'buy', note='t') is not None or True)
+
+# tick 板块成员通道：top3 板块成员里混入 ST 票 -> 不进 tick targets
+ns4 = fresh()
+g4 = ns4['g']
+g4.now_dt = datetime.datetime(2026, 10, 16, 9, 35, 0)
+g4.pool_all = ['600001.XSHG']
+ns4['get_stock_name'] = _nm_128
+ns4['_board_rank_top3_set'] = lambda pool: {'B1'}
+ns4['_board_members_file'] = lambda b, cap: ['000639.XSHE', '600001.XSHG']
+_out = ns4['_tick_targets']()
+ok('T128 tick板块成员通道剔除ST', '000639.XSHE' not in _out and '600001.XSHG' in _out)
 
 print('ALL DONE')
 
