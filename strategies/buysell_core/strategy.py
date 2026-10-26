@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.77（2026-10-26）
-# 部署核对：日志首行 `buysell_core init version=v0.77 ...`（init 打印 STRATEGY_VERSION）
-# v0.77 ST 三处兜底：tick 板块成员通道 / 首板买入 / 下单闸（place_order+place_expected_order）
-# v0.76 重启重建修复：不依赖当前封板/不因缺快照阻塞队列，ms 只取涨停价最早成交
-# v0.75 重启恢复：盘中 60s 节流持久化 + 重启重建缺失 first_zt + 全链路剔除 ST
-# v0.74 首笔灵敏度：near_scan 近涨停快速通道 + 开盘热点优先 + scan_batch 600 + 帧内最早一笔回填
-# 设计依据与版本记录：strategies/buysell_core/README.md（docs/16 + docs/18）
+# 当前版本：v0.78（2026-10-26）
+# 部署核对：日志首行 `buysell_core init version=v0.78 ...`（init 打印 STRATEGY_VERSION）
+# 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.77"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
+STRATEGY_VERSION = "v0.78"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
 
 
 def _warn(msg):
@@ -309,6 +305,12 @@ BLS = {
     'lb_senti_cut_half_ratio': 0.5,       # P8 中高位兑现减半比例
     'lb_senti_min_touch_ratio': 0.5,      # 状态机样本门槛：中高位已触板占比 >= 此值才判 phase（早盘不足 -> watch）
     'lb_senti_hysteresis_sec': 60.0,      # 状态机风险升级滞回：同候选持续 N 秒才切换（防单帧抖动）
+    # v0.78 A 状态机可达性（10:00 前保证灵敏度与节奏）：早盘放宽样本门槛/缩短滞回，10:00 冻结必落档
+    'lb_senti_min_touch_ratio_before': 0.3,  # 10:00 前样本门槛比例（10:00 后仍用 lb_senti_min_touch_ratio=0.5）
+    'lb_senti_min_touch_floor': 3,           # 10:00 前样本门槛绝对下限（mid_pool=9 -> touched>=3 即判档）
+    'lb_senti_hysteresis_sec_before': 30.0,  # 10:00 前风险升级滞回（10:00 后仍用 lb_senti_hysteresis_sec=60）
+    'lb_senti_auction_ready_min': 0.6,       # v0.78 D 竞价就绪率下限（不足 -> ready=False 不写 open/green/yizi 率）
+    'lb_senti_gate_all_buys_enabled': True,  # v0.78 B 统一方向闸总开关（首板/回封/弹性并入，low 恒放行）
     'lb_senti_rotate_low_bonus': 1.2,     # 切低位：低位/新方向首板参与排序加分
     'lb_senti_rotate_mid_pen': -0.8,      # 切低位：中位股参与排序减分（兑现侧）
     'lb_senti_rotate_high_pen': -0.6,     # 切低位：高标参与排序减分
@@ -3210,6 +3212,7 @@ def _lb_senti_t100_passed():
 
 def _lb_senti_auction():
     # 竞价终态（09:25/09:31）：中高位高开/绿开/一字率 + 低位高开率；纯 g.auction_c/spot 读取，零行情 API
+    # v0.78 D：统计前按 _auction_ready 校验 mid/low 就绪率，不足 -> ready=False 不写率（防 09:26 竞价数据未就绪假 0）
     st = _lb_senti_state()
     zt = getattr(g, 'zt_lianban', {}) or {}
     if not zt:
@@ -3217,8 +3220,10 @@ def _lb_senti_auction():
         return st['auction']
     day = str(get_trading_day())
     mid_n = high_n = low_n = mid_open = mid_green = mid_yizi = low_open = low_yizi = 0
+    mid_ready = low_ready = 0
     for sec in zt:
         tier = _lb_senti_tier(sec)
+        rdy = _auction_ready(sec)
         c = g.auction_c.get(sec)
         chg = 0.0
         if c and c[0] == day:
@@ -3231,6 +3236,8 @@ def _lb_senti_auction():
         yizi = _is_one_word_open(sec)
         if tier == 'mid':
             mid_n += 1
+            if rdy:
+                mid_ready += 1
             if chg > 0:
                 mid_open += 1
             if chg < 0:
@@ -3241,10 +3248,28 @@ def _lb_senti_auction():
             high_n += 1
         else:
             low_n += 1
+            if rdy:
+                low_ready += 1
             if chg > 0:
                 low_open += 1
             if yizi:
                 low_yizi += 1
+    ready_min = float(BLS.get('lb_senti_auction_ready_min', 0.6))
+    ready = ((mid_ready >= ready_min * mid_n) if mid_n else True) and ((low_ready >= ready_min * low_n) if low_n else True)
+    if not ready:
+        out = {
+            'ts': time.time(),
+            'ready': False,
+            'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
+            'mid_open_rate': None, 'mid_green_rate': None,
+            'mid_yizi': mid_yizi, 'mid_yizi_rate': None,
+            'low_open_rate': None, 'low_yizi': low_yizi,
+            'note': 'auction_data_not_ready ready=%.0f%%' % (100.0 * (mid_ready + low_ready) / (mid_n + low_n) if (mid_n + low_n) else 100.0),
+        }
+        st['auction'] = out
+        log.info('[lb-senti] auction not_ready mid=%d low=%d ready=%d/%d -> 不写 open/green/yizi 率'
+                 % (mid_n, low_n, mid_ready + low_ready, mid_n + low_n))
+        return out
     out = {
         'ts': time.time(),
         'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
@@ -3254,6 +3279,7 @@ def _lb_senti_auction():
         'mid_yizi_rate': (float(mid_yizi) / mid_n) if mid_n else 0.0,
         'low_open_rate': (float(low_open) / low_n) if low_n else 0.0,
         'low_yizi': low_yizi,
+        'ready': True,
     }
     st['auction'] = out
     log.info('[lb-senti] auction mid=%d open=%.1f%% green=%.1f%% yizi=%d low=%d open=%.1f%%'
@@ -3262,9 +3288,10 @@ def _lb_senti_auction():
     return out
 
 
-def _lb_senti_set_phase(st, cand, note, now):
+def _lb_senti_set_phase(st, cand, note, now, force_confirm=False):
     # 状态机滞回（docs/43）：风险升级（rank 增大）需同候选持续 hysteresis_sec 才切换，防单帧抖动；
-    # 回暖/持平直接切换。
+    # 回暖/持平直接切换。v0.78 A1：force_confirm=True 跳过滞回直接切换（10:00 冻结必落档）；
+    # v0.78 A2：10:00 前用 lb_senti_hysteresis_sec_before（30s），10:00 后保持 60s。
     prev = st['mid'].get('phase') or 'watch'
     rank = {'high_continue': 0, 'watch': 1, 'high_diverg': 2, 'rotate_low': 2, 'ice_wait': 3}
     if cand == prev or rank.get(cand, 1) <= rank.get(prev, 1):
@@ -3274,8 +3301,15 @@ def _lb_senti_set_phase(st, cand, note, now):
         st['mid']['phase_at'] = _hhmm()
         st.pop('risk_pending', None)
         return
+    if force_confirm:
+        log.info('[lb-senti] phase %s -> %s (%s, force 10:00)' % (prev, cand, note or ''))
+        st['mid']['phase'] = cand
+        st['mid']['phase_at'] = _hhmm()
+        st.pop('risk_pending', None)
+        return
     pend = st.get('risk_pending') or {}
-    if pend.get('phase') == cand and now - float(pend.get('ts') or 0) < float(BLS.get('lb_senti_hysteresis_sec', 60.0)):
+    hyst = float(BLS.get('lb_senti_hysteresis_sec_before', 30.0)) if not _lb_senti_t100_passed() else float(BLS.get('lb_senti_hysteresis_sec', 60.0))
+    if pend.get('phase') == cand and now - float(pend.get('ts') or 0) < hyst:
         log.info('[lb-senti] phase %s -> %s (%s, 确认)' % (prev, cand, note or ''))
         st['mid']['phase'] = cand
         st['mid']['phase_at'] = _hhmm()
@@ -3284,9 +3318,10 @@ def _lb_senti_set_phase(st, cand, note, now):
         st['risk_pending'] = {'phase': cand, 'ts': now}
 
 
-def _lb_senti_mid(force=False):
+def _lb_senti_mid(force=False, force_confirm=False):
     # 盘中确认状态机（docs/43）：中高位晋级率/炸板率/封单留存 + 低位承接（发酵新方向）+ 红盘比；
-    # 10:00 前 15s 缓存、10:00 后降频 60s（不归零）；force=True 供 10:00 冻结。
+    # 10:00 前 15s 缓存、10:00 后降频 60s（不归零）；force=True 供 10:00 冻结（v0.78 A1 必落档）。
+    # v0.78 A3：10:00 前样本门槛 0.3 且绝对下限 3（早盘不因样本不足锁死 watch）。
     if not BLS.get('lb_senti_enabled', True):
         return {}
     now = time.time()
@@ -3334,7 +3369,13 @@ def _lb_senti_mid(force=False):
         _lb_senti_set_phase(st, 'watch', 'no_mid_pool', now)
         out['note'] = 'no_mid_pool'
     else:
-        min_touch = max(1, int(len(mid_pool) * float(BLS.get('lb_senti_min_touch_ratio', 0.5))))
+        if _lb_senti_t100_passed():
+            min_touch = max(1, int(len(mid_pool) * float(BLS.get('lb_senti_min_touch_ratio', 0.5))))
+        else:
+            _ratio = float(BLS.get('lb_senti_min_touch_ratio_before', 0.3))
+            _floor = int(BLS.get('lb_senti_min_touch_floor', 3))
+            _est = max(1, int(len(mid_pool) * _ratio))
+            min_touch = max(_est, _floor) if len(mid_pool) >= _floor else _est   # 池小于 floor 不强制（防小池锁死）
         if len(touched) < min_touch:
             _lb_senti_set_phase(st, 'watch', 'sample_insufficient', now)
             out['note'] = 'sample_insufficient touched=%d/%d' % (len(touched), len(mid_pool))
@@ -3346,24 +3387,24 @@ def _lb_senti_mid(force=False):
             low_ok = low_assist >= new_min or new_dir >= new_min
             if risk_ok:
                 if red is not None and red < red_cold and not low_ok:
-                    _lb_senti_set_phase(st, 'ice_wait', 'red_cold_weak_low', now)
+                    _lb_senti_set_phase(st, 'ice_wait', 'red_cold_weak_low', now, force_confirm)
                     out['note'] = 'red_cold_weak_low'
                 else:
-                    _lb_senti_set_phase(st, 'high_continue', 'promo_ok', now)
+                    _lb_senti_set_phase(st, 'high_continue', 'promo_ok', now, force_confirm)
                     out['note'] = 'promo_ok'
             else:
                 rot_ok = promo < float(BLS.get('lb_senti_rotation_promo', 0.40)) or break_rate > float(BLS.get('lb_senti_rotation_break', 0.30))
                 if low_ok and rot_ok:
-                    _lb_senti_set_phase(st, 'rotate_low', 'high_break_low_rotate', now)
+                    _lb_senti_set_phase(st, 'rotate_low', 'high_break_low_rotate', now, force_confirm)
                     out['note'] = 'high_break_low_rotate'
                 elif low_ok:
-                    _lb_senti_set_phase(st, 'high_diverg', 'low_ok_but_break_mild', now)
+                    _lb_senti_set_phase(st, 'high_diverg', 'low_ok_but_break_mild', now, force_confirm)
                     out['note'] = 'low_ok_but_break_mild'
                 elif red is not None and red < red_cold:
-                    _lb_senti_set_phase(st, 'ice_wait', 'red_cold', now)
+                    _lb_senti_set_phase(st, 'ice_wait', 'red_cold', now, force_confirm)
                     out['note'] = 'red_cold'
                 else:
-                    _lb_senti_set_phase(st, 'high_diverg', 'high_break', now)
+                    _lb_senti_set_phase(st, 'high_diverg', 'high_break', now, force_confirm)
                     out['note'] = 'high_break'
     out['phase'] = st['mid'].get('phase') or 'watch'
     st['mid'].update(out)
@@ -3398,7 +3439,7 @@ def lb_senti_t100_freeze(context):
     _set_now(context)
     st = _lb_senti_state()
     try:
-        d = _lb_senti_mid(force=True) or {}
+        d = _lb_senti_mid(force=True, force_confirm=True) or {}   # v0.78 A1 10:00 冻结必落档
     except Exception as e:
         _warn('lb_senti t100 freeze fail %r' % e)
         d = st.get('mid') or {}
@@ -3594,15 +3635,37 @@ def _exp_direction_log(sec, ctx, action):
         pass
 
 
-def _lb_gate_seen(sec, note):
-    # 参与方向闸门日志节流：每 (sec, phase) 每日只打一次（防 tick 高频刷屏）
+def _lb_senti_gate_apply(sec, action):
+    # v0.78 B 统一参与方向闸门（首板/回封/弹性共用）：low 恒放行（低位试错语义），
+    # mid/high 在 rotate_low/high_diverg/ice_wait 下拦截；expected_buy 仍走原入口。
+    # 返回 True=可参与；拦截/放行均已打日志（区分「有意低位试错」与漏闸）。
+    try:
+        if not BLS.get('lb_senti_gate_all_buys_enabled', True):
+            return True
+        allow, note = _lb_senti_buy_gate(sec)
+        if not allow:
+            _lb_gate_seen(sec, note, action)
+            return False
+        st = _lb_senti_state()
+        key = 'allow:%s:%s' % (action, sec)
+        if key not in st.setdefault('gate_seen', {}):
+            st['gate_seen'][key] = time.time()
+            log.info('[lb-senti] %s %s allow (%s)' % (_sn(sec), action, note))
+        return True
+    except Exception:
+        return True
+
+
+def _lb_gate_seen(sec, note, action='expected_buy'):
+    # 参与方向闸门日志节流：每 (sec, action, note) 每日只打一次（防 tick 高频刷屏）；
+    # v0.78 B 增加 action 区分通道（expected_buy/first_board/reboard/elastic）
     try:
         st = _lb_senti_state()
-        key = '%s:%s' % (sec, note)
+        key = '%s:%s:%s' % (sec, action, note)
         if key in st.setdefault('gate_seen', {}):
             return
         st['gate_seen'][key] = time.time()
-        log.info('[lb-senti] %s %s -> skip expected_buy' % (_sn(sec), note))
+        log.info('[lb-senti] %s %s -> skip %s' % (_sn(sec), note, action))
     except Exception:
         pass
 
@@ -3941,7 +4004,7 @@ def _attempt_expected_buy(context, code, direction=None):
         log.info('[mid-avoid] %s 连板中位股规避(expected_buy)' % _sn(code)); return None
     _lbg, _lbg_note = _lb_senti_buy_gate(code)   # v0.65 连板盘中情绪参与方向闸门（切低位/冰点只放行低位试错）
     if not _lbg:
-        _lb_gate_seen(code, _lbg_note)
+        _lb_gate_seen(code, _lbg_note, 'expected_buy')
         return None
     if code in (context.portfolio.positions or {}):
         return None
@@ -4570,6 +4633,8 @@ def _try_first_board_buy(context, sec, rank_secs=None):
         return                       # 除一字板
     if not _is_first_board(sec):
         return                       # 仅首板（T-1 无连板）
+    if not _lb_senti_gate_apply(sec, 'first_board'):
+        return                       # v0.78 B1 统一方向闸（首板 tier=low 恒放行，日志区分有意低位试错）
     _fg = _ferment_front_gate(sec)   # v0.56 新题材发酵闸门：助攻非前排不抢首板
     if _fg is False:
         log.info('[ferment] %s 新题材助攻非前排 -> skip first_board' % _sn(sec)); return
@@ -4646,6 +4711,8 @@ def _try_reboard_buy(context):
         return
     cands.sort(key=lambda x: x[0])               # 只打第一个回封
     _ts, sec = cands[0]
+    if not _lb_senti_gate_apply(sec, 'reboard'):
+        return                       # v0.78 B2 统一方向闸（回封 2 板 tier=mid，切低位/冰点拦截）
     if BLS.get('board_rank_enabled', True):
         rs = _near_limit_cands(_pool())
         if not _board_rank_top3(sec, rs or [sec]):
@@ -4818,6 +4885,8 @@ def _try_elastic_arb_buy(context):
             return
         if not _is_elastic_20cm(sec):
             continue                 # 仅 300/301/688/689 20cm
+        if not _lb_senti_gate_apply(sec, 'elastic'):
+            continue                 # v0.78 B3 统一方向闸（弹性首板 low 恒放行，2 板候选切低位/冰点拦截）
         if not _elastic_in_strong_board(sec, strong):
             continue                 # 属于强板块
         if BLS.get('board_rank_enabled', True) and not _board_rank_top3(sec, rank_secs or [sec]):
@@ -5292,6 +5361,8 @@ def _try_elastic_top_buy(context):
             return
         if not trade_open(sec):
             continue
+        if not _lb_senti_gate_apply(sec, 'elastic'):
+            continue                 # v0.78 B3 统一方向闸（弹性首板 low 恒放行，2 板候选切低位/冰点拦截）
         if _is_one_word_open(sec):
             continue                 # 不追一字
         if _block_sealed_buy(sec):

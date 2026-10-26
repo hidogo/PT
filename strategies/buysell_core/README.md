@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.77（2026-10-26）
+- 当前版本：v0.78（2026-10-26）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.77 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.78 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,35 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.78（2026-10-26）连板盘中情绪状态机可达性(A) + 统一方向闸(B) + 三列停产(C) + 竞价就绪校验(D)
+- 背景：10-26 云端 `[lb-senti] 10:00 t100 freeze phase=watch` —— 状态机 10:00 前常被
+  `min_touch_ratio=0.5` 样本门槛与 60s 滞回锁死在 watch（档位不可达）；首板/回封/弹性买入
+  不消费方向闸（诊断无法区分「有意低位试错」与漏闸）；09:26 竞价首轮在数据未就绪时输出
+  `open=0.0%` 假 0（依赖 09:31 兜底修正）。
+- A 状态机可达性（10:00 前保证灵敏度与节奏）：
+  - `_lb_senti_set_phase` 新增 `force_confirm`；`lb_senti_t100_freeze` 调用
+    `_lb_senti_mid(force=True, force_confirm=True)` —— 10:00 冻结必落档（跳过滞回确认）。
+  - 新参数 `lb_senti_hysteresis_sec_before=30.0`：10:00 前风险升级确认窗口 30s，
+    10:00 后保持 60s（`lb_senti_hysteresis_sec`）。
+  - 新参数 `lb_senti_min_touch_ratio_before=0.3` + `lb_senti_min_touch_floor=3`：
+    10:00 前样本门槛放宽（mid_pool=9 -> touched>=3 即判档；池 < floor 不强制，防小池锁死）；
+    10:00 后维持 0.5。
+- B 统一方向闸（新总开关 `lb_senti_gate_all_buys_enabled=True`）：
+  - `_try_first_board_buy`：首板 tier=low 恒放行，补 `[lb-senti] ... allow` 日志（区分有意低位试错）。
+  - `_try_reboard_buy`：回封 2 板 tier=mid，rotate_low/high_diverg/ice_wait 下 `mid_high_skip` 拦截。
+  - `_try_elastic_arb_buy`/`_try_elastic_top_buy`：弹性首板 low 恒放行补日志；含 2 板候选同样被闸。
+  - `_lb_gate_seen` 增加 `action` 参数（expected_buy/first_board/reboard/elastic），日志区分通道。
+- C 三列停产（仅记录字段，v0.78 起不参与决策）：`theme_count/theme_max_board/follower_count`
+  云端保留兼容旧文件读取；AXquant 复盘侧可停产这三列（保留
+  `theme/theme_rank/themes/unique_high/board_cnt/is_st/reason/seal_money/limit_up_time/chg_pct`）。
+- D 竞价就绪校验：`_lb_senti_auction` 统计前用 `_auction_ready` 计算 mid/low 就绪率，
+  新参数 `lb_senti_auction_ready_min=0.6`；不足时输出 `ready=False / note=auction_data_not_ready`，
+  open/green/yizi 率置 None 不写（防 09:26 假 0）。
+- 验证：selftest_exp_rt 全量 766 PASS（新增 T129 共 13 例 A/B/D）；selftest_ops_oneclick 28 PASS；
+  pytest 50 passed；py3.10 编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v0.78`；
+  盘中核对 `[lb-senti] t100 freeze phase=` 已落档（非 watch 锁死）、`auction not_ready` 只在数据未就绪出现。
 
 ### v0.77（2026-10-26）ST 全链路兜底补全：tick 板块成员通道 / 首板买入 / 下单闸
 - 背景：10-26 早盘 ST西王 000639 二触（09:31:39）发出首板 SIM 信号（云端 v0.71 无 ST 剔除）。

@@ -4418,5 +4418,123 @@ ns4['_board_members_file'] = lambda b, cap: ['000639.XSHE', '600001.XSHG']
 _out = ns4['_tick_targets']()
 ok('T128 tick板块成员通道剔除ST', '000639.XSHE' not in _out and '600001.XSHG' in _out)
 
+# --- T129 v0.78 状态机可达性(A) + 统一方向闸(B) + 竞价就绪(D) ---
+# A1 10:00 冻结 force_confirm 必落档 ice_wait（无滞回确认）
+ns = fresh(); g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 16, 10, 5, 0)
+zt = {}
+for _i in range(9):
+    _sec = '6002%02d.XSHG' % (50 + _i)
+    zt[_sec] = {'board_cnt': 2 + (_i % 4)}   # 2..5 -> 中高位 mid
+g.zt_lianban = zt
+g.first_zt = {}
+_alive = set()
+for _i, _sec in enumerate(zt):
+    _brk = _i >= 4                           # 5 只炸板 -> promo 低
+    g.first_zt[_sec] = {'first_seal': 100000.0, 'first_bids': 5, 'ts': 1.0, 'break': _brk, 'break_cnt': 1 if _brk else 0}
+    if not _brk:
+        _alive.add(_sec)
+ns['_today_zt'] = lambda c: c in _alive
+ns['_market_red_ratio'] = lambda: 0.3        # red<0.4 -> ice_wait 候选
+ns['_dyn_theme_ferment'] = lambda: {}
+d_a1 = ns['_lb_senti_mid']()
+ok('T129 A1 10:00 滞回确认中仍 watch', d_a1['phase'] == 'watch')
+d_a1f = ns['_lb_senti_mid'](force=True, force_confirm=True)
+_st_a1 = ns['_lb_senti_state']()
+ok('T129 A1 10:00 force确认 -> ice_wait 且无 risk_pending', d_a1f['phase'] == 'ice_wait' and 'risk_pending' not in _st_a1)
+
+# A2 滞回分时段（确认窗口语义：窗口内再出现同候选即落档，超窗重置）：10:00 前 30s / 10:00 后 60s
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+_st2 = ns['_lb_senti_state'](); _st2['mid']['phase'] = 'watch'
+_t0 = time.time()
+ns['_lb_senti_set_phase'](_st2, 'high_diverg', 't', _t0)
+ok('T129 A2 10:00前 首次 risk_pending 仍 watch', _st2['mid'].get('phase') == 'watch')
+ns['_lb_senti_set_phase'](_st2, 'high_diverg', 't', _t0 + 5)
+ok('T129 A2 10:00前 5s 窗口内确认 -> high_diverg', _st2['mid'].get('phase') == 'high_diverg')
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+_st2b = ns['_lb_senti_state'](); _st2b['mid']['phase'] = 'watch'
+ns['_lb_senti_set_phase'](_st2b, 'high_diverg', 't', _t0)
+ns['_lb_senti_set_phase'](_st2b, 'high_diverg', 't', _t0 + 31)
+ok('T129 A2 10:00前 31s 超30s窗口 -> 重置仍 watch', _st2b['mid'].get('phase') == 'watch')
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 10, 30, 0)
+_st3 = ns['_lb_senti_state'](); _st3['mid']['phase'] = 'watch'
+_t1 = time.time()
+ns['_lb_senti_set_phase'](_st3, 'high_diverg', 't', _t1)
+ns['_lb_senti_set_phase'](_st3, 'high_diverg', 't', _t1 + 31)
+ok('T129 A2 10:00后 31s 窗口内确认(60s仍生效)', _st3['mid'].get('phase') == 'high_diverg')
+_st3['mid']['phase'] = 'watch'; _st3.pop('risk_pending', None)
+ns['_lb_senti_set_phase'](_st3, 'high_diverg', 't', _t1)
+ns['_lb_senti_set_phase'](_st3, 'high_diverg', 't', _t1 + 61)
+ok('T129 A2 10:00后 61s 超60s窗口 -> 重置仍 watch', _st3['mid'].get('phase') == 'watch')
+
+# A3 10:00 前样本门槛放宽：mid_pool=9 touched=3（>=floor3）即可判档
+ns = fresh(); g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+zt = {}
+for _i in range(9):
+    _sec = '6002%02d.XSHG' % (70 + _i)
+    zt[_sec] = {'board_cnt': 2 + (_i % 4)}
+g.zt_lianban = zt
+g.first_zt = {}
+for _i, _sec in enumerate(zt):
+    if _i < 3:
+        g.first_zt[_sec] = {'first_seal': 100000.0, 'first_bids': 5, 'ts': 1.0, 'break': False, 'break_cnt': 0}
+ns['_today_zt'] = lambda c: c in g.first_zt
+ns['_market_red_ratio'] = lambda: 0.5
+ns['_dyn_theme_ferment'] = lambda: {}
+d_a3 = ns['_lb_senti_mid'](force=True)
+ok('T129 A3 10:00前 touched=3/9 -> high_continue', d_a3['phase'] == 'high_continue')
+g.now_dt = datetime.datetime(2026, 10, 16, 10, 30, 0)
+d_a3b = ns['_lb_senti_mid'](force=True)
+ok('T129 A3 10:00后 同 touched=3/9 -> 标记样本不足(0.5门槛)', 'sample_insufficient' in d_a3b.get('note', ''))
+
+# B1 首板 low 恒放行（ice_wait 下低位试错语义）
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+ns['g'].zt_lianban = {'600300.XSHG': {'board_cnt': 0}}
+ns['_lb_senti_phase'] = lambda: {'phase': 'ice_wait'}
+ok('T129 B1 首板low ice_wait 恒放行', ns['_lb_senti_gate_apply']('600300.XSHG', 'first_board') is True)
+
+# B3 弹性首板 low 恒放行（ice_wait）
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+ns['g'].zt_lianban = {'600300.XSHG': {'board_cnt': 0}}
+ns['_lb_senti_phase'] = lambda: {'phase': 'ice_wait'}
+ok('T129 B3 弹性首板low ice_wait 恒放行', ns['_lb_senti_gate_apply']('600300.XSHG', 'elastic') is True)
+
+# B2 回封 2 板 mid：rotate_low 拦截 / high_continue 放行
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 45, 0)
+ns['g'].zt_lianban = {'600301.XSHG': {'board_cnt': 2}}
+ns['_lb_senti_phase'] = lambda: {'phase': 'rotate_low'}
+ok('T129 B2 回封2板 rotate_low 拦截', ns['_lb_senti_gate_apply']('600301.XSHG', 'reboard') is False)
+ns['_lb_senti_phase'] = lambda: {'phase': 'high_continue'}
+ok('T129 B2 回封2板 high_continue 放行', ns['_lb_senti_gate_apply']('600301.XSHG', 'reboard') is True)
+
+# D1 竞价就绪率不足 -> ready=False 不写率；就绪后 -> ready=True
+ns = fresh(); g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 16, 9, 26, 0)
+zt = {}
+for _i in range(8):
+    _sec = '6004%02d.XSHG' % (_i)
+    zt[_sec] = {'board_cnt': 2 + (_i % 4)} if _i < 5 else {'board_cnt': 0}
+g.zt_lianban = zt
+g.spot = {}
+for _i, _sec in enumerate(zt):
+    if _i < 2:    # 仅 2 只就绪（mid 5 只中 2/5=0.4 < 0.6）
+        g.spot[_sec] = {'open_px': 10.0, 'preclose_px': 10.0}
+    else:
+        g.spot[_sec] = {'open_px': 0.0, 'preclose_px': 10.0}
+d_d1 = ns['_lb_senti_auction']()
+ok('T129 D1 就绪率不足 ready=False', d_d1.get('ready') is False and 'auction_data_not_ready' in str(d_d1.get('note') or ''))
+ok('T129 D1 率置 None 不写', d_d1.get('mid_open_rate') is None and d_d1.get('low_open_rate') is None and d_d1.get('mid_green_rate') is None)
+for _sec in zt:
+    g.spot[_sec] = {'open_px': 10.5, 'preclose_px': 10.0}
+d_d1b = ns['_lb_senti_auction']()
+ok('T129 D1 就绪后 ready=True 有率', d_d1b.get('ready') is True and d_d1b.get('mid_open_rate') is not None)
+
 print('ALL DONE')
 
