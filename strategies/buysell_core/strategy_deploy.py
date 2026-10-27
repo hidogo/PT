@@ -6642,12 +6642,8 @@ def tick_data(context, data):
         _try_dyn_unq(context)
     except Exception as e:
         _warn('dyn_unq fail: %r' % e)
-                            
-    if BLS.get('budget_log_enabled', True):
-        try:
-            log.info('[budget] %s' % _dh.frame_report())
-        except Exception:
-            pass
+                                                                    
+    _budget_log()
 
 def auction_pre_confirm(context):
 

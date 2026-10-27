@@ -41,8 +41,9 @@
   - 打印规则：事件优先（over 帧只打事件行不打常规摘要）；常规摘要按 60s 心跳（首帧立即）；
     心跳附带窗口累计 `over_w60s:`（打印后清零）；事件行即心跳基准（防事件后下一帧补打）。
   - `_skip_log` 新增可选 `throttle_sec` 覆盖节流窗口（[budget] 事件行用 budget_log_event_sec，既有调用不变）。
-- 验证：selftest_exp_rt 全量 PASS（新增 T132 共 13 例：首帧心跳/60s 节流/61s 恢复/over 立即+去重/
-  事件优先/degraded 新增即打/heartbeat=0 语义/总开关静默）；py3.10 编译通过。
+- 补全：帧末调用点 `_budget_log()`（初版部署漏挂帧末调用，云端仍每帧打 [budget]；T132g 静态防回归）。
+- 验证：selftest_exp_rt 全量 PASS（新增 T132 共 14 例：首帧心跳/60s 节流/61s 恢复/over 立即+去重/
+  事件优先/degraded 新增即打/heartbeat=0 语义/总开关静默/帧末调用点）；py3.10 编译通过。
 - 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v0.81`；盘中核对 `[budget]`
   降至 ~60s 一条且 `over:`/`degraded:` 事件即时可见。
 

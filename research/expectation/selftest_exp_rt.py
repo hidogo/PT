@@ -4755,5 +4755,10 @@ dh.frame = {'token': 0, 'used': {'snapshot': 2}, 'over': {'snapshot': 1}}
 ns['_budget_log']()
 ok('T132f heartbeat=0 事件仍打', len(ns['log'].msgs) == 1 and 'over:' in ns['log'].msgs[0])
 
+# T132g 帧末调用点防回归：handle_data 帧末必须调用 _budget_log（否则云端仍每帧打 [budget]）
+_src_txt = io.open(SRC, 'r', encoding='utf-8').read()
+_hd_txt = _src_txt[_src_txt.find('def handle_data'):]
+ok('T132g 帧末调用 _budget_log', '_budget_log()' in _hd_txt)
+
 print('ALL DONE')
 

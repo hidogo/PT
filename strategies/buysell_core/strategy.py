@@ -7045,12 +7045,8 @@ def tick_data(context, data):
         _try_dyn_unq(context)
     except Exception as e:
         _warn('dyn_unq fail: %r' % e)
-    # v0.25 Phase 3：帧末拉取预算统计
-    if BLS.get('budget_log_enabled', True):
-        try:
-            log.info('[budget] %s' % _dh.frame_report())
-        except Exception:
-            pass
+    # v0.81 帧末拉取预算统计（节流：常规 60s 心跳 + over/degraded 事件行，见 _budget_log）
+    _budget_log()
 
 
 def auction_pre_confirm(context):
