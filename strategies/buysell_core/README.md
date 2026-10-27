@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.80（2026-10-27）
+- 当前版本：v0.81（2026-10-27）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.80 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.81 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,22 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.81（2026-10-27）[budget] 日志节流（常规 60s 心跳 + over/degraded 事件行）
+- 背景：`handle_data` 帧末无条件打 `[budget] <frame_report>`，3s 一条；今日窗口 1642 条占日志 36%，
+  常规信息（snapshot=1/2 等）绝大多数帧无变化，属非关键信息。
+- 修改（strategy.py）：
+  - 新增 `_budget_log()`（模块级），`handle_data` 帧末改调它；保留 `budget_log_enabled` 总开关语义。
+  - 新参数：`budget_log_heartbeat_sec=60.0`（常规摘要节流，0=常规摘要静默只打事件）、
+    `budget_log_event_sec=30.0`（事件行同因去重窗口）、`budget_log_on_over=True` /
+    `budget_log_on_degraded=True`（帧内预算超限/数据源降级立即打事件行）。
+  - 打印规则：事件优先（over 帧只打事件行不打常规摘要）；常规摘要按 60s 心跳（首帧立即）；
+    心跳附带窗口累计 `over_w60s:`（打印后清零）；事件行即心跳基准（防事件后下一帧补打）。
+  - `_skip_log` 新增可选 `throttle_sec` 覆盖节流窗口（[budget] 事件行用 budget_log_event_sec，既有调用不变）。
+- 验证：selftest_exp_rt 全量 PASS（新增 T132 共 13 例：首帧心跳/60s 节流/61s 恢复/over 立即+去重/
+  事件优先/degraded 新增即打/heartbeat=0 语义/总开关静默）；py3.10 编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v0.81`；盘中核对 `[budget]`
+  降至 ~60s 一条且 `over:`/`degraded:` 事件即时可见。
 
 ### v0.80（2026-10-27）SIM 虚拟资金基准 + 重建超时放弃 + 同因日志节流
 - 背景：今日日志暴露 3 个问题——

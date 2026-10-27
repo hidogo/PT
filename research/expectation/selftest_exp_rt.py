@@ -4682,5 +4682,78 @@ ns['_skip_log']('thr', '600001.XSHG', 'r1', 'm4')
 ok('T131g 同因 30s 节流 3 次仅 1 条+不同因+间隔恢复',
    len(ns['log'].msgs) == 3 and ns['log'].msgs[0] == 'm1' and ns['log'].msgs[1] == 'm3' and ns['log'].msgs[2] == 'm4')
 
+# --- T132 v0.81 [budget] 日志节流（常规 60s 心跳 + over/degraded 事件行） ---
+# T132a 常规帧：首帧立即打、60s 内重复不打、61s 后恢复
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 1, 'tx': 1}, 'over': {}}
+ns['_budget_log']()
+ns['_budget_log']()
+ok('T132a 首帧打+60s 内不重复', len(ns['log'].msgs) == 1 and '[budget]' in ns['log'].msgs[0] and 'snapshot=1/2' in ns['log'].msgs[0])
+g.budget_log_ts = time.time() - 61.0
+ns['_budget_log']()
+ok('T132a 61s 后恢复', len(ns['log'].msgs) == 2)
+
+# T132b over 事件行：帧内预算超限立即打；30s 内同因只 1 条
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 2}, 'over': {'snapshot': 3}}
+ns['_budget_log']()
+ns['_budget_log']()
+ok('T132b over 立即打+30s 去重', len(ns['log'].msgs) == 1 and 'over:snapshot=3' in ns['log'].msgs[0])
+
+# T132c 事件优先：over 帧不打常规摘要（event_sec=0 排除去重干扰）
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+ns['BLS']['budget_log_event_sec'] = 0.0
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 2}, 'over': {'snapshot': 1}}
+g.budget_log_ts = 0.0
+ns['_budget_log']()
+ns['_budget_log']()
+ok('T132c 事件优先不打常规摘要', len(ns['log'].msgs) == 2 and all('over:' in m for m in ns['log'].msgs))
+
+# T132d degraded 事件行：新增即打、重复不刷
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {}, 'over': {}}
+dh.degraded.add('snapshot')
+ns['_budget_log']()
+ns['_budget_log']()
+ok('T132d 新增降级立即打+重复不刷', len(ns['log'].msgs) == 1 and 'degraded:snapshot' in ns['log'].msgs[0])
+
+# T132e 心跳附带窗口累计 over_w60s 并清零
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 1}, 'over': {}}
+g.budget_over_acc = {'snapshot': 12}
+g.budget_log_ts = 0.0
+ns['_budget_log']()
+ok('T132e 心跳带 over_w60s 累计', len(ns['log'].msgs) == 1 and 'over_w60s:snapshot=12' in ns['log'].msgs[0])
+ok('T132e 打印后清零', g.budget_over_acc == {})
+
+# T132f 总开关全静默；heartbeat=0 常规静默但事件仍打
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+ns['BLS']['budget_log_enabled'] = False
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 2}, 'over': {'snapshot': 1}}
+ns['_budget_log']()
+ok('T132f enabled=False 全静默', len(ns['log'].msgs) == 0)
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+ns['BLS']['budget_log_heartbeat_sec'] = 0.0
+dh = ns['_get_ds']()
+dh.frame = {'token': 0, 'used': {'snapshot': 1}, 'over': {}}
+ns['_budget_log']()
+ok('T132f heartbeat=0 常规静默', len(ns['log'].msgs) == 0)
+dh.frame = {'token': 0, 'used': {'snapshot': 2}, 'over': {'snapshot': 1}}
+ns['_budget_log']()
+ok('T132f heartbeat=0 事件仍打', len(ns['log'].msgs) == 1 and 'over:' in ns['log'].msgs[0])
+
 print('ALL DONE')
 

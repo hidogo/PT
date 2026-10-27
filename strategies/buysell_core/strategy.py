@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.80（2026-10-27）
-# 部署核对：日志首行 `buysell_core init version=v0.80 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v0.81（2026-10-27）
+# 部署核对：日志首行 `buysell_core init version=v0.81 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.80"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-26）
+STRATEGY_VERSION = "v0.81"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
 
 
 def _warn(msg):
@@ -25,15 +25,17 @@ def _warn(msg):
             pass
 
 
-def _skip_log(tag, sec, reason, msg):
+def _skip_log(tag, sec, reason, msg, throttle_sec=None):
     # v0.80 同因日志节流：同一 (tag,sec,reason) 在 skip_log_throttle_sec 内只打一次，防每帧刷屏；原因变化立即打
+    # v0.81 throttle_sec 覆盖节流窗口（[budget] 事件行用 budget_log_event_sec）
     try:
         d = getattr(g, 'skip_log_ts', None)
         if not isinstance(d, dict):
             d = {}; g.skip_log_ts = d
         key = '%s|%s|%s' % (tag, sec, reason)
         now = time.time()
-        if now - float(d.get(key, 0.0) or 0.0) < float(BLS.get('skip_log_throttle_sec', 30.0) or 30.0):
+        _sec = float(throttle_sec if throttle_sec is not None else BLS.get('skip_log_throttle_sec', 30.0) or 30.0)
+        if now - float(d.get(key, 0.0) or 0.0) < _sec:
             return False
         d[key] = now
     except Exception:
@@ -228,6 +230,10 @@ BLS = {
     'board_rank_fast_until_minute': 30,  # 快速刷新截止：开盘 N 分钟内（09:30+N，10:00）
     # v0.25 Phase 3 帧级拉取预算（tick_data 每 3s 一帧，超限按优先级降级）
     'budget_log_enabled': True,       # 帧末输出 [budget] 统计
+    'budget_log_heartbeat_sec': 60.0,  # v0.81 常规 [budget] 摘要节流（0=常规摘要静默，只打事件）
+    'budget_log_event_sec': 30.0,      # v0.81 over/degraded 事件行同因去重窗口（覆盖 _skip_log 节流）
+    'budget_log_on_over': True,        # v0.81 帧内预算超限立即打事件行
+    'budget_log_on_degraded': True,    # v0.81 帧内数据源降级（新增）立即打事件行
     'frame_snapshot_limit': 2,        # 帧内批量快照批次（1 批量+1 兜底）
     'frame_snapshot_fallback_cap': 5, # 批量缺标逐只兜底上限
     'frame_tx_limit': 2,              # 帧内逐笔批量拉取+缺票逐只兜底（批量1 + 兜底预算1）
@@ -767,8 +773,55 @@ def _maybe_roll_day():
     g.ma5_lifecycle_day = day; g.ma5_lows = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0   # v0.74 跨日重置近涨停通道与扫描游标
-    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}   # v0.75/76/80 跨日重置重启恢复队列、heartbeat、保存节流与同因日志节流
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set()   # v0.75/76/80/81 跨日重置重启恢复队列、heartbeat、保存节流、同因日志节流与 [budget] 节流
     return True
+
+
+def _budget_log():
+    # v0.81 [budget] 日志节流：常规摘要 60s 心跳（首帧立即）；帧内 over/degraded 事件行优先（同因按
+    # budget_log_event_sec 去重）；心跳附带窗口累计 over_w<window>s（打印后清零）；总开关 budget_log_enabled。
+    try:
+        if not BLS.get('budget_log_enabled', True):
+            return
+        _dh = _get_ds()
+        rep = _dh.frame_report()
+        over = _dh.frame.get('over') or {}
+        deg = list(_dh.degraded)
+        acc = getattr(g, 'budget_over_acc', None)
+        if not isinstance(acc, dict):
+            acc = {}; g.budget_over_acc = acc
+        for _k, _n in over.items():
+            acc[_k] = float(acc.get(_k, 0.0) or 0.0) + float(_n or 0)
+        ev = False
+        if BLS.get('budget_log_on_over', True) and over:
+            ev = True
+            _skip_log('budget', 'over', 'frame', '[budget] %s' % rep, throttle_sec=BLS.get('budget_log_event_sec', 30.0))
+        if BLS.get('budget_log_on_degraded', True) and deg:
+            logged = getattr(g, 'budget_deg_logged', None)
+            if logged is None:
+                logged = set(); g.budget_deg_logged = logged
+            new_deg = [x for x in deg if x not in logged]
+            if new_deg:
+                logged.update(new_deg)
+                ev = True
+                _skip_log('budget', 'degraded', 'frame', '[budget] %s degraded:%s' % (rep, ','.join(str(x) for x in new_deg[:5])), throttle_sec=BLS.get('budget_log_event_sec', 30.0))
+        if ev:
+            g.budget_log_ts = time.time()   # v0.81 事件行即心跳基准（防事件后下一帧立即补打常规摘要）
+            return
+        hb = float(BLS.get('budget_log_heartbeat_sec', 60.0) or 0.0)
+        if hb <= 0:
+            return
+        now = time.time()
+        if now - float(getattr(g, 'budget_log_ts', 0.0) or 0.0) < hb:
+            return
+        g.budget_log_ts = now
+        extra = ''
+        if acc:
+            extra = ' over_w%.0fs:%s' % (hb, ','.join('%s=%d' % (k, int(v)) for k, v in sorted(acc.items())))
+            acc.clear()
+        log.info('[budget] %s%s' % (rep, extra))
+    except Exception:
+        pass
 
 
 def handle_data(context, data):

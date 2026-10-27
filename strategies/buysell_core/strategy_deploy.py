@@ -3,7 +3,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.80"                                                        
+STRATEGY_VERSION = "v0.81"                                                        
 
 def _warn(msg):
                                                                  
@@ -19,15 +19,16 @@ def _warn(msg):
         except Exception:
             pass
 
-def _skip_log(tag, sec, reason, msg):
-                                                                                  
+def _skip_log(tag, sec, reason, msg, throttle_sec=None):
+
     try:
         d = getattr(g, 'skip_log_ts', None)
         if not isinstance(d, dict):
             d = {}; g.skip_log_ts = d
         key = '%s|%s|%s' % (tag, sec, reason)
         now = time.time()
-        if now - float(d.get(key, 0.0) or 0.0) < float(BLS.get('skip_log_throttle_sec', 30.0) or 30.0):
+        _sec = float(throttle_sec if throttle_sec is not None else BLS.get('skip_log_throttle_sec', 30.0) or 30.0)
+        if now - float(d.get(key, 0.0) or 0.0) < _sec:
             return False
         d[key] = now
     except Exception:
@@ -220,6 +221,10 @@ BLS = {
     'board_rank_fast_until_minute': 30,                                  
                                                       
     'budget_log_enabled': True,                         
+    'budget_log_heartbeat_sec': 60.0,                                         
+    'budget_log_event_sec': 30.0,                                                      
+    'budget_log_on_over': True,                            
+    'budget_log_on_degraded': True,                             
     'frame_snapshot_limit': 2,                             
     'frame_snapshot_fallback_cap': 5,             
     'frame_tx_limit': 2,                                            
@@ -743,8 +748,53 @@ def _maybe_roll_day():
     g.ma5_lifecycle_day = day; g.ma5_lows = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0                         
-    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}                                                 
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set()                                                                 
     return True
+
+def _budget_log():
+
+    try:
+        if not BLS.get('budget_log_enabled', True):
+            return
+        _dh = _get_ds()
+        rep = _dh.frame_report()
+        over = _dh.frame.get('over') or {}
+        deg = list(_dh.degraded)
+        acc = getattr(g, 'budget_over_acc', None)
+        if not isinstance(acc, dict):
+            acc = {}; g.budget_over_acc = acc
+        for _k, _n in over.items():
+            acc[_k] = float(acc.get(_k, 0.0) or 0.0) + float(_n or 0)
+        ev = False
+        if BLS.get('budget_log_on_over', True) and over:
+            ev = True
+            _skip_log('budget', 'over', 'frame', '[budget] %s' % rep, throttle_sec=BLS.get('budget_log_event_sec', 30.0))
+        if BLS.get('budget_log_on_degraded', True) and deg:
+            logged = getattr(g, 'budget_deg_logged', None)
+            if logged is None:
+                logged = set(); g.budget_deg_logged = logged
+            new_deg = [x for x in deg if x not in logged]
+            if new_deg:
+                logged.update(new_deg)
+                ev = True
+                _skip_log('budget', 'degraded', 'frame', '[budget] %s degraded:%s' % (rep, ','.join(str(x) for x in new_deg[:5])), throttle_sec=BLS.get('budget_log_event_sec', 30.0))
+        if ev:
+            g.budget_log_ts = time.time()                                    
+            return
+        hb = float(BLS.get('budget_log_heartbeat_sec', 60.0) or 0.0)
+        if hb <= 0:
+            return
+        now = time.time()
+        if now - float(getattr(g, 'budget_log_ts', 0.0) or 0.0) < hb:
+            return
+        g.budget_log_ts = now
+        extra = ''
+        if acc:
+            extra = ' over_w%.0fs:%s' % (hb, ','.join('%s=%d' % (k, int(v)) for k, v in sorted(acc.items())))
+            acc.clear()
+        log.info('[budget] %s%s' % (rep, extra))
+    except Exception:
+        pass
 
 def handle_data(context, data):
     _set_now(context)
