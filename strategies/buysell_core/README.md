@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.79（2026-10-26）
+- 当前版本：v0.80（2026-10-27）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.79 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v0.80 ...`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,25 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v0.80（2026-10-27）SIM 虚拟资金基准 + 重建超时放弃 + 同因日志节流
+- 背景：今日日志暴露 3 个问题——
+  1) 全市场 0 信号（1831 次 `exp order skip(qty<=0)`，真实现金 ~2106，SIM 观察模式下买入量按真实现金计算导致信号缺失）；
+  2) `restart-rebuild pending=4 done=0` 全天卡死（当日未触涨停的票永不重建成功，heartbeat 持续刷屏）；
+  3) `[reboard] 非前排` 等低频原因每帧刷屏 ~590 条，干扰信号日志检索。
+- 修改（strategy.py）：
+  - SIM 虚拟资金：新增 `sim_cash_base=200000`（纯模拟 DO_ORDER=False 且 EXPECT_ORDER=False 时买入量按此计算；
+    0=关闭用真实现金）与 `sim_min_lot=100`；新增 `_sim_mode()/_size_cash()/_size_total()`，`_calc_buy_qty`、
+    `_buy_pos_ok`、`place_order`、`place_expected_order` 统一改走资金基准；SIM 下 qty<=0 回退最小一手 100
+    并打 `[sim-min-lot]`（信号可观察，不发真单）。init 日志补 `sim_cash=`。
+  - 重建超时放弃：新增 `first_zt_rebuild_timeout_min=30`；登记时记录 `g.first_zt_rebuild_ts[sec]` 入队时间戳；
+    `_rebuild_first_zt_tick` 开头判定「入队超时 或 已过 10:00」（首板/回封闸门已过）-> 移出队列+日志+heartbeat，
+    防 pending 全天卡死。heartbeat 增加 `left=` 剩余明细。
+  - 同因日志节流：新增 `_skip_log(tag, sec, reason, msg)`（`g.skip_log_ts` 表，同因 30s 去重，原因变化立即打），
+    替换 13 处低频原因刷屏点（`[mid-avoid]`×6、`score-na`、`[st-skip]`×3、`[reboard]` non_front/l2_big_low/seal_low）。
+- 验证：selftest_exp_rt 全量 PASS（新增 T131 共 9 例：SIM 资金基准/最小一手兜底×2/非 SIM 拦截/重建超时/10:00 截止/同因节流）；
+  py3.10 编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v0.80 ... sim_cash=200000.0`。
 
 ### v0.79（2026-10-26）zt_lianban 盘中重读防收缩（P1）+ 唯一身位口径验证（R1 前置）
 - 背景：09:25 `auction_pre_confirm` 重读 `_load_zt_lianban` 为全量替换，若上传文件被误覆盖为收缩版会丢候选；

@@ -8,6 +8,7 @@ def make_mod(**overrides):
     with open(SRC, "r", encoding="utf-8") as f:
         code = compile(f.read(), SRC, "exec")
     exec(code, ns)
+    ns['BLS']['sim_cash_base'] = 0.0   # v0.80 默认关闭 SIM 虚拟资金基准（既有用例为真实资金语义）；SIM 用例单独开启
     TMP = tempfile.mkdtemp(prefix="pt_sf_")
     class Log:
         def info(self, *a): pass
@@ -2678,7 +2679,7 @@ ok('T92e 权威唯一高板读列', ns['g'].zt_lianban['003029.XSHE']['unique_hi
 ok('T92e 权威列中位规避', ns['_mid_board_avoid']('603278.XSHG') is True)
 ok('T92e 权威唯一高板放行', ns['_mid_board_avoid']('003029.XSHE') is False)
 
-# T92f export_lianban.build_csv 追加权威唯一列 + 题材/概念梯队列
+# T92f export_lianban.build_csv 权威唯一列 + 题材/概念梯队列（follower_count 列停产）
 import export_lianban as _el92
 _csv92 = _el92.build_csv('2026-10-20',
     [{'code': '003029.XSHE', 'name': '吉大正元', 'board_cnt': 4, 'limit_up_time': '09:25',
@@ -2687,10 +2688,11 @@ _csv92 = _el92.build_csv('2026-10-20',
     {'003029.XSHE': {'theme': '低空经济', 'theme_count': 3, 'theme_max_board': 4,
                      'theme_rank': 2, 'themes': '低空经济|网络安全'}})
 _line92 = _csv92.split('\n')[1]
-ok('T92f build_csv 权威列+题材列',
+ok('T92f build_csv 权威列+题材列（无 follower_count）',
    'unique_high' in _csv92.split('\n')[0]
    and 'theme_count' in _csv92.split('\n')[0]
-   and ',1,4,低空经济,3,4,2,低空经济|网络安全' in _line92
+   and 'follower_count' not in _csv92.split('\n')[0]
+   and ',1,低空经济,3,4,2,低空经济|网络安全' in _line92
    and '003029.XSHE' in _csv92)
 
 # T92g zt_lianban 题材/概念梯队列消费（v0.38）：列解析 + 缺 unique_high 时按主题材分组兜底
@@ -4604,6 +4606,81 @@ ok('T130d 日期守卫拒绝重载', n130d == 10 and '600300.XSHG' not in g.zt_l
 _zt_csv_130(_ztp, [('6003%02d.XSHG' % i, 1, 't1') for i in range(4)])
 n130e = ns['_load_zt_lianban'](merge=True)
 ok('T130e 收缩护栏拒绝(4<50% of 10)', n130e == 10 and '600300.XSHG' not in g.zt_lianban and len(g.zt_lianban) == 10)
+
+# --- T131 v0.80 SIM 虚拟资金 + 重建超时放弃 + 同因日志节流 ---
+# T131a SIM 模式：sim_cash_base=200000（真实现金仅 2106）-> _calc_buy_qty 按虚拟资金 2000 股
+ns = fresh(); g = ns['g']
+ns['BLS']['sim_cash_base'] = 200000.0
+ns['_CTX'].portfolio.cash = 2106.0
+q131 = ns['_calc_buy_qty'](ns['_CTX'], '600001.XSHG', 10.0, 0.10)
+ok('T131a SIM 模式判定+虚拟资金 2000 股', ns['_sim_mode']() is True and q131 == 2000)
+
+# T131b 非 SIM 保持真实资金：sim_cash_base=0 现金不足 -> 0 股；DO_ORDER=True 即便有 sim_cash_base 也非 SIM
+ns = fresh()
+ns['_CTX'].portfolio.cash = 2106.0
+q131b = ns['_calc_buy_qty'](ns['_CTX'], '600001.XSHG', 10.0, 0.10)
+ok('T131b 非 SIM 现金不足 qty=0', q131b == 0 and ns['_sim_mode']() is False)
+ns2 = fresh(); ns2['BLS']['sim_cash_base'] = 200000.0; ns2['BLS']['DO_ORDER'] = True
+ok('T131b DO_ORDER=True 强制非 SIM', ns2['_sim_mode']() is False)
+
+# T131c SIM 预期买入最小一手兜底：预算不足(_calc_buy_qty=0) -> qty=100 仍返回 True（不发真单 SIM 信号）
+def _mk_log():
+    class _Log:
+        def __init__(self):
+            self.msgs = []
+        def info(self, *a):
+            self.msgs.append(' '.join(str(x) for x in a))
+        def warn(self, *a):
+            self.msgs.append(' '.join(str(x) for x in a))
+        def error(self, *a):
+            self.msgs.append(' '.join(str(x) for x in a))
+    return _Log()
+ns = fresh(); g = ns['g']
+ns['BLS']['sim_cash_base'] = 200000.0
+ns['_CTX'].portfolio.cash = 2106.0
+ns['log'] = _mk_log()
+g.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+ns['_calc_buy_qty'] = lambda *a, **k: 0   # 模拟预算不足 -> 触发最小一手兜底
+r131c = ns['place_expected_order'](ns['_ctx'], '600001.XSHG', note='t131')
+ok('T131c SIM 预期买入最小一手兜底 True+qty=100',
+   r131c is True and any('qty=100' in m for m in ns['log'].msgs) and any('sim-min-lot' in m for m in ns['log'].msgs))
+
+# T131d place_order SIM 最小一手兜底：同上走 place_order 买分支
+ns = fresh(); g = ns['g']
+ns['BLS']['sim_cash_base'] = 200000.0
+ns['_CTX'].portfolio.cash = 2106.0
+ns['log'] = _mk_log()
+g.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+ns['_calc_buy_qty'] = lambda *a, **k: 0
+r131d = ns['place_order'](ns['_ctx'], '600001.XSHG', 'buy', note='t131')
+ok('T131d place_order SIM 最小一手兜底 True+qty=100',
+   r131d is True and any('qty=100' in m for m in ns['log'].msgs) and any('sim-min-lot' in m for m in ns['log'].msgs))
+
+# T131e 重建超时放弃：入队 31 分钟 > 30 分钟 -> 移出队列
+ns = fresh(); g = ns['g']
+g.first_zt_rebuild_pending = ['600001.XSHG']
+g.first_zt_rebuild_ts = {'600001.XSHG': time.time() - 60.0 * 31.0}
+ns['_rebuild_first_zt_tick']()
+ok('T131e 重建超时(31min) 移出队列', not g.first_zt_rebuild_pending)
+
+# T131f 10:00 截止放弃：now_dt>=10:00（入队仅 1 分钟）-> 移出队列
+ns = fresh(); g = ns['g']
+g.first_zt_rebuild_pending = ['600002.XSHG']
+g.first_zt_rebuild_ts = {'600002.XSHG': time.time() - 60.0}
+g.now_dt = datetime.datetime(2026, 10, 16, 10, 0, 1)
+ns['_rebuild_first_zt_tick']()
+ok('T131f 10:00 截止放弃移出队列', not g.first_zt_rebuild_pending)
+
+# T131g 同因日志节流：30s 内同 (tag,sec,reason) 只打 1 条；不同 reason 立即打；间隔后恢复
+ns = fresh(); g = ns['g']
+ns['log'] = _mk_log()
+ns['_skip_log']('thr', '600001.XSHG', 'r1', 'm1')
+ns['_skip_log']('thr', '600001.XSHG', 'r1', 'm2')
+ns['_skip_log']('thr', '600001.XSHG', 'r2', 'm3')
+g.skip_log_ts['thr|600001.XSHG|r1'] = time.time() - 31.0
+ns['_skip_log']('thr', '600001.XSHG', 'r1', 'm4')
+ok('T131g 同因 30s 节流 3 次仅 1 条+不同因+间隔恢复',
+   len(ns['log'].msgs) == 3 and ns['log'].msgs[0] == 'm1' and ns['log'].msgs[1] == 'm3' and ns['log'].msgs[2] == 'm4')
 
 print('ALL DONE')
 
