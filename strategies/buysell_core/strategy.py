@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.1（2026-10-27）
-# 部署核对：日志首行 `buysell_core init version=v1.1 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.2（2026-10-27）
+# 部署核对：日志首行 `buysell_core init version=v1.2 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.1"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
+STRATEGY_VERSION = "v1.2"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
 
 
 def _warn(msg):
@@ -338,6 +338,9 @@ BLS = {
     'lb_senti_hysteresis_sec_before': 30.0,  # 10:00 前风险升级滞回（10:00 后仍用 lb_senti_hysteresis_sec=60）
     'lb_senti_auction_ready_min': 0.6,       # v0.78 D 竞价就绪率下限（不足 -> ready=False 不写 open/green/yizi 率）
     'lb_senti_gate_all_buys_enabled': True,  # v0.78 B 统一方向闸总开关（首板/回封/弹性并入，low 恒放行）
+    # v1.2 连板高度压制 -> 唯一连板空间闸门（docs/40）：唯一连板距压制位空间不足不参与
+    'unq_space_gate_enabled': True,     # 唯一连板空间闸门总开关（_lb_senti_buy_gate 消费）
+    'unq_space_min': 0.15,              # 距压制位最小比例空间：(height_suppress-板数)/height_suppress >= 0.15 才博弈
     'lb_senti_rotate_low_bonus': 1.2,     # 切低位：低位/新方向首板参与排序加分
     'lb_senti_rotate_mid_pen': -0.8,      # 切低位：中位股参与排序减分（兑现侧）
     'lb_senti_rotate_high_pen': -0.6,     # 切低位：高标参与排序减分
@@ -3603,6 +3606,38 @@ def _lb_senti_participate_scale():
         return 1.0
 
 
+def _unq_height_space(sec):
+    # v1.2 唯一连板距压制位比例空间（docs/40 连板高度压制）：
+    #   space = (height_suppress - 当前连板数) / height_suppress，>= unq_space_min 才博弈。
+    # 无压制数据（旧文件/不足 5 日）或非连板 -> 1.0（放行）。
+    try:
+        st = getattr(g, 'sentiment', None) or {}
+        suppress = int(st.get('height_suppress') or 0)
+        if suppress <= 0:
+            return 1.0
+        cnt = _limitup_days(sec)
+        if cnt <= 0:
+            return 1.0
+        return (suppress - cnt) / suppress
+    except Exception:
+        return 1.0
+
+
+def _is_unique_lianban(sec):
+    # v1.2 唯一连板判定（空间闸门用）：权威 unique_high / 动态唯一 / 原题材唯一存活龙头 任一命中
+    try:
+        zt = ((getattr(g, 'zt_lianban', {}) or {}).get(sec) or {})
+        if zt.get('unique_high'):
+            return True
+        if _unique_stand(sec):
+            return True
+        if _exp_original_theme_leader(sec):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _lb_senti_buy_gate(sec):
     # 参与方向闸门（docs/43 + v0.71）：高位分歧/冰点仅低位；切低位默认低位，
     # 允许 T-1 原题材当前唯一存活龙头例外。返回 (allow, note)。
@@ -3615,6 +3650,14 @@ def _lb_senti_buy_gate(sec):
                     and _exp_original_theme_leader(sec)):
                 return (True, 'origin_unique_leader_ok(rotate_low)')
             return (False, 'mid_high_skip(%s)' % ph)
+        # v1.2 唯一连板空间闸门（docs/40 连板高度压制）：low 档（首板/一进二）天然空间大豁免；
+        # 唯一连板距压制位空间 < unq_space_min（默认 15%）-> 不参与（唯一高标空间≈0 自然拦截）
+        if BLS.get('unq_space_gate_enabled', True) and _lb_senti_tier(sec) != 'low':
+            if _is_unique_lianban(sec):
+                sp = _unq_height_space(sec)
+                if sp < float(BLS.get('unq_space_min', 0.15)):
+                    sup = ((getattr(g, 'sentiment', None) or {}).get('height_suppress') or 0)
+                    return (False, 'unq_space_skip(space=%.1f%%,suppress=%d)' % (sp * 100.0, sup))
         return (True, 'normal(%s)' % ph)
     except Exception:
         return (True, 'normal')
@@ -3907,6 +3950,10 @@ def _load_sentiment():
             "divergence": bool(int(_fnum(rec.get("divergence"))) or 0),
             "emotion": (rec.get("emotion") or "").strip(),
             "emotion_basis": (rec.get("emotion_basis") or "").strip(),
+            # v1.2 连板高度压制（docs/40）：近 10 日最高板路径与压制位（唯一连板空间闸门消费；旧表头缺省放行）
+            "max_board_10d": int(_fnum(rec.get("max_board_10d"))),
+            "max_board_10d_path": (rec.get("max_board_10d_path") or "").strip(),
+            "height_suppress": int(_fnum(rec.get("height_suppress"))),
         }
         log.info("[sentiment] loaded %s -> ice=%s streak=%d adv=%.1f%% seal=%.0f%% emotion=%s (date=%s)" % (
             fp, g.sentiment["ice"], g.sentiment["ice_streak"], g.sentiment["advance_rate"],

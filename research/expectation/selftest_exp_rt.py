@@ -4786,5 +4786,104 @@ ok('T133c 预期买入实单发单',
    r133c is True and len(ns['_RECC']['calls']) == 2
    and '600001.XSHG' in (g.pending or {}) and (g.pending or {}).get('600001.XSHG', {}).get('status') == 'SENT')
 
+# --- T134 v1.2 连板高度压制（docs/40）：生成侧 _height_path 自算（与复盘结论同源） ---
+import json as _json
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("export_sentiment", r"D:/PROJ/PT/research/expectation/export_sentiment.py")
+_es = _ilu.module_from_spec(_spec)
+try:
+    _spec.loader.exec_module(_es)
+    _ES_OK = True
+except Exception as _e:
+    _ES_OK = False
+    print('WARN export_sentiment import fail: %r' % _e)
+
+def _mk_lub(seq, tag):
+    d = os.path.join(tempfile.mkdtemp(prefix="pt_lub_%s_" % tag))
+    for dt, mb in seq:
+        with open(os.path.join(d, "limit_up_boards_%s.json" % dt), "w", encoding="utf-8") as f:
+            _json.dump({"summary": {"max_board": mb}}, f)
+    return d
+
+if _ES_OK:
+    _d = _mk_lub([("2026-10-14",4),("2026-10-15",5),("2026-10-16",11),("2026-10-19",3),
+                  ("2026-10-20",4),("2026-10-21",4),("2026-10-22",5),("2026-10-23",6),
+                  ("2026-10-26",4),("2026-10-27",5)], "a")
+    _m, _p, _s = _es._height_path("2026-10-27", _d)
+    ok('T134a 10-27 路径/最高11/压制6', _m == 11 and _s == 6
+       and _p == "10-14:4,10-15:5,10-16:11,10-19:3,10-20:4,10-21:4,10-22:5,10-23:6,10-26:4,10-27:5")
+    _d = _mk_lub([("2026-10-12",10),("2026-10-13",3),("2026-10-14",4),("2026-10-15",5),
+                  ("2026-10-16",11),("2026-10-19",3),("2026-10-20",4),("2026-10-21",4),
+                  ("2026-10-22",5),("2026-10-23",6)], "b")
+    _m, _p, _s = _es._height_path("2026-10-23", _d)
+    ok('T134b 10-23 双异常(10/11) 压制6', _s == 6 and _m == 11)
+    _d = _mk_lub([("2026-10-13",3),("2026-10-14",4),("2026-10-15",5),("2026-10-16",11),
+                  ("2026-10-19",3),("2026-10-20",4),("2026-10-21",4),("2026-10-22",5),
+                  ("2026-10-23",6),("2026-10-26",4)], "c")
+    _m, _p, _s = _es._height_path("2026-10-26", _d)
+    ok('T134c 10-26 压制6', _s == 6)
+    _d = _mk_lub([("2026-10-19",2),("2026-10-20",3),("2026-10-21",4),("2026-10-22",5),
+                  ("2026-10-23",6),("2026-10-26",4),("2026-10-27",5)], "d")
+    _m, _p, _s = _es._height_path("2026-10-27", _d)
+    ok('T134d 无异常 单调升 压制=当前高度6', _s == 6)
+    _d = _mk_lub([("2026-10-14",4),("2026-10-15",5),("2026-10-16",11),("2026-10-19",3),
+                  ("2026-10-20",5),("2026-10-21",4),("2026-10-22",2)], "e")
+    _m, _p, _s = _es._height_path("2026-10-22", _d)
+    ok('T134e 新周期内最近未超越高点4(非周期最高5)', _s == 4)
+    _d = _mk_lub([("2026-10-19",3),("2026-10-20",4),("2026-10-21",5),("2026-10-22",6),
+                  ("2026-10-23",11)], "f")
+    _m, _p, _s = _es._height_path("2026-10-23", _d)
+    ok('T134f 异常在今日 压制=今日高度11', _s == 11)
+    _d = _mk_lub([("2026-10-23",6),("2026-10-26",4),("2026-10-27",5)], "g")
+    _m, _p, _s = _es._height_path("2026-10-27", _d)
+    ok('T134g 文件不足5日 压制0(放行)', _s == 0 and _m == 6)
+
+# --- T135 v1.2 唯一连板空间闸门（_lb_senti_buy_gate）+ _load_sentiment 解析 ---
+def _gate_ns(suppress, bc, unq, lv):
+    ns = fresh()
+    ns['BLS']['lb_senti_enabled'] = False
+    ns['g'].sentiment = {'height_suppress': suppress, 'max_board_10d': 11}
+    ns['g'].zt_lianban = {'600001.XSHG': {'board_cnt': bc, 'unique_high': unq}}
+    ns['_limitup_days'] = lambda c: lv
+    return ns, '600001.XSHG'
+
+ns, sec = _gate_ns(6, 5, True, 6)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 唯一高标(6板/压制6) 空间0% 拦截', allow is False and 'unq_space_skip' in note)
+ns, sec = _gate_ns(6, 4, True, 5)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 唯一5板/压制6 空间16.7% 放行', allow is True and 'normal' in note)
+ns, sec = _gate_ns(5, 4, True, 5)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 唯一5板/压制5 空间0% 拦截', allow is False and 'unq_space_skip' in note)
+ns, sec = _gate_ns(20, 16, True, 17)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 边界15%(17/20) 放行', allow is True)
+ns, sec = _gate_ns(20, 16, True, 18)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 10%(18/20) 拦截', allow is False and 'unq_space_skip' in note)
+ns, sec = _gate_ns(2, 1, True, 2)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 low档豁免(空间0%仍放行)', allow is True)
+ns, sec = _gate_ns(6, 4, False, 5)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 非唯一中位不受空间闸门影响', allow is True and 'normal' in note)
+ns, sec = _gate_ns(0, 5, True, 6)
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 无压制数据放行', allow is True)
+ns, sec = _gate_ns(6, 5, True, 6)
+ns['BLS']['unq_space_gate_enabled'] = False
+allow, note = ns['_lb_senti_buy_gate'](sec)
+ok('T135 开关关闭放行', allow is True)
+
+ns = fresh()
+_sent = os.path.join(ns['_TMP'], 'sentiment_latest.csv')
+with open(_sent, 'w', encoding='utf-8', newline='') as f:
+    f.write('date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis,max_board_10d,max_board_10d_path,height_suppress\n')
+    f.write('2026-10-27,42,28,0.6000,10.85,5,12,1,1,0,ice,0,偏冷,basis,11,10-14:4,6\n')
+s = ns['_load_sentiment']()
+ok('T135 _load_sentiment 解析高度压制字段', s is not None
+   and s.get('height_suppress') == 6 and s.get('max_board_10d') == 11 and s.get('max_board_10d_path') == '10-14:4')
+
 print('ALL DONE')
 

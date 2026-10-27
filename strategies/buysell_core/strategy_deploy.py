@@ -3,7 +3,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.1"                                                        
+STRATEGY_VERSION = "v1.2"                                                        
 
 def _warn(msg):
                                                                  
@@ -329,6 +329,9 @@ BLS = {
     'lb_senti_hysteresis_sec_before': 30.0,                                                       
     'lb_senti_auction_ready_min': 0.6,                                                                
     'lb_senti_gate_all_buys_enabled': True,                                        
+                                                      
+    'unq_space_gate_enabled': True,                                         
+    'unq_space_min': 0.15,                                                                           
     'lb_senti_rotate_low_bonus': 1.2,                         
     'lb_senti_rotate_mid_pen': -0.8,                          
     'lb_senti_rotate_high_pen': -0.6,                   
@@ -3388,6 +3391,34 @@ def _lb_senti_participate_scale():
     except Exception:
         return 1.0
 
+def _unq_height_space(sec):
+
+    try:
+        st = getattr(g, 'sentiment', None) or {}
+        suppress = int(st.get('height_suppress') or 0)
+        if suppress <= 0:
+            return 1.0
+        cnt = _limitup_days(sec)
+        if cnt <= 0:
+            return 1.0
+        return (suppress - cnt) / suppress
+    except Exception:
+        return 1.0
+
+def _is_unique_lianban(sec):
+                                                               
+    try:
+        zt = ((getattr(g, 'zt_lianban', {}) or {}).get(sec) or {})
+        if zt.get('unique_high'):
+            return True
+        if _unique_stand(sec):
+            return True
+        if _exp_original_theme_leader(sec):
+            return True
+    except Exception:
+        pass
+    return False
+
 def _lb_senti_buy_gate(sec):
 
     try:
@@ -3399,6 +3430,13 @@ def _lb_senti_buy_gate(sec):
                     and _exp_original_theme_leader(sec)):
                 return (True, 'origin_unique_leader_ok(rotate_low)')
             return (False, 'mid_high_skip(%s)' % ph)
+
+        if BLS.get('unq_space_gate_enabled', True) and _lb_senti_tier(sec) != 'low':
+            if _is_unique_lianban(sec):
+                sp = _unq_height_space(sec)
+                if sp < float(BLS.get('unq_space_min', 0.15)):
+                    sup = ((getattr(g, 'sentiment', None) or {}).get('height_suppress') or 0)
+                    return (False, 'unq_space_skip(space=%.1f%%,suppress=%d)' % (sp * 100.0, sup))
         return (True, 'normal(%s)' % ph)
     except Exception:
         return (True, 'normal')
@@ -3669,6 +3707,10 @@ def _load_sentiment():
             "divergence": bool(int(_fnum(rec.get("divergence"))) or 0),
             "emotion": (rec.get("emotion") or "").strip(),
             "emotion_basis": (rec.get("emotion_basis") or "").strip(),
+                                                                      
+            "max_board_10d": int(_fnum(rec.get("max_board_10d"))),
+            "max_board_10d_path": (rec.get("max_board_10d_path") or "").strip(),
+            "height_suppress": int(_fnum(rec.get("height_suppress"))),
         }
         log.info("[sentiment] loaded %s -> ice=%s streak=%d adv=%.1f%% seal=%.0f%% emotion=%s (date=%s)" % (
             fp, g.sentiment["ice"], g.sentiment["ice_streak"], g.sentiment["advance_rate"],

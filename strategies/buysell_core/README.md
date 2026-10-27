@@ -3,11 +3,17 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.1（2026-10-27）
+- 当前版本：v1.2（2026-10-27）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.1 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.2 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.2
+- v1.2 连板高度压制 → 唯一连板空间闸门（docs/40 §7）：sentiment CSV 新增近 10 日最高板路径与压制位
+  （生成侧 `_height_path` 自算，默认 7 板异动压制，与复盘结论同源）；云端 `_lb_senti_buy_gate` 对唯一连板
+  （unique_high/动态唯一/原题材唯一存活龙头）消费压制位空间闸门，`(suppress-板数)/suppress < 15%` 拦截
+  （low 档豁免；参数 `unq_space_gate_enabled/unq_space_min`）。
 
 ## 设计依据
 - buysell_core —— Ptrade 托管「高可靠买卖子集」迁移骨架（v0.4）

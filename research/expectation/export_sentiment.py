@@ -10,18 +10,24 @@
   - T+1 恢复（红盘比恢复）判「情绪回暖」由云端 `_sentiment_warm` 消费，冰点越久恢复阈值越低；
   - 闭环（v0.30）：非冰点日为回暖/延续日，连续天数 warm_days 累计；warm_days >= 分歧阈值(默认3) -> divergence=1（分歧概率上升）；
     phase: ice=冰点 / warm=回暖首日 / cont=回暖延续。
-列：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis
+列：date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis,
+    max_board_10d,max_board_10d_path,height_suppress
   seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1；
   emotion 为复盘 marker 机器判定的情绪温度档位（冰点/偏冷/回暖/发酵/高潮/过热），emotion_basis 为档位依据，
   均来自 position_review marker extra.emotion_temperature；缺失写空串（区别于真实值）。
+  max_board_10d 近 10 日最高板（含复牌异常点）；max_board_10d_path 近 10 日最高板路径文本（MM-DD:板数,..）；
+  height_suppress 连板高度压制位（复盘结论「连板高度压制」结构化，云端唯一连板空间闸门消费，见 docs/40）。
 
 输出（待上传文件夹，客户端定时上传=按文件夹）：
   sentiment_<date>.csv    当日情绪基线
   sentiment_latest.csv    稳定指针（云端盘前首选读）
 列（与 SENTIMENT_HEADER 一致，两文件同构）：
-  date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis
+  date,limit_up,break_count,seal_rate,advance_rate,max_board,lianban_count,ice,ice_streak,warm_days,phase,divergence,emotion,emotion_basis,
+  max_board_10d,max_board_10d_path,height_suppress
   seal_rate 存小数(0-1)；advance_rate 存百分比数值(如 37.46)；ice/divergence 0/1；
   emotion/emotion_basis 来自复盘 marker 情绪温度（见上），缺失为空串。
+  max_board_10d/max_board_10d_path/height_suppress 来自近 10 个交易日 limit_up_boards json 的 summary.max_board 自算
+  （与复盘结论「连板高度压制」同源；压制位规则见 _height_path，默认 7 板异动压制）。
 
 用法（本机 Python3.10，无需登录）：
   python export_sentiment.py [--date 2026-10-19] [--lub <axquant json 目录>] [--out-dir <上传文件夹>]
@@ -33,6 +39,7 @@ import csv
 import datetime
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,11 +53,14 @@ DEFAULT_ICE_ADVANCE = 40.0   # 红盘率%(advance_rate) < 此值 = 冰点
 DEFAULT_ICE_SEAL = 45.0      # 封板率%(seal_rate) < 此值 = 冰点
 DEFAULT_ICE_LIMIT_UP = 30    # 涨停家数 < 此值 = 冰点
 DEFAULT_DIVERGENCE_START = 3  # 连续回暖/延续 >= 此天数 -> divergence=1（分歧概率上升）
+HEIGHT_SUPPRESS_ANOMALY_MIN = 7   # 压制位规则：max_board>=7 且 次日回落>=3 -> 复牌/异动异常单点（用户确认默认）
+HEIGHT_SUPPRESS_MIN_DAYS = 5      # 近 10 日路径不足此交易日数 -> height_suppress=0（云端放行）
 
 SENTIMENT_HEADER = [
     "date", "limit_up", "break_count", "seal_rate", "advance_rate",
     "max_board", "lianban_count", "ice", "ice_streak", "warm_days", "phase", "divergence",
     "emotion", "emotion_basis",
+    "max_board_10d", "max_board_10d_path", "height_suppress",
 ]
 
 
@@ -97,6 +107,78 @@ def _prune_old(out_dir: str, keep_days: int = 3) -> int:
     if moved:
         print("[sentiment] 历史日期文件移入 archive/ %d 个（根目录仅留最近 %d 个）" % (moved, keep_days))
     return moved
+
+
+def _height_path(date: str, lub_dir: str | None = None):
+    """近 10 日最高板路径与连板高度压制位（docs/40，与 AXquant 复盘结论同源）。
+
+    数据：AXquant docs/review/limit_up_boards_<date>.json 的 summary.max_board（<=date，近 10 个交易日）。
+    压制位规则（用户确认，默认 7 板异动压制）：
+      1) 异常尖峰剔除：max_board>=7 且 次日回落>=3（复牌/异动单点，如 10-16 的 11）-> 剔除；
+      2) 新周期 = 最后一个异常尖峰之后（老周期自动隔离）；
+      3) 压制位 = 新周期内从 T-1 往左第一个「严格高于其后所有值」的值；无 -> 周期最高（当前高度即压制位）。
+    返回 (max_board_10d, path_text, height_suppress)；交易日文件 <HEIGHT_SUPPRESS_MIN_DAYS 时压制位写 0。
+    """
+    lub = export_lianban.default_lub_path(date, lub_dir)
+    base = os.path.dirname(lub)
+    cands = []
+    try:
+        names = os.listdir(base)
+    except OSError:
+        names = []
+    for name in names:
+        m = re.match(r"^limit_up_boards_(\d{4}-\d{2}-\d{2})\.json$", name)
+        if not m or m.group(1) > date:
+            continue
+        fp = os.path.join(base, name)
+        if not os.path.isfile(fp):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                j = json.load(f)
+            v = int(_fnum((j.get("summary") or {}).get("max_board"), 0))
+        except Exception:
+            v = 0
+        cands.append((m.group(1), v))
+    cands.sort()
+    q = cands[-10:]
+    if not q:
+        return 0, "", 0
+    path_text = ",".join("%s:%d" % (d[5:], v) for d, v in q)
+    max10 = max(v for _, v in q)
+    if len(q) < HEIGHT_SUPPRESS_MIN_DAYS:
+        print("[sentiment] WARN: 近 10 日路径仅 %d 个交易日(<%d) —— height_suppress=0（云端唯一连板空间闸门放行）"
+              % (len(q), HEIGHT_SUPPRESS_MIN_DAYS))
+        return max10, path_text, 0
+    vals = [v for _, v in q]
+    # 1) 异常尖峰剔除（占位 None 保留位置，用于新周期定位）
+    r = []
+    for i, v in enumerate(vals):
+        nxt = vals[i + 1] if i + 1 < len(vals) else 0
+        if v >= HEIGHT_SUPPRESS_ANOMALY_MIN and (v - nxt) >= 3:
+            r.append(None)
+        else:
+            r.append(v)
+    # 2) 新周期 = 最后一个异常尖峰之后
+    last_anomaly = -1
+    for i, v in enumerate(r):
+        if v is None:
+            last_anomaly = i
+    cyc = [v for v in r[last_anomaly + 1:] if v is not None]
+    # 3) 压制位：周期内从 T-1 往左第一个「严格高于其后所有值」；无 -> 周期最高（当前高度即压制位）
+    suppress = 0
+    if cyc:
+        if len(cyc) >= 2:
+            for i in range(len(cyc) - 2, -1, -1):
+                if cyc[i] > max(cyc[i + 1:]):
+                    suppress = cyc[i]
+                    break
+        if suppress == 0:
+            suppress = max(cyc)
+    else:
+        # 异常点在今日（新周期未开启）：当前高度即压制位
+        suppress = vals[-1] if vals else 0
+    return max10, path_text, suppress
 
 
 def _read_red_ratio(date: str, pr_dir: str | None = None) -> float | None:
@@ -195,6 +277,7 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
         print("[sentiment] WARN: 无 %s 的 position_review red_ratio —— 回退 summary.advance_rate_pct=%.2f%%（天梯有限样本，非全市场红盘比）" % (date, advance_rate))
     lianban_count = int(_fnum(summary.get("lianban_count")))
     max_board = int(_fnum(summary.get("max_board")))
+    max_board_10d, max_board_10d_path, height_suppress = _height_path(date, lub_dir)
     ice = bool((advance_rate < ice_advance) or (seal_rate * 100.0 < ice_seal) or (pool_total < ice_limit_up))
     prev_ice, prev_streak, prev_warm_days, prev_date = _read_prev_latest(out_dir)
     if prev_date and prev_date > date:
@@ -225,7 +308,8 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
     os.makedirs(out_dir, exist_ok=True)
     row = [date, pool_total, break_total, "%.4f" % seal_rate, "%.2f" % advance_rate,
            max_board, lianban_count, int(ice), ice_streak, warm_days, phase, divergence,
-           emotion.get("conclusion", ""), emotion.get("basis", "")]
+           emotion.get("conclusion", ""), emotion.get("basis", ""),
+           max_board_10d, max_board_10d_path, height_suppress]
     csv_path = os.path.join(out_dir, "sentiment_%s.csv" % date)
     latest = os.path.join(out_dir, "sentiment_latest.csv")
     for fp in (csv_path, latest):
@@ -238,6 +322,8 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
     print("[sentiment] %s -> ice=%d streak=%d warm_days=%d phase=%s divergence=%d adv=%.1f%% seal=%.0f%% limup=%d brk=%d emotion=%s -> %s"
           % (date, int(ice), ice_streak, warm_days, phase, divergence, advance_rate, seal_rate * 100.0,
              pool_total, break_total, emotion.get("conclusion") or "-", csv_path))
+    print("[sentiment] 连板高度压制: max_board_10d=%d path10=%s height_suppress=%d（云端唯一连板空间闸门消费）"
+          % (max_board_10d, max_board_10d_path or "-", height_suppress))
     print("[sentiment] 规则: T日冰点(ice=1) -> T+1 红盘比恢复=回暖(云端 _sentiment_warm 消费)；"
           "T+1 继续冰点 -> streak+1，下交易日再验证回暖且恢复阈值降低；回暖/延续 warm_days>=%d -> 分歧概率上升" % divergence_start)
     _prune_old(out_dir, keep_days)
