@@ -195,6 +195,7 @@
 ### 16.1 账户资金确认（第 1 步完成）
 - **账户性质：实盘（无模拟账户）**，真实资金，规模小 —— 所有门控默认关，只有用户显式确认才开。
 - Web 平台「交易-资金」：**可用资金 = 17,106.78 元**（用户提供，2026-10-20）。
+- 2026-10-28 开盘前更新：**可用资金 = 16,000 元**（用户提供，2026-10-27）。
 - 与云端日志交叉验证：10-20 09:33 `core_buy 600178 qty=100 limit=12.41`（ordinary 10%）→
   budget=1710.7 → 1 手（1241 元）→ qty=100 ✓。推算与实报一致，账户规模 ≈ 1.71 万（非 10 万基准）。
 - 探针脚本 `research/precheck/query_account.py`（客户端 API get_portfolio/get_positions 全字段，
@@ -202,7 +203,11 @@
 
 ### 16.2 账户规模对参数的影响（关键）
 - 单笔预算 = cash × 比例，且受「1 手 = 100 股」门槛约束：qty = floor(budget/(价×100))×100。
-- 可用 17,106.78 元：
+- 可用 16,000 元（2026-10-28 开盘前）：
+  - `exp_order_pct=0.10`/低吸/普通买入 → 预算 1600 元 → 1 手价位 ≤ ~16 元；更高 qty=0 跳过。
+  - 打板 `board_buy_budget_ratio=0.20` → 预算 3200 元 → 1 手价位 ≤ ~32 元。
+  - 单票市值上限 single_stock_cap=0.30 → 4800 元；情绪仓位上限（回暖 0.8）→ 总持仓市值 ≤12800 元。
+- 可用 17,106.78 元（旧基准）：
   - `exp_order_pct=0.10` → 预算 1711 元 → 可下 1 手的价位 ≤ ~17.1 元；价位更高则 qty=0 跳过下单。
   - `exp_order_pct=0.01`（原建议小额）→ 预算 171 元 → **不足 1 手，无法下单**，勿用。
   - 目标价 20 元需 pct≥0.117、25 元需 pct≥0.146。EXPECT_ORDER 阶段按预期文件标的价位设 pct（建议 0.10~0.15）。
@@ -358,8 +363,8 @@
 - [ ] **P0-a 最快拉升判快改逐笔毫秒归一**（`_first_zt_ms`）：逐笔 `business_time`/快照 `hsTimeStamp`（YYYYMMDDHHMMSSmmm 17 位）优先，帧 `ts`（epoch 秒）归一到同格式；`_board_first_zt`（板块内首个触板）/ `_pool_exp_priority`（涨停池观察排序）同步——同帧并列精确到那一笔，消除 3s 帧 ts 并列误判。
 - [ ] **P0-b 首板闸门比较宇宙切概念文件口径**（`_board_member_codes`）：文件 `g.boards` 已加载时用 `_concept_boards_of` + `_board_members_file`（THS 概念，与弹性套利一致），未加载回退 API 首板块前 N；「板块内涨幅最高/最主动」不再与行业口径/前20 之外的成员错配。
 - [ ] **P0-c 板块内涨幅最高批量回填**（`_board_top_gainer`）：缺失/无效快照一次 `_get_snapshot_many` 批量回填 `g.spot`，消除逐只串行 `get_snapshot` 拖慢 3s 首板路径。
-- [ ] **P1-d zt_lianban 权威唯一列**：`export_lianban.py` 复用 `derive_closing_board_status`（AXquant 同源：THS 概念映射+主题桶归并，`publish._load_board_mapping` 补 AXquant 路径+只消费概念）预计算 `unique_high/follower_count` 写入 CSV（新列 `date,..,reason,unique_high,follower_count`）；云端 `_load_zt_lianban` 读列优先（`[zt-lianban] loaded -> N unique_high=M`），`_annotate_zt_uniqueness` 仅缺列时首 token 兜底——消除首 token 拆组漂移（10-20 实盘：大业股份(人形机器人3板)/京城股份(机器人集成3板) 云兜底误授唯一穿透中位规避，权威口径并列 3 板均按中位规避，与 AXquant 复盘 role_detail=mid 一致）。
-- [ ] 盘前核对：`zt_lianban_latest.csv` 表头含 `unique_high,follower_count`；日志 `[zt-lianban] loaded .. -> 54 unique_high=2`（10-20 样本吉大正元4板/海正药业2板授唯一）。
+- [ ] **P1-d zt_lianban 权威唯一列**：`export_lianban.py` 复用 `derive_closing_board_status`（AXquant 同源：题材桶 themes 全量归并，docs/45 R1）预计算 `unique_high` 写入 CSV（`date,..,reason,unique_high`；`follower_count` 列停产）；云端 `_load_zt_lianban` 读列优先（`[zt-lianban] loaded -> N unique_high=M`），`_annotate_zt_uniqueness` 仅缺列时兜底——消除主因/首 token 拆组漂移（10-26 实盘：600094 大名城 2 板被误标 unique_high=1 穿透中位规避，修正后按中位规避）。
+- [ ] 盘前核对：`zt_lianban_latest.csv` 表头含 `unique_high`（无 `follower_count`）；日志 `[zt-lianban] loaded .. -> N unique_high=M`。
 - [ ] 回归：selftest T92 系列（毫秒归一/最快拉升/概念成员/批量回填/权威列加载与中位规避/export_lianban 列）+ T37/T45 同步批量语义；全量 **452 PASS / 0 FAIL**；双编译（本机 py + PT `Libs/Python/python3`）通过；部署核对日志首行 `buysell_core init version=v0.37`。
 
 ## 30. v0.38 盘中动态唯一+跟风确认+竞价唯一扫板（P2，2026-10-21，docs/33）：连板唯一性/主动进攻性/扫板灵敏度
