@@ -76,11 +76,12 @@ def _default_axquant_review_dir() -> str:
     return os.path.abspath(os.path.join(_HERE, "..", "..", "..", "AXquant", "data", "review"))
 
 
-def _prune_old(out_dir: str, keep_days: int = 3) -> int:
-    """待上传根只保留最近 keep_days 个 sentiment_<date>.csv；更早移入 archive/（保留审计，不上传）。
+def _prune_old(out_dir: str, keep_days: int = 0) -> int:
+    """待上传根只保留 sentiment_latest.csv；sentiment_<date>.csv 移入 archive/（保留审计，不上传）。
 
-    与 zt_lianban 的 keep_days=3 对齐：定时上传=按文件夹，根目录瘦身防历史被带上云；
-    archive/ 为审计目录（本意不上传），移入而非删除，历史序列可回溯。
+    v1.2b 对齐 v0.36h 口径（根目录只留 *_latest，dated 全移 archive）；keep_days<=0 时全部移入，
+    keep_days>0 时保留最近 keep_days 个（CLI 可调，默认不保留）。archive/ 为审计目录（本意不上传），
+    移入而非删除，历史序列可回溯。
     只匹配 sentiment_YYYY-MM-DD.csv 命名且路径在 out_dir 内，杜绝误删/误移。
     """
     import re as _re
@@ -97,7 +98,9 @@ def _prune_old(out_dir: str, keep_days: int = 3) -> int:
     dated.sort()
     moved = 0
     arc = os.path.join(out_dir, "archive")
-    for _, full in dated[:-max(1, int(keep_days))]:
+    n_keep = max(0, int(keep_days))
+    move = dated[:-n_keep] if n_keep else list(dated)
+    for _, full in move:
         try:
             os.makedirs(arc, exist_ok=True)
             os.replace(full, os.path.join(arc, os.path.basename(full)))
@@ -105,7 +108,8 @@ def _prune_old(out_dir: str, keep_days: int = 3) -> int:
         except OSError:
             pass
     if moved:
-        print("[sentiment] 历史日期文件移入 archive/ %d 个（根目录仅留最近 %d 个）" % (moved, keep_days))
+        print("[sentiment] 日期文件移入 archive/ %d 个（根目录仅留 sentiment_latest.csv%s）"
+              % (moved, (" + 最近 %d 个" % n_keep) if n_keep else ""))
     return moved
 
 
@@ -251,7 +255,7 @@ def run(date: str | None = None, out_dir: str | None = None, lub_dir: str | None
         pr_dir: str | None = None,
         ice_advance: float = DEFAULT_ICE_ADVANCE, ice_seal: float = DEFAULT_ICE_SEAL,
         ice_limit_up: int = DEFAULT_ICE_LIMIT_UP, divergence_start: int = DEFAULT_DIVERGENCE_START,
-        keep_days: int = 3) -> str:
+        keep_days: int = 0) -> str:
     """导出情绪基线 CSV；未找到涨停池 json 返回空串。"""
     date = date or datetime.date.today().isoformat()
     out_dir = out_dir or bridge.PTRADE_BRIDGE_DIR
@@ -340,7 +344,7 @@ def main(argv=None) -> int:
     p.add_argument("--ice-seal", type=float, default=DEFAULT_ICE_SEAL)
     p.add_argument("--ice-limit-up", type=int, default=DEFAULT_ICE_LIMIT_UP)
     p.add_argument("--divergence-start", type=int, default=DEFAULT_DIVERGENCE_START)
-    p.add_argument("--keep-days", type=int, default=3, help="根目录保留 sentiment_<date>.csv 天数（更早移入 archive/）")
+    p.add_argument("--keep-days", type=int, default=0, help="根目录保留 sentiment_<date>.csv 天数（默认0=只留 sentiment_latest.csv，dated 全移 archive/）")
     a = p.parse_args(argv)
     run(a.date, a.out_dir, a.lub, a.pr_dir, a.ice_advance, a.ice_seal, a.ice_limit_up, a.divergence_start, a.keep_days)
     return 0

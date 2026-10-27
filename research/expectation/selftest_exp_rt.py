@@ -4837,6 +4837,19 @@ if _ES_OK:
     _d = _mk_lub([("2026-10-23",6),("2026-10-26",4),("2026-10-27",5)], "g")
     _m, _p, _s = _es._height_path("2026-10-27", _d)
     ok('T134g 文件不足5日 压制0(放行)', _s == 0 and _m == 6)
+    import shutil as _shutil
+    _tmp_po = tempfile.mkdtemp(prefix="pt_po_")
+    with open(os.path.join(_tmp_po, "sentiment_latest.csv"), "w", encoding="utf-8") as f:
+        f.write("date\nlatest\n")
+    for _d_ in ("2026-10-20", "2026-10-21", "2026-10-22"):
+        with open(os.path.join(_tmp_po, "sentiment_%s.csv" % _d_), "w", encoding="utf-8") as f:
+            f.write("date\n%s\n" % _d_)
+    _moved = _es._prune_old(_tmp_po, 0)
+    ok('T134h keep_days=0 全移 archive 只留 latest',
+       _moved == 3 and os.path.isfile(os.path.join(_tmp_po, "sentiment_latest.csv"))
+       and not os.path.isfile(os.path.join(_tmp_po, "sentiment_2026-10-22.csv"))
+       and os.path.isfile(os.path.join(_tmp_po, "archive", "sentiment_2026-10-22.csv")))
+    _shutil.rmtree(_tmp_po, ignore_errors=True)
 
 # --- T135 v1.2 唯一连板空间闸门（_lb_senti_buy_gate）+ _load_sentiment 解析 ---
 def _gate_ns(suppress, bc, unq, lv):
