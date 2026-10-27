@@ -3,7 +3,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.81"                                                        
+STRATEGY_VERSION = "v1.0"                                                        
 
 def _warn(msg):
                                                                  
@@ -37,7 +37,7 @@ def _skip_log(tag, sec, reason, msg, throttle_sec=None):
     return True
 
 BLS = {
-    'DO_ORDER': False,
+    'DO_ORDER': True,                                                                
     'universe': ['600570.XSHG', '603528.XSHG', '601188.XSHG'],                  
     'buy_score_min': 55.0,
     'ma5_pullback': True, 'ma5_loose_high': 1.00, 'ma5_core_only': True,                       
@@ -48,8 +48,8 @@ BLS = {
     'ma5_buy_score_min': 50.0,                                            
     'ma5_buy_ratio': 0.10,                              
     'cold_secs': 60, 'daily_max_buy': 1,
-                                                 
-    'EXPECT_ORDER': False,                                           
+                                                                   
+    'EXPECT_ORDER': True,                                    
     'tick_exp_enabled': True,                                    
     'exp_order_pct': 0.10,                                                        
     'buy_chase_pct': 0.008,                                    
@@ -71,7 +71,7 @@ BLS = {
     'first_zt_rebuild_heartbeat_sec': 60.0,                                           
     'first_zt_rebuild_timeout_min': 30.0,                                                 
     'restart_rebuild_1m_enabled': True,                                                 
-    'sim_cash_base': 200000.0,                                                                     
+    'sim_cash_base': 0.0,                                                               
     'sim_min_lot': 100,                                                                   
     'skip_log_throttle_sec': 30.0,                                                
                                                        

@@ -9,6 +9,7 @@ def make_mod(**overrides):
         code = compile(f.read(), SRC, "exec")
     exec(code, ns)
     ns['BLS']['sim_cash_base'] = 0.0   # v0.80 默认关闭 SIM 虚拟资金基准（既有用例为真实资金语义）；SIM 用例单独开启
+    ns['BLS']['DO_ORDER'] = False; ns['BLS']['EXPECT_ORDER'] = False   # v1.0 生产默认实盘开；测试默认保持模拟语义（实单用例显式开启）
     TMP = tempfile.mkdtemp(prefix="pt_sf_")
     class Log:
         def info(self, *a): pass
@@ -4759,6 +4760,31 @@ ok('T132f heartbeat=0 事件仍打', len(ns['log'].msgs) == 1 and 'over:' in ns[
 _src_txt = io.open(SRC, 'r', encoding='utf-8').read()
 _hd_txt = _src_txt[_src_txt.find('def handle_data'):]
 ok('T132g 帧末调用 _budget_log', '_budget_log()' in _hd_txt)
+
+# --- T133 v1.0 实盘下单：生产默认 DO_ORDER/EXPECT_ORDER=True + 真实委托路径 ---
+_raw10 = {}
+_code10 = compile(io.open(SRC, 'r', encoding='utf-8').read(), SRC, 'exec')
+exec(_code10, _raw10)
+ok('T133 生产默认 DO_ORDER=True', _raw10['BLS']['DO_ORDER'] is True)
+ok('T133 生产默认 EXPECT_ORDER=True', _raw10['BLS']['EXPECT_ORDER'] is True)
+ok('T133 生产默认 sim_cash_base=0（实盘真实资金）', _raw10['BLS'].get('sim_cash_base') == 0.0)
+ok('T133 实盘非 SIM 模式', _raw10['_sim_mode']() is False)
+
+# T133b place_order 真实委托：DO_ORDER=True -> order() 记录 + pending 登记（非 SIM 信号）
+ns = fresh(); g = ns['g']
+ns['BLS']['DO_ORDER'] = True; ns['BLS']['EXPECT_ORDER'] = True; ns['BLS']['sim_cash_base'] = 0.0
+ns['_CTX'].portfolio.cash = 100000.0
+g.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+r133 = ns['place_order'](ns['_ctx'], '600001.XSHG', 'buy', note='t133', mode='chase')
+ok('T133b place_order 实单发单+记 pending',
+   r133 is True and len(ns['_RECC']['calls']) == 1
+   and '600001.XSHG' in (g.pending or {}) and (g.pending or {}).get('600001.XSHG', {}).get('side') == 'buy')
+
+# T133c place_expected_order 真实委托：EXPECT_ORDER=True -> order() 记录（第二笔）
+r133c = ns['place_expected_order'](ns['_ctx'], '600001.XSHG', note='t133')
+ok('T133c 预期买入实单发单',
+   r133c is True and len(ns['_RECC']['calls']) == 2
+   and '600001.XSHG' in (g.pending or {}) and (g.pending or {}).get('600001.XSHG', {}).get('status') == 'SENT')
 
 print('ALL DONE')
 

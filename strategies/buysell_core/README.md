@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v0.81（2026-10-27）
+- 当前版本：v1.0（2026-10-27）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v0.81 ...`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.0 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,20 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v1.0（2026-10-27）实盘下单开启（DO_ORDER=True + EXPECT_ORDER=True）+ 版本号里程碑
+- 变更（strategy.py）：
+  - `DO_ORDER=True`：买卖闭环真实委托（首板/回封/弹性/低吸/预期买入 发真实 order()；卖出通道 P1/P2E/P4/P5/P6/炸板/封单 真实卖单）。
+  - `EXPECT_ORDER=True`：预期买入路径发真实 order()（此前独立门控默认关）。
+  - `sim_cash_base=0.0`：关闭 SIM 虚拟资金，下单资金基准切换为真实账户现金（回切模拟时改回 200000.0）。
+- 资金约束提醒（docs/24 §16 实盘就绪度）：账户真实资金规模小（今日日志现金 ~2106 元），
+  `exp_order_pct=0.10` 单笔预算约 210 元，仅 ≤~2.1 元价位可下 1 手，更高价位 qty=0 自动跳过；
+  实盘初期信号稀少属正常，需加资金或调高单笔比例后再看放量。
+- 风险纪律（docs/24 §16.3）：连续 2-3 笔亏损、出现未成交/留滞/重复下单/成交回报异常 → 立即回
+  `DO_ORDER=False; EXPECT_ORDER=False` 复盘后再继续。
+- 验证：selftest_exp_rt 全量 PASS（新增 T133 共 6 例：生产默认 DO_ORDER/EXPECT_ORDER=True、sim_cash_base=0、
+  实盘非 SIM 模式、place_order 实单发单+记 pending、预期买入实单发单）；py3.10 编译通过；deploy 剔除注释编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v1.0 universe=.. DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`。
 
 ### v0.81（2026-10-27）[budget] 日志节流（常规 60s 心跳 + over/degraded 事件行）
 - 背景：`handle_data` 帧末无条件打 `[budget] <frame_report>`，3s 一条；今日窗口 1642 条占日志 36%，

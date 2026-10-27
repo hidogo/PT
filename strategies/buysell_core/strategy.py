@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v0.81（2026-10-27）
-# 部署核对：日志首行 `buysell_core init version=v0.81 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.0（2026-10-27）
+# 部署核对：日志首行 `buysell_core init version=v1.0 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v0.81"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
+STRATEGY_VERSION = "v1.0"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
 
 
 def _warn(msg):
@@ -46,7 +46,7 @@ def _skip_log(tag, sec, reason, msg, throttle_sec=None):
 
 # ---------- 参数 ----------
 BLS = {
-    'DO_ORDER': False,
+    'DO_ORDER': True,             # v1.0 实盘下单总开关：买卖闭环真实委托；False 仅 SIM 信号（回切模拟置 False）
     'universe': ['600570.XSHG', '603528.XSHG', '601188.XSHG'],   # 占位自选池，待接全市场扫描
     'buy_score_min': 55.0,
     'ma5_pullback': True, 'ma5_loose_high': 1.00, 'ma5_core_only': True,   # 5D线低吸仅对核心(CORE)标签股
@@ -57,8 +57,8 @@ BLS = {
     'ma5_buy_score_min': 50.0,         # 5D低吸独立评分门槛（L2 净大单加分已并入 score_now）
     'ma5_buy_ratio': 0.10,             # 5D低吸单笔仓位=总资产10%
     'cold_secs': 60, 'daily_max_buy': 1,
-    # 实盘单门控（v0.13）：仅放行「预期买入」路径；其余买入仍受 DO_ORDER 门控
-    'EXPECT_ORDER': False,          # True = 预期买入发真实 order()（模拟盘小额测试）
+    # 实盘单门控（v1.0）：DO_ORDER=True 放开全路径真实委托（买卖闭环）；EXPECT_ORDER 预期买入路径
+    'EXPECT_ORDER': True,           # v1.0 实盘：预期买入发真实 order()
     'tick_exp_enabled': True,       # 预期买入走 tick_data 3s 事件触发（敏捷）
     'exp_order_pct': 0.10,          # 预期买入单笔仓位比例（预算规则「打板20%、其它10%」；实盘测试可调小，如 0.01）
     'buy_chase_pct': 0.008,         # 追高分时确认买入：限价较现价上浮比例（防过度追高）
@@ -80,7 +80,7 @@ BLS = {
     'first_zt_rebuild_heartbeat_sec': 60.0,  # v0.76 [restart-rebuild] 进度 heartbeat 节流
     'first_zt_rebuild_timeout_min': 30.0,  # v0.80 重建超时(分钟)：超时/10:00 截止移出队列，防 pending 全天卡死
     'restart_rebuild_1m_enabled': True,      # v0.76 handle_data 1m 兜底消化重建队列（tick 禁用/丢帧）
-    'sim_cash_base': 200000.0,            # v0.80 SIM 虚拟资金基准（纯模拟 DO_ORDER=False 时买入量按此计算；0=关闭用真实现金）
+    'sim_cash_base': 0.0,                 # v1.0 实盘：关闭 SIM 虚拟资金（真实资金基准；回切模拟时改回 200000.0）
     'sim_min_lot': 100,                   # v0.80 SIM 最小一手兜底（qty<=0 时按 1 手发 SIM 信号，仅纯模拟模式）
     'skip_log_throttle_sec': 30.0,        # v0.80 同因日志节流（同一 标的+原因 30s 内只打一次，防每帧刷屏）
     # v0.74 近涨停快速通道（docs/30）：scan 命中后跨轮保留，tick 3s 帧优先跟踪
