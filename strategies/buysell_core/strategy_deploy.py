@@ -3,7 +3,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.0"                                                        
+STRATEGY_VERSION = "v1.1"                                                        
 
 def _warn(msg):
                                                                  
@@ -47,7 +47,7 @@ BLS = {
     'ma5_first_5d': False,                                                
     'ma5_buy_score_min': 50.0,                                            
     'ma5_buy_ratio': 0.10,                              
-    'cold_secs': 60, 'daily_max_buy': 1,
+    'cold_secs': 60, 'daily_max_buy': 2,                                       
                                                                    
     'EXPECT_ORDER': True,                                    
     'tick_exp_enabled': True,                                    

@@ -41,7 +41,7 @@
 ## 4. 买入管理（入池标的）
 - [ ] MA5 低吸：见 [may-order] ma_pullback px=.. ma5=.. score=..（score>=55）。
 - [ ] 同标的冷却：同一标的两次买入间隔>=cold_secs(60)。
-- [ ] 每日封顶：单日 [may-order] 买入数<=daily_max_buy(1)。
+- [ ] 每日封顶：单日 [may-order] 买入数<=daily_max_buy(2)（v1.1 用户确认）。
 
 ## 4b. 预期文件桥接（docs/25，v0.8）
 - [ ] before_trading_start 日志出现 expect file loaded <path> -> N（N=读取条目数；缺失属正常，扫描兜底）。
@@ -220,7 +220,7 @@
 2. ② 你确认信号质量后，EXPECT_ORDER=True + exp_order_pct=0.10（单笔 ≤1 手、约 1.7 千元、占总资产 ≤10%），DO_ORDER 保持 False（卖出仍只读）：
    - 核对 `[exp-order] ... (True)` + `on_trade_response` 成交、限价符合打板/追高定价（涨停价排队或现价×(1+0.8%) 封顶涨停价）；
    - `exp order skip(qty<=0)` → 目标股价位超单笔预算，上调 pct（≤0.15，且单笔市值仍 ≤ 总资产 30%）；
-   - 单日买上限 daily_max_buy=1 → 每天最多 1 笔真实买入。
+   - 单日买上限 daily_max_buy=2 → 每天最多 2 笔真实买入（v1.1 调整）。
 3. ③ 买入成交且隔日卖出决策日志正确（P1 绿开核卖/炸板/封单大减/评分止损）后再 DO_ORDER=True 放开卖出闭环；
    卖出限价现价在下跌/封死场景可能不成交留滞持仓（docs/24 §3/§5 留档），实盘需接受或先用核卖跌停地板价保成交。
 4. 实盘止损纪律：连续 2-3 笔亏损、出现未成交/留滞/重复下单/成交回报异常 → 立即回 EXPECT_ORDER=False，复盘后再继续。

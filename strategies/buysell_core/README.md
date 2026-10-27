@@ -3,10 +3,10 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.0（2026-10-27）
+- 当前版本：v1.1（2026-10-27）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.0 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.1 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
 
 ## 设计依据
@@ -29,6 +29,12 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v1.1（2026-10-27）daily_max_buy 1->2（每日最多 2 笔真实买入）
+- 变更（strategy.py）：`daily_max_buy=2`（用户确认 2026-10-27）；买入闸门（首板/回封/弹性/低吸/预期）
+  按 `g.daily['bought'] >= 2` 拦截，即每日最多 2 笔真实买入。
+- 验证：selftest_exp_rt 全量 PASS（daily_max_buy 用例均显式设置，默认值变更不影响）；py3.10 编译通过；deploy 剔除注释编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v1.1`；盘中核对第 2 笔买入放行。
 
 ### v1.0（2026-10-27）实盘下单开启（DO_ORDER=True + EXPECT_ORDER=True）+ 版本号里程碑
 - 变更（strategy.py）：
