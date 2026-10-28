@@ -4,7 +4,10 @@
 
 数据契约（列）：
   date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,
-  unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes
+  unique_high,theme,theme_count,theme_max_board,theme_rank,themes
+
+follower_count 列自 2026-10-26 起停产（docs/45 R2）：内部 derive_closing_board_status
+仍保留 follower 计算供复盘消费，CSV 不再输出；云端 has_flw 缺列兼容（默认 0）。
 
 题材/概念梯队列（2026-10-22 新增）：优先读 AXquant 分析 JSON
 data/tmp/review_analysis_<date>.json 的 theme.buckets（涨停原因归并后的题材，含家数/最高板）；
@@ -152,25 +155,24 @@ def _pool_missing(payload: dict, rows) -> int:
 
 def build_csv(date: str, rows: list[dict], unq: dict | None = None,
               themes: dict | None = None) -> str:
-    # v0.37 追加权威唯一身位列（AXquant 同源收盘地位重算 derive_closing_board_status）：
-    #   unique_high / follower_count，云端读列优先、缺列回退首 token 兜底。
+    # v0.37 追加权威唯一身位列（AXquant 同源收盘地位重算 derive_closing_board_status），
+    #   云端读列优先、缺列回退首 token 兜底；follower_count 自 docs/45 R2 起停产。
     # v0.38 追加题材/概念梯队列（theme/theme_count/theme_max_board/theme_rank/themes）。
     unq = unq or {}
     themes = themes or {}
     head = ("date,code,name,board_cnt,limit_up_time,seal_money,chg_pct,is_st,reason,"
-            "unique_high,follower_count,theme,theme_count,theme_max_board,theme_rank,themes")
+            "unique_high,theme,theme_count,theme_max_board,theme_rank,themes")
     lines = [head]
     for r in rows:
         reason = r["reason"].replace(",", " ").replace("\n", " ").strip()
         u = unq.get(r["code"]) or {}
         uh = 1 if u.get("unique_high_board") else 0
-        fc = int(u.get("follower_count") or 0)
         th = themes.get(r["code"]) or {}
         theme = str(th.get("theme") or "").replace(",", " ").replace("\n", " ").strip()
         themes_all = str(th.get("themes") or "").replace(",", " ").replace("\n", " ").strip()
-        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s,%d,%d,%s,%d,%d,%d,%s" % (
+        lines.append("%s,%s,%s,%d,%s,%.2f,%.4f,%d,%s,%d,%s,%d,%d,%d,%s" % (
             date, r["code"], r["name"].replace(",", " "), r["board_cnt"],
-            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason, uh, fc,
+            r["limit_up_time"], r["seal_money"], r["chg_pct"], r["is_st"], reason, uh,
             theme, int(th.get("theme_count") or 0), int(th.get("theme_max_board") or 0),
             int(th.get("theme_rank") or 0), themes_all))
     return "\n".join(lines) + "\n"

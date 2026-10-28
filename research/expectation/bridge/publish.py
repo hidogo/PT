@@ -521,6 +521,91 @@ def _board_sets_overlap(bs: set[str], ot: set[str]) -> bool:
     return bool(bs & ot)
 
 
+# 题材桶（与 AXquant 复盘 theme.buckets / docs/45 R1 同源）：
+# unique_high 分组 = 每股按 limit_up_reason 命中全部题材桶，共享任一题材即并组（连通分量）。
+THEME_BUCKETS = [
+    (
+        "AI/数据要素/算力",
+        (
+            "AI", "数据", "算力", "人工智能", "大模型", "网络安全", "数据中心",
+            "数据库", "智算", "端侧", "Token", "算网", "语料", "语义", "数字政府",
+            "数字财税", "数字出版", "数智", "裸眼3D",
+        ),
+    ),
+    (
+        "传媒出版/短剧/游戏",
+        ("传媒", "出版", "短剧", "影视", "广电", "漫剧", "视频", "游戏", "IP", "文化", "电视", "影院"),
+    ),
+    (
+        "机器人/自动化",
+        ("机器人", "人形", "伺服", "减速器", "自动化", "物理AI", "具身", "MEMS", "机械"),
+    ),
+    ("羊字辈/玄学", ("字辈",)),
+    (
+        "医药/医疗",
+        ("医药", "制药", "医疗", "创新药", "生物", "诊断", "中药", "化学制药", "抗生素", "CRO", "疫苗", "减肥"),
+    ),
+    (
+        "半导体/电子材料",
+        ("半导体", "芯片", "存储", "光刻", "封测", "晶圆", "MLCC", "电子", "覆铜板", "电容", "元件"),
+    ),
+    (
+        "汽车/汽配/飞行汽车",
+        ("汽车", "汽配", "整车", "智能驾驶", "特斯拉", "充电", "飞行汽车", "增程", "轮胎", "动力"),
+    ),
+    (
+        "消费/零售/食品",
+        ("零售", "百货", "超市", "食品", "乳业", "白酒", "电商", "家电", "服装", "消费", "餐饮", "旅游", "粮油", "调味", "菌株", "益生菌"),
+    ),
+    (
+        "农业/养殖",
+        ("养殖", "种业", "饲料", "粮食", "农业", "水产", "海参", "生猪", "鱼粉", "橡胶", "玉米", "米业"),
+    ),
+    (
+        "光伏/风电/电力/储能",
+        ("光伏", "风电", "电网", "绿电", "核电", "氢能", "电力", "储能", "电池", "锂电", "钠电", "电解液", "负极", "正极", "隔膜"),
+    ),
+    (
+        "地产/基建",
+        ("房地产", "地产", "物业", "基建", "建筑", "装修", "城投", "水泥", "设计"),
+    ),
+    (
+        "金融/证券",
+        ("券商", "证券", "金融", "银行", "保险", "信托", "创投", "互联网金融"),
+    ),
+    (
+        "黄金/有色/资源",
+        ("黄金", "有色", "铜", "铝", "矿产", "资源", "金属", "锆", "铬", "钛", "稀土"),
+    ),
+    (
+        "化工/新材料",
+        ("化工", "有机硅", "氟", "磷", "碳纤维", "尼龙", "化纤", "骨架材料", "热熔胶", "胶"),
+    ),
+]
+
+
+def _split_reason_tokens(reason):
+    text = (
+        str(reason or "")
+        .replace(u"\u201c", "")
+        .replace(u"\u201d", "")
+        .replace('"', "")
+        .replace("'", "")
+    )
+    return [t.strip() for t in re.split(r"[\s+、，,；;/&|·]+", text) if t.strip()]
+
+
+def _theme_tags_of(reason):
+    """涨停原因命中的全部题材桶（themes 全量，与云端 _zt_themes_of 同源）。"""
+    tags = set()
+    for label, keywords in THEME_BUCKETS:
+        for tok in _split_reason_tokens(reason):
+            if any(k in tok for k in keywords):
+                tags.add(label)
+                break
+    return tags
+
+
 def derive_closing_board_status(
     trade_date: str,
     boards_dir: Path | None = None,
@@ -537,11 +622,10 @@ def derive_closing_board_status(
     n = len(rows)
     if n == 0:
         return {}
-    # 板块归并：按“涨停原因关联的权威板块”做连通分组，避免首 token 把
-    # 同产业链（如锂电池/固态电池）拆散导致伪唯一身位。
-    boards_by_idx = [
-        _reason_related_boards(str(r.get("code") or ""), str(r.get("limit_up_reason") or ""))
-        for r in rows
+    # 题材归并（docs/45 R1）：每股按 themes 全量（全部命中题材桶）并组，
+    # 以题材为节点、共享成员即连通，避免主因分组造成伪唯一（如 600094 案例）。
+    themes_by_idx = [
+        _theme_tags_of(str(r.get("limit_up_reason") or "")) for r in rows
     ]
     parent = list(range(n))
 
@@ -558,7 +642,7 @@ def derive_closing_board_status(
 
     for i in range(n):
         for j in range(i + 1, n):
-            if _board_sets_overlap(boards_by_idx[i], boards_by_idx[j]):
+            if themes_by_idx[i] & themes_by_idx[j]:
                 _union(i, j)
     groups: dict[int, list[int]] = {}
     for i in range(n):

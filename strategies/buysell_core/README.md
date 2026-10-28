@@ -3,11 +3,36 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.2（2026-10-27）
+- 当前版本：v1.4（2026-10-28）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.2 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.4 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.4
+- v1.4 预期买入纵深加固 + 竞价情绪全池就绪（2026-10-28 实盘数据链路复盘修复）：
+  - `place_expected_order()` 在 px/cash 检查后、发单前增加 `_intraday_ready` 兜底，
+    未就绪打印 `[exp-order] intraday_data_not_ready(兜底)` 并返回 False，防状态机间隙
+    spot 失效仍误发单；`[exp-order]` 日志增加 `ready=spot/1m` 状态字段。
+  - `_exp_one_word()` 封单就绪门：`seal_base<=0` 且当前 `seal<=0` 返回
+    `AW(seal_data_not_ready)`，等 L2 明确后再判，不再把数据真空留给后续误弃。
+  - `_eval_auction()` 就绪门：`_auction_change==0` 且 `_auction_ready=False` 返回
+    `AW(auction_data_not_ready)`，`_eval_intraday()` 对 AW 保持 PM 等待，
+    防负基昨日开盘把未就绪误判 PX（2026-10-28 榕基软件类根因）。
+  - 竞价情绪全池就绪：新增 `_fill_zt_spot()`，`auction_pre_confirm()` 与
+    `_lb_senti_auction()` 对 `zt_lianban` 全池缺 spot 批量补快照；就绪率仍不足
+    再补一次重算，输出 `ready_detail(mid/low)`，防 09:25 `ready=26/41` 假未就绪。
+
+### v1.3
+- v1.3 同日重启守卫 + 开盘分时就绪门（2026-10-28 实盘复盘修复）：
+  - `first_zt` 记录统一带交易日戳 `day`（tick tx/snap、首板 1m 兜底、重启重建四条创建路径）；
+  - `load_state()` 恢复 `first_zt/auction_c` 增加 `first_zt_day/ac_day` 双重守卫，并按记录 `day` 过滤，
+    跨日/异常分支强制清空内存旧值（防 2026-10-28 09:30 旧池票 BREAK held≈86k s、文投 det=tx:20261027094528520
+    这类跨日首触污染当日灵敏度与买入）；
+  - `before_trading_start()` 增加 `[restart-guard]` 防御兜底，发现跨日残留即清空并走重建队列；
+  - `_eval_intraday()` 对 `pending_meet/pending_exceed` 新增 `_intraday_ready` 就绪门：spot 现价/开盘/VWAP
+    齐备或 1m>=2 根才允许判 CM/CX，否则返回 `PM(intraday_data_not_ready)`，防开盘首帧数据真空误发
+    `confirmed_meet` 买单（2026-10-28 09:30:04/06 海洋王、文投两笔根因）。
 
 ### v1.2
 - v1.2 连板高度压制 → 唯一连板空间闸门（docs/40 §7）：sentiment CSV 新增近 10 日最高板路径与压制位
@@ -35,6 +60,49 @@
 - tick_data 3s 事件触发 + 一次触发持久化去重(exp_fired) + 独立 EXPECT_ORDER 实盘门控。
 
 ## 版本记录（新→旧）
+
+### v1.4（2026-10-28）预期买入纵深加固 + 竞价情绪全池就绪
+- 变更（strategy.py）：
+  - `place_expected_order()` 发单前新增 `_intraday_ready` 兜底：未就绪返回 False 并打印
+    `[exp-order] intraday_data_not_ready(兜底)`；`[exp-order]` 成功/模拟日志带
+    `ready=spot/1m`，供现场核对 spot VWAP/开盘/现价 或 1m>=2 根的就绪链路。
+  - `_exp_one_word()` 新增封单就绪门：`seal_base<=0` 且当前 `seal<=0` 返回
+    `AW(seal_data_not_ready)`，L2 明确前不写 base、不判 CS；`g.seal_base/seal_bid_base`
+    改为防御式读取（未初始化不崩）。
+  - `_eval_auction()` 新增竞价就绪门：`_auction_change==0` 且 `_auction_ready=False`
+    返回 `AW(auction_data_not_ready)`；`_eval_intraday()` 对 AW 返回
+    `PM(auction_data_not_ready)`，避免负基昨日开盘把未就绪误判 PX/CM。
+  - `auction_pre_confirm()` 与 `_lb_senti_auction()` 新增 `_fill_zt_spot()`：
+    对 `zt_lianban` 全池缺 spot 批量补快照（复用 `_elastic_yizi_scan` 范式），
+    就绪率仍不足再补一次重算；`[lb-senti] auction` 输出
+    `ready_detail=mid:n/N low:n/N`，修 09:25 `ready=26/41` 假未就绪。
+- 测试：selftest_exp_rt.py 新增 T138（发单兜底不买）、T139（一字封单未就绪 AW 等待）、
+  T140（未就绪+负基不误判 PX）、T141（竞价情绪补快照落档）、T142（缺失矩阵不误买不误弃）；
+  既有用例补齐 `open_px` 模拟真实 spot 口径。全量 PASS、pytest 50 passed、双编译通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v1.4`；盘中核对
+  `[lb-senti] auction ... ready_detail=mid:n/N low:n/N`、`[exp-order] ... ready=spot/1m`
+  以及数据真空时的 `[exp-order] intraday_data_not_ready(兜底)`。
+
+### v1.3（2026-10-28）同日重启守卫 + 开盘分时就绪门
+- 变更（strategy.py）：
+  - `first_zt` 记录新增 `day` 交易日戳（`_try_first_board_buy_1m` 兜底、tick `src=tx/snap`、
+    `_rebuild_first_zt_tick` 四条创建路径统一）。
+  - `load_state()` 恢复 `first_zt` 的条件从「state.day==今日」收紧为「state.day==今日 且
+    first_zt_day==今日 且 记录 day==今日」，`auction_c` 同步用 `ac_day` 守卫；跨日/异常分支强制
+    `g.first_zt={}; g.auction_c={}`，不再沿用内存旧值；新增 `[restart-guard]` 日志。
+  - `before_trading_start()` 对 `first_zt` 做防御兜底：存在非当日记录即清空，随后由
+    `_rebuild_first_zt_queue()` 从 L2 回看重建。
+  - `_eval_intraday()` 新增 `_intraday_ready` 就绪门：`PM/PX` 且 spot 现价/开盘/VWAP 未齐备且
+    1m<2 根时返回 `PM(intraday_data_not_ready)`，不再无条件 `CM(held_vwap)`；`PS/CS` 与 `CX` 不受影响。
+  - 顺手加固：`_hhmm()` 改 `getattr(g,'now_dt',None)` 防御读取；`_parse_tx_zt_ms` 的 day_open
+    优先用 `get_trading_day()` 归一化（缺省才回退 `time.localtime()`），并修正日期依赖回归用例。
+- 背景：2026-10-28 09:10 服务器拉起后旧池票在 09:30:00 集体 `BREAK held≈86k s`，文投 09:30:06 买入
+  `det=tx:20261027094528520`（10-27 首触）；同时 09:30:01 `data_na(board)` 后 09:30:04/06 仍发
+  `exp_rt confirmed_meet intraday` 两笔买单（海洋王、文投）。
+- 验证：selftest_exp_rt 全量 PASS（新增 T136 同日守卫/记录日期戳/重建队列、T137 分时就绪门）；
+  selftest_ops_oneclick 28 PASS；pytest 50 passed；strategy.py 与 deploy 剔除注释 py_compile 通过。
+- 待重传：strategy.py 云端，核对日志首行 `buysell_core init version=v1.3`；盘中核对
+  `[restart-guard]` 日志与 `[firstzt] ... day=今日`、meet 候选未就绪时 `intraday_data_not_ready`。
 
 ### v1.1（2026-10-27）daily_max_buy 1->2（每日最多 2 笔真实买入）
 - 变更（strategy.py）：`daily_max_buy=2`（用户确认 2026-10-27）；买入闸门（首板/回封/弹性/低吸/预期）

@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -244,7 +245,8 @@ def test_cx_order_note_logs_direction_but_keeps_position_ratio(mod):
 
 def test_place_expected_order_ratio_is_independent_of_direction(mod):
     captured = {}
-    mod.g = SimpleNamespace(spot={"A": {"up_px": 11.0}}, pending={})
+    mod.g = SimpleNamespace(spot={"A": {"up_px": 11.0, "last_px": 10.5,
+                                        "open_px": 10.5, "wavg_px": 10.5}}, pending={})
     mod._mid_board_avoid = lambda sec: False
     mod._rt_lag_info = lambda sec: (0.0, "ok")
     mod.last_px = lambda sec: 10.5
@@ -568,11 +570,14 @@ def test_tx_frame_zt_ms_takes_earliest_row(mod):
 def test_tx_zt_batch_raw_backfills_earlier_firstzt_ms(mod):
     dh = mod.DataHub()
     fields = ["business_time", "hq_px", "business_amount", "trade_index"]
+    _day = datetime.date.today().strftime("%Y%m%d")
+    _ms_early = int(_day + "093058500")
+    _ms_frame = int(_day + "093100000")
     raw = {
         "fields": fields,
         "A": [
-            [20261026093058500, 10.0, 1000000, "t1"],
-            [20261026093100000, 10.0, 500000, "t2"],
+            [_ms_early, 10.0, 1000000, "t1"],
+            [_ms_frame, 10.0, 500000, "t2"],
         ],
     }
     dh._tx_pull_raw = lambda secs: raw
@@ -583,11 +588,11 @@ def test_tx_zt_batch_raw_backfills_earlier_firstzt_ms(mod):
         l2_big_wm={},
         l2_dir_dist={},
     )
-    frame = {"A": {"transaction": {"business_time": 20261026093100000, "hq_px": 10.0}}}
+    frame = {"A": {"transaction": {"business_time": _ms_frame, "hq_px": 10.0}}}
 
     out = dh.tx_zt_batch(["A"], frame)
 
-    assert out["A"] == 20261026093058500
+    assert out["A"] == _ms_early
 
 
 def test_tick_targets_includes_near_scan_before_watch(mod):
@@ -861,6 +866,7 @@ def test_rebuild_first_zt_falls_back_to_hs_timestamp_and_is_idempotent(mod):
         spot={"A": {"last_px": 10.0, "up_px": 10.0, "hsTimeStamp": 20261026100000000}},
         first_zt_rebuild_pending=["A"],
         first_zt_rebuild_retry_ts={},
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     mod._rebuild_first_zt_tick()
@@ -891,6 +897,7 @@ def test_rebuild_first_zt_takes_earliest_limit_tx_not_tickdir_first_ts(mod):
         spot={"A": {"last_px": 9.9, "up_px": 10.0}},
         first_zt_rebuild_pending=["A"],
         first_zt_rebuild_retry_ts={},
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     mod._rebuild_first_zt_tick()
@@ -922,6 +929,7 @@ def test_rebuild_first_zt_missing_spot_does_not_block_later_batch(mod):
         first_zt_rebuild_pending=["W1", "W2", "W3", "W4", "W5", "OK.XSHG"],
         first_zt_rebuild_retry_ts={},
         restart_rebuild_hb_ts=0.0,
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     # 第一帧：前 5 只缺 spot -> wait 并冷却，不重建
@@ -953,6 +961,7 @@ def test_rebuild_first_zt_rebuilds_broken_board(mod):
         spot={"A": {"last_px": 9.5, "up_px": 10.0}},   # 已破板
         first_zt_rebuild_pending=["A"],
         first_zt_rebuild_retry_ts={},
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     mod._rebuild_first_zt_tick()
@@ -975,6 +984,7 @@ def test_rebuild_first_zt_never_limited_stock_does_not_fallback(mod):
         spot={"A": {"last_px": 9.5, "up_px": 10.0, "hsTimeStamp": 20261026143000000}},
         first_zt_rebuild_pending=["A"],
         first_zt_rebuild_retry_ts={},
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     mod._rebuild_first_zt_tick()
@@ -1008,6 +1018,7 @@ def test_rebuild_first_zt_retry_throttle_and_heartbeat(mod):
         first_zt_rebuild_pending=["A"],
         first_zt_rebuild_retry_ts={},
         restart_rebuild_hb_ts=0.0,
+        now_dt=datetime.datetime(2026, 10, 26, 9, 30, 0),
     )
 
     mod._rebuild_first_zt_tick()          # 逐笔空 -> wait，30s 冷却

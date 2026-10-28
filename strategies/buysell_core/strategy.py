@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.2（2026-10-27）
-# 部署核对：日志首行 `buysell_core init version=v1.2 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.4（2026-10-28）
+# 部署核对：日志首行 `buysell_core init version=v1.4 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.2"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-27）
+STRATEGY_VERSION = "v1.4"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-28）
 
 
 def _warn(msg):
@@ -715,6 +715,18 @@ def before_trading_start(context, data):
         g.daily = {'bought': [], 'sold': []}
         g.exp_fired = set()   # 跨日清空预期买入触发
         g.buy_commit = {}     # 跨日清空在途买单承诺
+    # v1.3 防御兜底：load_state 已按 first_zt_day/记录 day 清跨日残留，这里再兜一次，
+    # 防状态文件异常路径把昨日首触带进当日（2026-10-28 09:30 旧池票 BREAK held≈86k s 根因）。
+    _fz_now = getattr(g, 'first_zt', None) or {}
+    _stale_fz = [c for c, r in _fz_now.items() if str((r or {}).get('day') or '') != _today]
+    if _stale_fz:
+        log.info('[restart-guard] before_trading_start 发现跨日 first_zt %d 家 -> 清空重建' % len(_stale_fz))
+        g.first_zt = {}
+        g.auction_c = {}
+    elif not _restart_same_day and _fz_now:
+        log.info('[restart-guard] 跨日分支内存残留 first_zt %d 家 -> 清空' % len(_fz_now))
+        g.first_zt = {}
+        g.auction_c = {}
     g.sealed_warn = set()
     g.state_day = _today
     try:
@@ -1616,6 +1628,10 @@ def _eval_auction(sec):
     if e.get("entry_type") == "one_word":
         return AW, ["one_word_requires_seal"]
     chg = _auction_change(sec)
+    # v1.4 A3：竞价数据未就绪（涨幅 0 且前收/开盘未齐）不误判，返回 AW 等待；
+    # 防负基昨日开盘把未就绪误判 PX（2026-10-28 榕基软件类场景）。
+    if chg == 0.0 and not _auction_ready(sec):
+        return AW, ["auction_data_not_ready"]
     if chg < 0:
         return PS, ["auction_green_open"]
     yopen, has = _yesterday_open_chg(sec)
@@ -1623,9 +1639,40 @@ def _eval_auction(sec):
         return PX, ["auction_higher_than_yesterday"]   # 负基也判高开（v0.17）
     return PM, ["auction_small_open"]
 
+def _calc_intraday_bars_ready(sec):
+    # v1.3 分时数据兜底：1m 已有 >=2 根（spot VWAP 缺失时证明分时已就绪）
+    try:
+        df = get_price(sec, start_date=None, end_date=None, count=8, frequency="1m")
+        return bool(df is not None and len(df) >= 2)
+    except Exception:
+        return False
+
+def _intraday_ready(sec):
+    # v1.3 分时就绪门：spot 现价/开盘/VWAP 齐备即就绪；否则用 m1 预算缓存回看（0 新增帧 RPC）。
+    # 防 09:30 首帧数据未就绪时 meet 候选被 `_eval_intraday` 默认 CM(held_vwap) 误判买入。
+    return bool(_intraday_ready_detail(sec))
+
+def _intraday_ready_detail(sec):
+    # v1.4 A4：返回就绪源（spot / 1m / ''），供 [exp-order] 日志核对数据链路
+    try:
+        s = g.spot.get(sec) or {}
+        if (float(s.get('last_px') or 0.0) > 0 and float(s.get('open_px') or 0.0) > 0
+                and float(s.get('wavg_px') or 0.0) > 0):
+            return 'spot'
+        dh = _get_ds()
+        if dh.cached('m1_ready', sec, 3.0, lambda: _calc_intraday_bars_ready(sec), budget='m1', prio=1):
+            return '1m'
+        return ''
+    except Exception:
+        return ''
+
 def _eval_intraday(sec, auction_status):
     if auction_status in (PS, CS):
         return CS, ["from_auction"]
+    if auction_status == AW:
+        return PM, ["auction_data_not_ready"]
+    if auction_status in (PM, PX) and not _intraday_ready(sec):
+        return PM, ["intraday_data_not_ready"]
     if _two_1m_break(sec) and auction_status in (PX, CX):
         return CX, ["two_1m_break"]
     if _below_vwap_confirm(sec):
@@ -1669,9 +1716,12 @@ def _hold_exp_init(sec, force=False):
 def _exp_one_word(sec, quiet=False):
     # 一字板封单（L2 实时化）：金额比基准判超预期/衰竭；买一委托笔数骤降视为撤单松动，加速判 miss
     seal, bids = _seal_metrics(sec)
-    base = g.seal_base.get(sec, 0.0)
-    bbase = g.seal_bid_base.get(sec, 0)
+    base = (g.seal_base or {}).get(sec, 0.0)
+    bbase = (g.seal_bid_base or {}).get(sec, 0)
     if base <= 0:
+        if seal <= 0:
+            # v1.4 A2：L2 封单未就绪（seal 与基准均 0）不误判 CS，返回 AW 等 L2 明确后再判
+            return AW, ["seal_data_not_ready"]
         g.seal_base[sec] = seal
         g.seal_bid_base[sec] = bids
         return AW, ["seal_base_init"]
@@ -2316,9 +2366,10 @@ def _set_now(context):
 
 
 def _hhmm():
-    if g.now_dt is not None:
+    nd = getattr(g, 'now_dt', None)
+    if nd is not None:
         try:
-            return g.now_dt.strftime('%H:%M')
+            return nd.strftime('%H:%M')
         except Exception:
             pass
     return time.strftime('%H:%M')
@@ -3328,81 +3379,116 @@ def _lb_senti_t100_passed():
     return _hhmm() >= '10:00'
 
 
+def _fill_zt_spot():
+    # v1.4 B：竞价情绪全池缺 spot 批量补快照（复用 _elastic_yizi_scan 范式，0 额外逐只串行）
+    zt = getattr(g, 'zt_lianban', {}) or {}
+    _need = [sec for sec in zt if sec not in g.spot]
+    if not _need:
+        return 0
+    try:
+        _sn = _get_snapshot_many(_need, len(_need)) or {}
+        _got = 0
+        for _cc, _dd in _sn.items():
+            if _dd and _cc not in g.spot:
+                g.spot[_cc] = _dd
+                _got += 1
+        if _got:
+            log.info('[lb-senti] auction 全池补快照 got=%d/%d' % (_got, len(_need)))
+        return _got
+    except Exception:
+        return 0
+
+
 def _lb_senti_auction():
     # 竞价终态（09:25/09:31）：中高位高开/绿开/一字率 + 低位高开率；纯 g.auction_c/spot 读取，零行情 API
     # v0.78 D：统计前按 _auction_ready 校验 mid/low 就绪率，不足 -> ready=False 不写率（防 09:26 竞价数据未就绪假 0）
+    # v1.4 B：缺 spot 批量补快照；就绪率仍不足再补一次重算，输出 ready_detail（mid/low 分别就绪数）
     st = _lb_senti_state()
     zt = getattr(g, 'zt_lianban', {}) or {}
     if not zt:
         st['auction'] = {'ts': time.time(), 'note': 'no_zt_lianban'}
         return st['auction']
     day = str(get_trading_day())
-    mid_n = high_n = low_n = mid_open = mid_green = mid_yizi = low_open = low_yizi = 0
-    mid_ready = low_ready = 0
-    for sec in zt:
-        tier = _lb_senti_tier(sec)
-        rdy = _auction_ready(sec)
-        c = g.auction_c.get(sec)
-        chg = 0.0
-        if c and c[0] == day:
-            chg = float(c[1] or 0.0)
-        else:
-            s = g.spot.get(sec) or {}
-            pre = float(s.get('preclose_px') or 0.0)
-            op = float(s.get('open_px') or 0.0)
-            chg = (op / pre - 1.0) * 100.0 if pre > 0 and op > 0 else 0.0
-        yizi = _is_one_word_open(sec)
-        if tier == 'mid':
-            mid_n += 1
-            if rdy:
-                mid_ready += 1
-            if chg > 0:
-                mid_open += 1
-            if chg < 0:
-                mid_green += 1
-            if yizi:
-                mid_yizi += 1
-        elif tier == 'high':
-            high_n += 1
-        else:
-            low_n += 1
-            if rdy:
-                low_ready += 1
-            if chg > 0:
-                low_open += 1
-            if yizi:
-                low_yizi += 1
-    ready_min = float(BLS.get('lb_senti_auction_ready_min', 0.6))
-    ready = ((mid_ready >= ready_min * mid_n) if mid_n else True) and ((low_ready >= ready_min * low_n) if low_n else True)
+
+    def _stats():
+        mid_n = high_n = low_n = mid_open = mid_green = mid_yizi = low_open = low_yizi = 0
+        mid_ready = low_ready = 0
+        for sec in zt:
+            tier = _lb_senti_tier(sec)
+            rdy = _auction_ready(sec)
+            c = g.auction_c.get(sec)
+            chg = 0.0
+            if c and c[0] == day:
+                chg = float(c[1] or 0.0)
+            else:
+                s = g.spot.get(sec) or {}
+                pre = float(s.get('preclose_px') or 0.0)
+                op = float(s.get('open_px') or 0.0)
+                chg = (op / pre - 1.0) * 100.0 if pre > 0 and op > 0 else 0.0
+            yizi = _is_one_word_open(sec)
+            if tier == 'mid':
+                mid_n += 1
+                if rdy:
+                    mid_ready += 1
+                if chg > 0:
+                    mid_open += 1
+                if chg < 0:
+                    mid_green += 1
+                if yizi:
+                    mid_yizi += 1
+            elif tier == 'high':
+                high_n += 1
+            else:
+                low_n += 1
+                if rdy:
+                    low_ready += 1
+                if chg > 0:
+                    low_open += 1
+                if yizi:
+                    low_yizi += 1
+        ready_min = float(BLS.get('lb_senti_auction_ready_min', 0.6))
+        ready = ((mid_ready >= ready_min * mid_n) if mid_n else True) and ((low_ready >= ready_min * low_n) if low_n else True)
+        return {
+            'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
+            'mid_open_rate': (float(mid_open) / mid_n) if mid_n else 0.0,
+            'mid_green_rate': (float(mid_green) / mid_n) if mid_n else 0.0,
+            'mid_yizi': mid_yizi,
+            'mid_yizi_rate': (float(mid_yizi) / mid_n) if mid_n else 0.0,
+            'low_open_rate': (float(low_open) / low_n) if low_n else 0.0,
+            'low_yizi': low_yizi,
+            'ready': ready,
+            'ready_detail': {'mid': mid_ready, 'low': low_ready},
+        }, ready, mid_n, high_n, low_n
+
+    _fill_zt_spot()
+    out, ready, mid_n, high_n, low_n = _stats()
     if not ready:
+        _got = _fill_zt_spot()
+        if _got:
+            out, ready, mid_n, high_n, low_n = _stats()
+    if not ready:
+        _ready_n = out['ready_detail']['mid'] + out['ready_detail']['low']
         out = {
             'ts': time.time(),
             'ready': False,
+            'ready_detail': out['ready_detail'],
             'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
             'mid_open_rate': None, 'mid_green_rate': None,
-            'mid_yizi': mid_yizi, 'mid_yizi_rate': None,
-            'low_open_rate': None, 'low_yizi': low_yizi,
-            'note': 'auction_data_not_ready ready=%.0f%%' % (100.0 * (mid_ready + low_ready) / (mid_n + low_n) if (mid_n + low_n) else 100.0),
+            'mid_yizi': out.get('mid_yizi', 0), 'mid_yizi_rate': None,
+            'low_open_rate': None, 'low_yizi': out.get('low_yizi', 0),
+            'note': 'auction_data_not_ready ready=%.0f%%' % (100.0 * _ready_n / (mid_n + low_n) if (mid_n + low_n) else 100.0),
         }
         st['auction'] = out
-        log.info('[lb-senti] auction not_ready mid=%d low=%d ready=%d/%d -> 不写 open/green/yizi 率'
-                 % (mid_n, low_n, mid_ready + low_ready, mid_n + low_n))
+        log.info('[lb-senti] auction not_ready mid=%d/%d low=%d/%d -> 不写 open/green/yizi 率'
+                 % (out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n))
         return out
-    out = {
-        'ts': time.time(),
-        'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
-        'mid_open_rate': (float(mid_open) / mid_n) if mid_n else 0.0,
-        'mid_green_rate': (float(mid_green) / mid_n) if mid_n else 0.0,
-        'mid_yizi': mid_yizi,
-        'mid_yizi_rate': (float(mid_yizi) / mid_n) if mid_n else 0.0,
-        'low_open_rate': (float(low_open) / low_n) if low_n else 0.0,
-        'low_yizi': low_yizi,
-        'ready': True,
-    }
+    out['ts'] = time.time()
+    out['ready'] = True
     st['auction'] = out
-    log.info('[lb-senti] auction mid=%d open=%.1f%% green=%.1f%% yizi=%d low=%d open=%.1f%%'
+    log.info('[lb-senti] auction mid=%d open=%.1f%% green=%.1f%% yizi=%d low=%d open=%.1f%% ready_detail=mid:%d/%d low:%d/%d'
              % (mid_n, out['mid_open_rate'] * 100.0, out['mid_green_rate'] * 100.0,
-                mid_yizi, low_n, out['low_open_rate'] * 100.0))
+                out['mid_yizi'], low_n, out['low_open_rate'] * 100.0,
+                out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n))
     return out
 
 
@@ -4917,7 +5003,8 @@ def _try_first_board_buy_1m(context):
         if not px or not up or px < up * 0.998:
             continue
         if not g.first_zt.get(sec):
-            g.first_zt[sec] = {'first_seal': 0.0, 'first_bids': 0, 'ts': time.time(), 'break': False}
+            g.first_zt[sec] = {'first_seal': 0.0, 'first_bids': 0, 'ts': time.time(),
+                               'break': False, 'day': str(get_trading_day())}   # v1.3 首触交易日戳（防跨日残留）
         try:
             _try_first_board_buy(context, sec)
         except Exception as e:
@@ -6382,8 +6469,12 @@ def _parse_tx_zt_ms(sec, rows, fields):
     u = float((g.spot.get(sec) or {}).get('up_px') or 0.0)
     if u <= 0:
         return None
-    lt = time.localtime()
-    day_open = int('%04d%02d%02d093000000' % (lt.tm_year, lt.tm_mon, lt.tm_mday))
+    _td = str(get_trading_day()).replace('-', '')
+    if len(_td) == 8 and _td.isdigit():
+        day_open = int(_td + '093000000')
+    else:
+        lt = time.localtime()
+        day_open = int('%04d%02d%02d093000000' % (lt.tm_year, lt.tm_mon, lt.tm_mday))
     best = None
     for row in rows:
         try:
@@ -6759,7 +6850,7 @@ def _rebuild_first_zt_tick():
         amt = _l2_big_turnover(sec)
         ft[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': now,
                    'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False,
-                   'src': src}
+                   'src': src, 'day': str(get_trading_day())}   # v1.3 首触交易日戳（重启重建同口径）
         done.add(sec)
         log.info('[restart-rebuild] %s 恢复首触 ms=%s seal=%.0f bids=%d src=%s' % (_sn(sec), ms, seal, bids, src))
     if wait:
@@ -7007,7 +7098,8 @@ def tick_data(context, data):
                 tx_ms = _tx_map.get(sec) if BLS.get('firsttx_enabled', True) else None
                 if tx_ms is not None:
                     g.first_zt[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': time.time(),
-                                       'vol': vol, 'amt': amt, 'ms': tx_ms, 'break': False, 'seal_low': False, 'src': 'tx'}
+                                       'vol': vol, 'amt': amt, 'ms': tx_ms, 'break': False, 'seal_low': False,
+                                       'src': 'tx', 'day': str(get_trading_day())}   # v1.3 首触交易日戳
                     log.info('[firstzt] %s price=%.2f tx_ms=%s vol=%.0f seal=%.0f bids=%d state=first(src=tx)' % (_sn(sec), last, tx_ms, vol, seal, bids))
                     if BLS.get('l2_big_seed_on_firstzt', True) and sec not in (getattr(g, 'l2_big_seeded', None) or set()):
                         try:
@@ -7024,7 +7116,8 @@ def tick_data(context, data):
                 if (last >= u - 1e-9 and seal >= float(BLS.get('firstzt_min_seal', 0.0))
                         and bids >= int(BLS.get('firstzt_min_bids', 0))):   # 快照兜底：首此涨停上报最小封单/挂单门槛,过滤假封            # 首次触板
                     g.first_zt[sec] = {'first_seal': seal, 'first_bids': bids, 'ts': time.time(),
-                                       'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False, 'src': 'snap'}
+                                       'vol': vol, 'amt': amt, 'ms': ms, 'break': False, 'seal_low': False,
+                                       'src': 'snap', 'day': str(get_trading_day())}   # v1.3 首触交易日戳
                     log.info('[firstzt] %s price=%.2f vol=%.0f ms=%s seal=%.0f bids=%d state=first(src=snap)' % (_sn(sec), last, vol, ms, seal, bids))
                     if BLS.get('l2_big_seed_on_firstzt', True) and sec not in (getattr(g, 'l2_big_seeded', None) or set()):
                         try:
@@ -7137,6 +7230,7 @@ def auction_pre_confirm(context):
         elif st == CS and str(reason).startswith('auction_not_met'):
             log.info('[exp] %s 09:25竞价终态未超预期 -> 放弃 %s' % (_sn(code), reason))
     try:
+        _fill_zt_spot()   # v1.4 B：09:25 竞价情绪全池缺 spot 批量补快照，防 ready=26/41 类就绪率不足
         _lb_senti_auction()   # v0.65 竞价终态：中高位高开/绿开/一字率 + 低位高开率
         _lb_senti_mid()
     except Exception as e:
@@ -7584,6 +7678,11 @@ def place_expected_order(context, sec, note=''):
             return False   # v0.68 B3 首帧资金未就绪：静默跳过，下帧重试（不刷日志）
         _skip_log('exp_order', sec, 'no_px_cash', 'exp order skip(no px/cash) %s' % _sn(sec))
         return False
+    rd = _intraday_ready_detail(sec)   # v1.4 A1：发单前分时就绪兜底，防状态机间隙 spot 失效误发
+    if not rd:
+        _skip_log('exp_order', sec, 'intraday_data_not_ready',
+                  '[exp-order] %s intraday_data_not_ready(兜底) ready=%s %s' % (_sn(sec), rd, note))
+        return False
     if _block_sealed_buy(sec):
         return False   # 一字/封死涨停：不排队买入（v0.15 对齐 AXquant limit_up_sealed_no_queue）
     # 定价：冲板/一字 -> 打板(涨停价排队)；两分钟上攻(非涨停) -> 追高(现价上浮封顶涨停价)
@@ -7605,13 +7704,13 @@ def place_expected_order(context, sec, note=''):
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0, 'ts': time.time()}   # v0.64 字段与 place_order 对齐
             _buy_commit_add(sec, qty, limit or px)   # v0.64 记入在途买单承诺
-            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s %s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, note, _lag))
+            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s ready=%s %s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, rd, note, _lag))
             _signal(sec, 'BUY', qty, limit, mode, note, ent=ent, status='SENT')
             return True
         except Exception as e:
             log.error('exp order fail %s: %r' % (_sn(sec), e))
             return False
-    log.info('[exp-order] %s buy qty=%s limit=%s %s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, note, _lag))
+    log.info('[exp-order] %s buy qty=%s limit=%s ready=%s %s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, rd, note, _lag))
     _signal(sec, 'BUY', qty, limit, mode, note, ent='', status='SIM')
     return True
 
@@ -7713,9 +7812,29 @@ def load_state():
         g.daily = st.get('daily', {'bought': [], 'sold': []})
         g.exp_fired = set(st.get('exp_fired') or [])
         g.state_day = st.get('day')
-        if st.get('day') == str(get_trading_day()):
-            g.auction_c = dict(st.get('auction_c') or {})
-            g.first_zt = dict(st.get('first_zt') or {})
+        _today = str(get_trading_day())
+        if st.get('day') == _today:
+            # v1.3 双重守卫：state 的 day 是今日不代表行情/首触状态属于今日（进程跨日或状态文件异常时
+            # 昨日 auction_c/first_zt 可能被写成今日），非当日残留一律清空并由 _rebuild_first_zt_queue 重建。
+            _ac_day = str(st.get('ac_day') or '')
+            _fz_day = str(st.get('first_zt_day') or '')
+            if _ac_day == _today:
+                g.auction_c = dict(st.get('auction_c') or {})
+            else:
+                g.auction_c = {}
+                if st.get('auction_c'):
+                    log.info('[restart-guard] auction_c 非当日残留(ac_day=%s) -> 清空' % _ac_day)
+            if _fz_day == _today:
+                _fz0 = dict(st.get('first_zt') or {})
+                g.first_zt = {k: dict(v) for k, v in _fz0.items()
+                              if str((v or {}).get('day') or '') == _today}
+                if len(g.first_zt) != len(_fz0):
+                    log.info('[restart-guard] first_zt 含跨日/无日期记录 %d 家 -> 丢弃(保留 %d)'
+                             % (len(_fz0) - len(g.first_zt), len(g.first_zt)))
+            else:
+                g.first_zt = {}
+                if st.get('first_zt'):
+                    log.info('[restart-guard] first_zt 非当日残留(first_zt_day=%s) -> 清空重建' % _fz_day)
             g.break_sold = set(st.get('break_sold') or [])
             g.seal_sold = set(st.get('seal_sold') or [])
             g.break2_sold = set(st.get('break2_sold') or [])
@@ -7737,8 +7856,8 @@ def load_state():
             g.ma5_lifecycle_day = st.get('ma5_lifecycle_day')
             g.ma5_lows = {k: list(v or [])[:2] for k, v in (st.get('ma5_lows') or {}).items()}
         else:
-            g.auction_c = getattr(g, 'auction_c', None) or {}
-            g.first_zt = getattr(g, 'first_zt', None) or {}
+            g.auction_c = {}   # v1.3 跨日不再沿用内存旧值（防进程跨日残留）
+            g.first_zt = {}    # v1.3 跨日强制清空，由当日 tick/重建队列重新建立
             g.break_sold = set()
             g.seal_sold = set()
             g.break2_sold = set()
@@ -7755,6 +7874,7 @@ def load_state():
         g.daily = {'bought': [], 'sold': []}; g.state_day = None
         g.exp_fired = set(); g.ma5_touch_day = None; g.ma5_touched = set()
         g.ma5_lifecycle_day = None; g.ma5_lows = {}
+        g.auction_c = {}; g.first_zt = {}   # v1.3 异常分支不保留内存旧行情/首触（防毒状态固化）
 
 
 def _save_state():

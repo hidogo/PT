@@ -60,7 +60,7 @@ def expbuyns(ns, code):
     ns['g'].exp_file = {code: {'side':'buy','entry_type':'normal','expected_status':'pending_exceed',
                                'expected_auction_change_pct':5.0,'yesterday_open_pct':3.0,
                                'seal_amount_t0':0.0,'board_name':'t','reason':''}}
-    ns['g'].spot[code] = {'last_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
+    ns['g'].spot[code] = {'last_px':10.0,'open_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
 def ok(name, cond):
     print(("PASS %-30s" % name) if cond else ("FAIL %-30s" % name)); assert cond, name
 
@@ -153,7 +153,7 @@ ok('T9 chase capped by up', ns['_order_limit']('X','buy','chase') == 10.02)
 
 # T10 预期买入打板模式：现价触板 -> 挂涨停价
 ns = fresh(); expbuyns(ns, '600030.XSHG')
-ns['g'].spot['600030.XSHG'] = {'last_px':11.99,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
+ns['g'].spot['600030.XSHG'] = {'last_px':11.99,'open_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':11.0,'trade_status':'OPEN'}
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True
 ns['_below_vwap_confirm'] = lambda c: False
@@ -345,7 +345,7 @@ ok('T20 no intraday confirm -> NOT buy', r is None and len(ns['_RECC']['calls'])
 
 # T20b 分时确认(两分钟上攻)才买
 ns = fresh(); expbuyns(ns, '600081.XSHG')
-ns['g'].spot['600081.XSHG'] = {'last_px':10.2,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
+ns['g'].spot['600081.XSHG'] = {'last_px':10.2,'open_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
 ns['_confirm_expected'] = lambda c: (ns['CX'], 6.5)
 ns['_two_1m_break'] = lambda c: True                 # 两分钟上攻确认
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600081.XSHG')
@@ -711,7 +711,7 @@ ok('T30 603278现价15.96 -> MA5=13.31', abs(ns['_ensure_ma5']('603278.XSHG') - 
 # --- T31 跨重启持久化 first_zt / auction_c (修复 docs/24 ②) ---
 ns = fresh()
 ns['g'].auction_c = {'600002.XSHG': ('2026-10-16', 5.0)}
-ns['g'].first_zt = {'600002.XSHG': {'first_seal': 1e6, 'first_bids': 50, 'break': False}}
+ns['g'].first_zt = {'600002.XSHG': {'first_seal': 1e6, 'first_bids': 50, 'break': False, 'day': '2026-10-16'}}
 ns['g'].exp_fired = {'600002.XSHG'}
 ns['_save_state']()
 ns['g'].auction_c = {}; ns['g'].first_zt = {}; ns['g'].exp_fired = set()
@@ -2534,6 +2534,7 @@ ok('T87 未加载强度回退API', ns7['_concept_board_strength']('B_API') == 5.
 
 # T88 v0.36f 兜底加固：actual=0.0 且 open 未回填(竞价数据缺失) -> 不误弃，保持等待；open 已回填平开(0.0%) 才是真未达标
 ns = fresh(); expbuyns(ns, '600074.XSHG')
+ns['g'].spot['600074.XSHG'].pop('open_px', None)   # 模拟 09:30 首帧 open 未回填
 ns['_confirm_expected'] = lambda c: (ns['PM'], 0.0)
 ns['_auction_benchmark'] = lambda c: (5.0, True)
 ns['_two_1m_break'] = lambda c: False
@@ -3760,7 +3761,7 @@ ok('T109b 3页播种不含>3页大单(页4/竞价不计)', abs(g2.l2_big['600001
 # T110 v0.53 exp_day 持久化 + 日切统一入口：同日重启恢复盘中事件状态，跨日重置
 ns = fresh(); g = ns['g']
 g.state_day = '2026-10-16'; g.exp_day = '2026-10-16'
-g.first_zt = {'600001.XSHG': {'break': True, 'ts': 1000.0}}
+g.first_zt = {'600001.XSHG': {'break': True, 'ts': 1000.0, 'day': '2026-10-16'}}
 g.break_sold = {'600001.XSHG'}; g.seal_sold = set(); g.break2_sold = set()
 g.l2_big = {'600002.XSHG': {'amt': 1.0, 'buy': 1.0, 'sell': 0.0, 'un': 0.0, 'seen': {10, 20}, 'max': 1.0}}
 g.l2_big_wm = {'600002.XSHG': 93010000}; g.l2_dir_dist = {'0': 1}
@@ -4640,7 +4641,7 @@ ns = fresh(); g = ns['g']
 ns['BLS']['sim_cash_base'] = 200000.0
 ns['_CTX'].portfolio.cash = 2106.0
 ns['log'] = _mk_log()
-g.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+g.spot['600001.XSHG'] = {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
 ns['_calc_buy_qty'] = lambda *a, **k: 0   # 模拟预算不足 -> 触发最小一手兜底
 r131c = ns['place_expected_order'](ns['_ctx'], '600001.XSHG', note='t131')
 ok('T131c SIM 预期买入最小一手兜底 True+qty=100',
@@ -4774,7 +4775,7 @@ ok('T133 实盘非 SIM 模式', _raw10['_sim_mode']() is False)
 ns = fresh(); g = ns['g']
 ns['BLS']['DO_ORDER'] = True; ns['BLS']['EXPECT_ORDER'] = True; ns['BLS']['sim_cash_base'] = 0.0
 ns['_CTX'].portfolio.cash = 100000.0
-g.spot['600001.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
+g.spot['600001.XSHG'] = {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'}
 r133 = ns['place_order'](ns['_ctx'], '600001.XSHG', 'buy', note='t133', mode='chase')
 ok('T133b place_order 实单发单+记 pending',
    r133 is True and len(ns['_RECC']['calls']) == 1
@@ -4897,6 +4898,202 @@ with open(_sent, 'w', encoding='utf-8', newline='') as f:
 s = ns['_load_sentiment']()
 ok('T135 _load_sentiment 解析高度压制字段', s is not None
    and s.get('height_suppress') == 6 and s.get('max_board_10d') == 11 and s.get('max_board_10d_path') == '10-14:4')
+
+# --- T136 v1.3 同日重启守卫：first_zt_day/记录 day 双重校验 + 跨日内存残留清空 ---
+_pkl136 = pickle
+
+# T136a 正常同日：first_zt_day=今日 且 记录 day=今日 -> 恢复
+ns = fresh()
+ns['g'].state_day = '2026-10-16'
+ns['g'].auction_c = {'600002.XSHG': ('2026-10-16', 5.0)}
+ns['g'].first_zt = {'600002.XSHG': {'first_seal': 1e6, 'first_bids': 50, 'break': False, 'day': '2026-10-16'}}
+ns['_save_state']()
+ns['g'].auction_c = {}; ns['g'].first_zt = {}
+ns['load_state']()
+ok('T136 同日守卫正常恢复', ns['g'].first_zt.get('600002.XSHG', {}).get('first_seal') == 1e6
+   and ns['g'].auction_c.get('600002.XSHG') == ('2026-10-16', 5.0))
+
+# T136b state.day=今日 但 first_zt_day=昨日 -> 清空重建（防 2026-10-28 跨日首触根因）
+ns = fresh()
+ns['g'].state_day = '2026-10-16'
+ns['g'].first_zt = {'600003.XSHG': {'first_seal': 1e6, 'break': False, 'day': '2026-10-15'}}
+ns['_save_state']()
+_fp136 = ns['state_fp']()
+with open(_fp136, 'rb') as f:
+    _st136 = _pkl136.load(f)
+_st136['first_zt_day'] = '2026-10-15'
+with open(_fp136, 'wb') as f:
+    _pkl136.dump(_st136, f)
+ns['g'].first_zt = {}
+ns['load_state']()
+ok('T136 first_zt_day 非当日 -> 清空', not ns['g'].first_zt.get('600003.XSHG'))
+
+# T136c first_zt_day=今日 但记录 day=昨日 -> 丢弃；day=今日 保留
+ns = fresh()
+ns['g'].state_day = '2026-10-16'
+ns['g'].first_zt = {'600003.XSHG': {'first_seal': 1e6, 'break': False, 'day': '2026-10-15'},
+                    '600004.XSHG': {'first_seal': 2e6, 'break': False, 'day': '2026-10-16'}}
+ns['_save_state']()
+ns['g'].first_zt = {}
+ns['load_state']()
+ok('T136 记录 day 非当日 -> 丢弃', '600003.XSHG' not in ns['g'].first_zt
+   and ns['g'].first_zt.get('600004.XSHG', {}).get('first_seal') == 2e6)
+
+# T136d 跨日分支强制清空内存旧 first_zt（进程跨日/状态文件异常路径不再沿用旧值）
+ns = fresh()
+ns['g'].state_day = '2026-10-15'   # 状态文件 day=昨日（跨日）
+ns['g'].first_zt = {'600003.XSHG': {'first_seal': 1e6, 'break': False, 'day': '2026-10-15'}}
+ns['_save_state']()
+ns['g'].first_zt = {'600003.XSHG': {'first_seal': 1e6, 'break': False, 'day': '2026-10-15'}}  # 模拟内存残留
+ns['load_state']()
+ok('T136 跨日分支清空内存残留', not ns['g'].first_zt.get('600003.XSHG'))
+
+# T136e 清空后重建队列重新入队
+ns = fresh()
+ns['g'].exp_file = {'600003.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+ns['g'].first_zt = {}
+ns['g'].pool_static = []; ns['g'].watch = []
+ns['g'].first_zt_rebuild_pending = []
+ns['g'].first_zt_rebuild_ts = {}
+ns['g'].first_zt_rebuild_retry_ts = {}
+ns['g'].restart_rebuild_hb_ts = 0.0
+ns['_rebuild_first_zt_queue']()
+ok('T136 重建队列补入缺失首触', '600003.XSHG' in ns['g'].first_zt_rebuild_pending)
+
+# T136f 重启重建记录带 day + 首板 1m 兜底记录带 day
+ns = fresh()
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 35, 0)   # 避开 10:00 放弃窗口
+ns['g'].spot['600001.XSHG'] = {'up_px': 10.0, 'last_px': 10.0, 'hsTimeStamp': 0}
+ns['g'].first_zt_rebuild_pending = ['600001.XSHG']
+ns['g'].first_zt_rebuild_ts = {'600001.XSHG': time.time()}
+ns['g'].first_zt_rebuild_retry_ts = {}
+ns['g'].restart_rebuild_hb_ts = 0.0
+ns['g'].first_zt = {}
+ns['_parse_tx_zt_ms'] = lambda sec, rows, fields: 20261016093000000
+ns['get_individual_transaction'] = lambda *a, **k: {'fields': ['business_time', 'hq_px'], '600001.XSHG': []}
+ns['_seal_metrics'] = lambda sec: (1000.0, 5)
+ns['_snap_vol'] = lambda s: 100.0
+ns['_l2_big_turnover'] = lambda sec: 10.0
+ns['_rebuild_first_zt_tick']()
+_rec136 = ns['g'].first_zt.get('600001.XSHG') or {}
+ok('T136 重启重建首触带 day', _rec136.get('day') == '2026-10-16' and _rec136.get('src') == 'restart_rebuild')
+
+ns = fresh()
+ns['g'].pool_static = ['600011.XSHG']; ns['g'].watch = []
+ns['g'].spot['600011.XSHG'] = {'last_px': 10.0, 'up_px': 10.0, 'preclose_px': 10.0}
+ns['g'].first_zt = {}; ns['g'].first_board_fired = set()
+ns['_try_first_board_buy'] = lambda *a, **k: None
+ns['_try_first_board_buy_1m'](ns['_ctx'])
+ok('T136 首板1m兜底首触带 day', (ns['g'].first_zt.get('600011.XSHG') or {}).get('day') == '2026-10-16')
+
+# --- T137 v1.3 分时就绪门：数据未就绪时 meet 不误判 CM/不买 ---
+def _meet_ns(code, spot):
+    ns = fresh()
+    ns['g'].exp_file = {code: {'side': 'buy', 'entry_type': 'normal', 'expected_status': 'pending_meet',
+                               'expected_auction_change_pct': 3.0, 'yesterday_open_pct': 2.0,
+                               'seal_amount_t0': 0.0, 'board_name': 't', 'reason': ''}}
+    ns['g'].spot[code] = spot
+    return ns
+
+# T137a 未就绪（缺 VWAP，1m 也缺）-> PM 等待，不买不弃
+ns = _meet_ns('600006.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
+st, reason = ns['_eval_intraday']('600006.XSHG', ns['PM'])
+ok('T137 未就绪 meet -> PM', st == ns['PM'] and reason == ['intraday_data_not_ready'])
+st2, _r2 = ns['_exp_rt_status']('600006.XSHG')
+ok('T137 未就绪 exp_rt -> PM 等待', st2 == ns['PM'])
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600006.XSHG')
+ok('T137 未就绪不买不弃', r is None and '600006.XSHG' not in ns['g'].daily['bought']
+   and '600006.XSHG' not in ns['g'].exp_fired)
+
+# T137b 就绪（spot VWAP/开盘/现价齐备）-> CM held_vwap 可买
+ns = _meet_ns('600007.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
+                              'wavg_px': 10.0, 'trade_status': 'OPEN'})
+st, reason = ns['_eval_intraday']('600007.XSHG', ns['PM'])
+ok('T137 就绪 meet -> CM', st == ns['CM'] and reason == ['held_vwap'])
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600007.XSHG')
+ok('T137 就绪 meet 可买', r is True and '600007.XSHG' in ns['g'].daily['bought'])
+
+# T137c 竞价已放弃 PS/CS 不受就绪门影响
+ns = _meet_ns('600008.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
+st, reason = ns['_eval_intraday']('600008.XSHG', ns['PS'])
+ok('T137 PS 未就绪仍 miss', st == ns['CS'] and reason == ['from_auction'])
+
+# T137d PX 未就绪等待；就绪后两分钟上攻才确认 CX
+ns = _meet_ns('600009.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
+ns['_two_1m_break'] = lambda c: False
+st, reason = ns['_eval_intraday']('600009.XSHG', ns['PX'])
+ok('T137 PX 未就绪 -> PM 等待', st == ns['PM'] and reason == ['intraday_data_not_ready'])
+ns['g'].spot['600009.XSHG']['wavg_px'] = 10.0
+ns['_two_1m_break'] = lambda c: True
+st, reason = ns['_eval_intraday']('600009.XSHG', ns['PX'])
+ok('T137 PX 就绪 + 上攻 -> CX', st == ns['CX'] and reason == ['two_1m_break'])
+
+# --- T138 v1.4 预期买入纵深加固：发单前分时就绪兜底 ---
+ns = _meet_ns('600010.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
+r = ns['place_expected_order'](ns['_ctx'], '600010.XSHG')
+ok('T138 place_expected_order 未就绪兜底不买', r is False and len(ns['_RECC']['calls']) == 0)
+
+# T139 one_word L2 封单未就绪 -> AW 等待不误弃
+ns = fresh()
+ns['g'].exp_file = {'600011.XSHG': {'side':'buy','entry_type':'one_word','expected_status':'pending_exceed',
+                                    'expected_auction_change_pct':5.0,'yesterday_open_pct':3.0,
+                                    'has_yesterday_open':True,'seal_amount_t0':0.0,'board_name':'t','reason':''}}
+ns['g'].spot['600011.XSHG'] = {'last_px':11.0,'preclose_px':10.0,'up_px':11.0,'open_px':11.0,'wavg_px':10.5,'trade_status':'OPEN'}
+st, reason = ns['_exp_rt_status']('600011.XSHG')
+ok('T139 one_word seal 未就绪 AW', st == ns['AW'])
+st2, _r2 = ns['_exp_one_word']('600011.XSHG')
+ok('T139 one_word 二次仍等待', st2 == ns['AW'] and 'seal_data_not_ready' in _r2)
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600011.XSHG')
+ok('T139 seal 未就绪不买不弃', r is None and '600011.XSHG' not in ns['g'].daily['bought']
+   and '600011.XSHG' not in ns['g'].exp_fired)
+
+# T140 数据未就绪 + 负基昨日开盘不误判 PX
+ns = fresh()
+ns['g'].exp_file = {'600012.XSHG': {'side':'buy','entry_type':'normal','expected_status':'pending_exceed',
+                                    'expected_auction_change_pct':-1.0,'yesterday_open_pct':-1.0,
+                                    'has_yesterday_open':True,'seal_amount_t0':0.0,'board_name':'t','reason':''}}
+ns['g'].spot['600012.XSHG'] = {'last_px':10.0,'preclose_px':10.0,'trade_status':'OPEN'}
+au, r_au = ns['_eval_auction']('600012.XSHG')
+ok('T140 未就绪+负基 -> AW', au == ns['AW'] and r_au == ['auction_data_not_ready'])
+st, r_intra = ns['_eval_intraday']('600012.XSHG', au)
+ok('T140 AW 不误判 PX/CM', st == ns['PM'] and r_intra == ['auction_data_not_ready'])
+st_rt, _r3 = ns['_exp_rt_status']('600012.XSHG')
+ok('T140 exp_rt 保持等待', st_rt == ns['PM'])
+
+# T141 09:25 竞价情绪补快照 -> ready=True + ready_detail 落档
+ns = fresh(); g = _lb_senti_fix(ns)
+g.spot = {}; g.auction_c = {}
+_shot_calls = []
+def _fake_snapshot_many(codes, cap):
+    _shot_calls.append(list(codes))
+    out = {}
+    for c in codes:
+        if c == '603100.XSHG':
+            out[c] = {'preclose_px': 10.0, 'open_px': 11.0, 'up_px': 11.0}
+        elif c == '600101.XSHG':
+            out[c] = {'preclose_px': 10.0, 'open_px': 9.6, 'up_px': 11.0}
+        else:
+            out[c] = {'preclose_px': 10.0, 'open_px': 10.6, 'up_px': 11.0}
+    return out
+ns['_get_snapshot_many'] = _fake_snapshot_many
+au = ns['_lb_senti_auction']()
+ok('T141 补快照后 ready', au.get('ready') is True and bool(_shot_calls))
+ok('T141 ready_detail', au.get('ready_detail') == {'mid': 2, 'low': 1})
+ok('T141 档位落档', abs(au.get('mid_open_rate') - 1.0) < 1e-9 and abs(au.get('low_open_rate')) < 1e-9)
+
+# T142 其余买入入口数据缺失矩阵：不误买不误弃
+for _c, _sp in {
+    '600013.XSHG': {'last_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'},
+    '600014.XSHG': {'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'},
+    '600015.XSHG': {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'},
+}.items():
+    ns = _meet_ns(_c, _sp)
+    st, reason = ns['_eval_intraday'](_c, ns['PM'])
+    ok('T142 缺字段未就绪 -> PM', st == ns['PM'] and reason == ['intraday_data_not_ready'])
+    st2, _r2 = ns['_exp_rt_status'](_c)
+    ok('T142 缺字段 exp_rt 等待', st2 == ns['PM'])
+    r = ns['_attempt_expected_buy'](ns['_ctx'], _c)
+    ok('T142 缺字段不买不弃', r is None and _c not in ns['g'].daily['bought'] and _c not in ns['g'].exp_fired)
 
 print('ALL DONE')
 

@@ -150,7 +150,7 @@ ok("T8 文件缺失到期", eb.boards_refresh_due(datetime.date(2026, 10, 27), o
 # 距上次 >=14 天兜底（防周一休市/失更）
 _old = os.path.join(_d8, "old_boards.csv")
 _w(_old, "board_name,board_type,member_code\n人工智能,concept,600001.XSHG\n")
-_future = datetime.date(2026, 11, 10)   # 与 old_boards mtime(今天) 相差 >=14 天
+_future = datetime.date(2026, 11, 11)   # 与 old_boards mtime(今天) 相差 >=14 天
 ok("T8 >=14天兜底到期", eb.boards_refresh_due(_future, _old)[0] is True)
 # run()：内容未变 UNCHANGED（不覆盖 mtime）；内容变化 WROTE
 _m8 = os.path.join(_d8, "ths_board_mapping.json")
