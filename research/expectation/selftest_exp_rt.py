@@ -45,6 +45,10 @@ def make_mod(**overrides):
         ent = "E%d" % (len(cont["calls"]) + 1)
         cont["calls"].append({"sec": sec, "qty": qty, "side": side, "limit_price": limit_price}); return ent
     ns['order'] = order; ns['_RECC'] = cont
+    def cancel_order(sec, ent=None, **kw):
+        cont["calls"].append({"sec": sec, "ent": ent, "cancel": True})
+        return True
+    ns['cancel_order'] = cancel_order
     for k, v in overrides.items():
         ns[k] = v
     ns['_g'] = g; ns['_ctx'] = ctx; ns['_TMP'] = TMP
@@ -124,7 +128,7 @@ ok('T5 restart restores exp_fired', '600005.XSHG' in ns['g'].exp_fired)
 
 # T6 日切清空
 ns = fresh(); ns['load_state'] = lambda: None; ns['_save_state'] = lambda: None
-ns['_load_expectation'] = lambda: 0; ns['_load_selfwatch'] = lambda: 0; ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None
+ns['_load_expectation'] = lambda *a, **k: 0; ns['_load_selfwatch'] = lambda: 0; ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None
 ns['get_trading_day'] = lambda: datetime.date(2026,10,16)
 ns['g'].state_day = '2026-10-15'; ns['g'].daily = {'bought': ['600009.XSHG'], 'sold': []}; ns['g'].exp_fired = {'600009.XSHG'}; ns['g'].spot = {}
 ns['before_trading_start'](ns['_CTX'], None)
@@ -1040,6 +1044,86 @@ ok('T44 tick 帧末 elastic 触发', len(pc) == 1 and 'elastic_arb' in pc[0]['no
 
 
 
+# --- T45 v1.6 打板未成交排单：封单衰减撤单 ---
+def _bq_setup():
+    ns = fresh()
+    ns['g'].pending['600080.XSHG'] = {'no': 'E80', 'side': 'buy', 'qty': 200, 'limit': 11.0,
+                                      'status': 'SENT', 'filled': 0, 'mode': 'board',
+                                      'seal_base': 1000000.0, 'seal_bid_base': 10}
+    ns['g'].daily['bought'] = ['600080.XSHG']
+    ns['g'].buy_commit = {'600080.XSHG': 2200.0}
+    ns['g'].first_zt = {}
+    ns['g'].board_cancel_log = set()
+    ns['_unique_stand'] = lambda sec: False
+    ns['_save_state'] = lambda *a, **k: None
+    ns['_seal_metrics'] = lambda sec: (1000000.0, 10)
+    return ns
+
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)   # 封单 30% < 33.3% -> 撤
+ok('T45 封单衰减 -> 撤单', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True)
+ok('T45 撤单释放名额+承诺', ns['g'].daily['bought'] == [] and '600080.XSHG' not in ns['g'].buy_commit)
+ok('T45 撤单去重', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is False)
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (800000.0, 8)   # 封单 80% -> 不撤
+ok('T45 封单充足 -> 不撤', ns['_board_queue_cancel']('600080.XSHG', 800000.0, 8) is False)
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (600000.0, 4)   # 委托笔数 40% < 50% -> 撤
+ok('T45 委托笔数骤降 -> 撤单', ns['_board_queue_cancel']('600080.XSHG', 600000.0, 4) is True)
+ns = _bq_setup(); ns['g'].pending['600080.XSHG']['filled'] = 200   # 已成交/部分成交 -> 不撤
+ok('T45 已成交不撤', ns['_board_queue_cancel']('600080.XSHG', 0.0, 0) is False)
+ns = _bq_setup(); ns['g'].pending['600080.XSHG']['status'] = 'CANCELLED'
+ok('T45 终态不重复撤', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is False)
+ns = _bq_setup(); ns['g'].pending['600080.XSHG']['seal_base'] = 0.0   # 无基准 -> 保守不撤
+ok('T45 无封单基准不撤', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is False)
+
+# --- T46 v1.6 弹性套利纳入北交所（8/4/92），买入涨幅限制 15% ---
+ns = fresh()
+ns['g'].spot['830001.XBJ'] = {'last_px': 12.0, 'preclose_px': 10.0, 'up_px': 13.0, 'wavg_px': 10.3, 'trade_status': 'OPEN'}
+ok('T46 北交弹性追高买入价前收*1.15 上限', ns['_order_limit']('830001.XBJ', 'buy', 'chase') == 11.5)
+ns['g'].spot['300999.SZ'] = {'last_px': 12.0, 'preclose_px': 10.0, 'up_px': 14.0, 'wavg_px': 10.3, 'trade_status': 'OPEN'}
+ok('T46 20cm 维持前收*1.10 上限', ns['_order_limit']('300999.SZ', 'buy', 'chase') == 11.0)
+ns['g'].spot['830001.XBJ'] = {'last_px': 13.0, 'preclose_px': 10.0, 'up_px': 13.0, 'wavg_px': 11.0, 'trade_status': 'OPEN'}
+ok('T46 北交打板按涨停价（30cm）', ns['_order_limit']('830001.XBJ', 'buy', 'board') == 13.0)
+ns = _ea_setup(); ns['g'].watch = ['830001.XBJ']
+ns['g'].spot['830001.XBJ'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 13.0, 'open_px': 10.3, 'trade_status': 'OPEN'}
+pc = _ea_calls(ns)
+ok('T46 北交纳入弹性套利 -> chase 下单', len(pc) == 1 and 'elastic_arb' in pc[0]['note'])
+ok('T46 北交记入 daily.bought', '830001.XBJ' in ns['g'].daily['bought'])
+
+# T46b v1.6 北交 8%-15% / 20cm 6%-10% 分档区间 + L2 大单净量进攻加分
+ok('T46b 北交弹性涨幅下限 8%', ns['_elastic_min_change']('830001.XBJ') == 8.0)
+ok('T46b 北交弹性涨幅上限 15%', ns['_elastic_max_change']('830001.XBJ') == 15.0)
+ok('T46b 20cm 弹性涨幅下限 6%', ns['_elastic_min_change']('300001.XSHE') == 6.0)
+ok('T46b 20cm 弹性涨幅上限 10%', ns['_elastic_max_change']('300001.XSHE') == 10.0)
+ok('T46b 北交 top 买入前 15%', ns['_elastic_top_buy_before']('830001.XBJ') == 15.0)
+ok('T46b 20cm top 买入前 10%', ns['_elastic_top_buy_before']('300001.XSHE') == 10.0)
+ns = _ea_setup(); ns['g'].watch = ['830001.XBJ']
+ns['g'].spot['830001.XBJ'] = {'last_px': 11.5, 'preclose_px': 10.0, 'up_px': 13.0, 'open_px': 10.3, 'trade_status': 'OPEN'}
+ns['last_px'] = lambda sec: 11.5
+pc = _ea_calls(ns)
+ok('T46b 北交 15% 触发', len(pc) == 1 and 'elastic_arb' in pc[0]['note'])
+ns = _ea_setup(); ns['g'].watch = ['830001.XBJ']
+ns['g'].spot['830001.XBJ'] = {'last_px': 11.6, 'preclose_px': 10.0, 'up_px': 13.0, 'open_px': 10.3, 'trade_status': 'OPEN'}
+ns['last_px'] = lambda sec: 11.6
+ok('T46b 北交 16% 跳过', _ea_calls(ns) == [])
+ns = _ea_setup(); ns['g'].watch = ['830001.XBJ']
+ns['g'].spot['830001.XBJ'] = {'last_px': 10.7, 'preclose_px': 10.0, 'up_px': 13.0, 'open_px': 10.3, 'trade_status': 'OPEN'}
+ns['last_px'] = lambda sec: 10.7
+ok('T46b 北交 7% 跳过', _ea_calls(ns) == [])
+ns = _ea_setup(); ns['g'].watch = ['300001.XSHE']
+ns['g'].spot['300001.XSHE'] = {'last_px': 11.0, 'preclose_px': 10.0, 'up_px': 12.0, 'open_px': 10.3, 'trade_status': 'OPEN'}
+ns['last_px'] = lambda sec: 11.0
+ok('T46b 20cm 10% 边界触发', len(_ea_calls(ns)) == 1)
+ns = _ea_setup(); ns['g'].watch = ['300001.XSHE', '300002.XSHE']
+ns['g'].spot['300002.XSHE'] = dict(ns['g'].spot['300001.XSHE'])
+ns['_l2_big_ratio'] = lambda sec: 0.12 if sec == '300001.XSHE' else -1.0
+pc = _ea_calls(ns)
+ok('T46b 大单净量>=10% 进攻加分优先排序', len(pc) >= 2 and pc[0]['sec'] == '300001.XSHE' and 'big_ok=1' in pc[0]['note'])
+
+
+
+# ================= v0.64 订单系统闭环（F1-F5，docs/33） =================
+
+
+
 # ================= v0.64 订单系统闭环（F1-F5，docs/33） =================
 # F1: place_order 原函数买路径无行情跳过 -> 返回 False（不记 daily.bought）
 ns = fresh(); ns['g'].zt_lianban = {}
@@ -1351,6 +1435,14 @@ ok('T56 09:31 预期买入放行', calls == ['600001.XSHG'])
 ns = _ea_setup(); ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 50, 0)
 pc = _ea_calls(ns)
 ok('T56 09:50 弹性窗口内放行', len(pc) == 1 and 'elastic_arb' in pc[0]['note'])
+ns = _ea_setup(); ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 51, 0)
+ok('T56 09:51 弹性窗口外 -> skip', _ea_calls(ns) == [])
+ns = fresh(); ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 51, 0)
+ns['_new_top_board_scan'] = lambda: 'B1'
+out = []
+ns['place_order'] = lambda *a, **k: out.append(1) or True
+ns['_try_elastic_top_buy'](ns['_CTX'])
+ok('T56 09:51 弹性top窗口外 -> skip', out == [])
 
 # --- T57 板块强度刷新周期时间分档（v0.24：10:00 前 3s / 之后 60s） ---
 ns = fresh()
@@ -1815,7 +1907,7 @@ def _bts_setup(state_day, today):
     n = fresh()
     n['load_state'] = lambda: None
     n['_save_state'] = lambda: None
-    n['_load_expectation'] = lambda: None
+    n['_load_expectation'] = lambda *a, **k: None
     n['_load_zt_lianban'] = lambda: None
     n['_load_sentiment'] = lambda: None
     n['_load_selfwatch'] = lambda: None
@@ -2520,6 +2612,40 @@ ok('T86 surge只算5次', len(_surge_calls) == 5)
 ok('T86 surge取涨幅前5', set(_surge_calls) == {'300007.XSHE', '300006.XSHE', '300005.XSHE', '300004.XSHE', '300003.XSHE'})
 ok('T86 排序按surge降序', cands == ['300007.XSHE', '300006.XSHE', '300005.XSHE', '300004.XSHE', '300003.XSHE'])
 
+# T86b v1.6 弹性 top 候选：L2 大单净量>=10% 进攻加分参与最主动排序
+ns6b = fresh()
+g6b = ns6b['g']
+g6b.boards = {'概念A': ['300001.XSHE', '300002.XSHE']}
+g6b.board_type = {'概念A': 'concept'}
+g6b.stock_boards = dict((c, ['概念A']) for c in g6b.boards['概念A'])
+def _sn6b(secs):
+    out = {}
+    for c in secs:
+        out[c] = {'preclose_px': 10.0, 'last_px': 10.2 if c == '300002.XSHE' else 10.3}
+    return out
+ns6b['get_snapshot'] = lambda secs: _sn6b(secs)
+ns6b['_elastic_1m_surge'] = lambda sec: 2.0 if sec == '300001.XSHE' else 4.0
+ns6b['_l2_big_ratio'] = lambda sec: 0.12 if sec == '300001.XSHE' else -1.0
+cands6b = ns6b['_calc_elastic_top_candidates']('概念A')
+ok('T86b 大单净量加分翻排序', cands6b == ['300001.XSHE', '300002.XSHE'])
+ns6b['_l2_big_ratio'] = lambda sec: -1.0
+ok('T86b 无大单加分回原排序', ns6b['_calc_elastic_top_candidates']('概念A') == ['300002.XSHE', '300001.XSHE'])
+
+# T86c v1.6 北交 top 候选 15% 前买入区间
+ns6c = fresh()
+g6c = ns6c['g']
+g6c.boards = {'概念A': ['830001.XBJ', '830002.XBJ']}
+g6c.board_type = {'概念A': 'concept'}
+g6c.stock_boards = dict((c, ['概念A']) for c in g6c.boards['概念A'])
+def _sn6c(secs):
+    out = {}
+    for c in secs:
+        out[c] = {'preclose_px': 10.0, 'last_px': 11.4 if str(c).startswith('830001') else 11.6}
+    return out
+ns6c['get_snapshot'] = lambda secs: _sn6c(secs)
+ns6c['_elastic_1m_surge'] = lambda sec: 3.0
+ok('T86c 北交14%在15%前买入内', ns6c['_calc_elastic_top_candidates']('概念A') == ['830001.XBJ'])
+
 # --- T87 v0.36e 文件未加载回退 API：归属/成员/排名/强度全链 ---
 ns7 = fresh()
 ns7['_boards_of'] = lambda sec: ['B_A']
@@ -2554,7 +2680,7 @@ ok('T88 actual=0 & open present -> CS', st2 == ns2['CS'] and reason2.startswith(
 
 # --- T89 v0.36g 盘中重启：重建涨停池/自选三态（防 expect_buy 45->12 丢失） ---
 ns = fresh(); ns['load_state'] = lambda: None; ns['_save_state'] = lambda: None
-ns['_load_expectation'] = lambda: 0; ns['_load_selfwatch'] = lambda: 0; ns['_load_sentiment'] = lambda: 0
+ns['_load_expectation'] = lambda *a, **k: 0; ns['_load_selfwatch'] = lambda: 0; ns['_load_sentiment'] = lambda: 0
 ns['_load_zt_lianban'] = lambda: 0; ns['_load_boards'] = lambda: 0
 ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None; ns['_board_probe'] = lambda: None
 ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
@@ -3913,7 +4039,7 @@ ok('T112d 唯一高身位豁免 -> 不核卖', len(_r112d) == 0)
 
 # T112e 钩子节奏：预热段(09:24:30)不触发 / 确认段(09:24:48)触发
 _n112e, _r112e = _p2e_ns(ac_map={'600100.XSHG': -1.0, '600101.XSHG': -3.0}, est='pending_meet', zt=_ZT112)
-_n112e['_load_expectation'] = lambda: 0
+_n112e['_load_expectation'] = lambda *a, **k: 0
 _ctxE = _n112e['_ctx']
 _ctxE.blotter.current_dt = datetime.datetime(2026, 10, 16, 9, 24, 30)
 _n112e['p2e_auction_core_sell'](_ctxE)
@@ -4658,20 +4784,35 @@ r131d = ns['place_order'](ns['_ctx'], '600001.XSHG', 'buy', note='t131')
 ok('T131d place_order SIM 最小一手兜底 True+qty=100',
    r131d is True and any('qty=100' in m for m in ns['log'].msgs) and any('sim-min-lot' in m for m in ns['log'].msgs))
 
-# T131e 重建超时放弃：入队 31 分钟 > 30 分钟 -> 移出队列
+# T131e v1.5 午后重启不按 10:00 误杀：13:00 入队、当前封板有快照证据 -> fallback 重建成功
 ns = fresh(); g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 16, 13, 0, 0)
+g.spot['600001.XSHG'] = {'up_px': 10.0, 'last_px': 10.0, 'hsTimeStamp': 20261016130000000}
 g.first_zt_rebuild_pending = ['600001.XSHG']
-g.first_zt_rebuild_ts = {'600001.XSHG': time.time() - 60.0 * 31.0}
+g.first_zt_rebuild_ts = {'600001.XSHG': time.time() - 60.0}
+g.first_zt_rebuild_retry_ts = {}
+g.restart_rebuild_hb_ts = 0.0
+g.first_zt = {}
+g.first_zt_rebuild_attempts = {}
+ns['_parse_tx_zt_ms'] = lambda sec, rows, fields: None
+ns['_seal_metrics'] = lambda sec: (1000.0, 5)
+ns['_snap_vol'] = lambda s: 100.0
+ns['_l2_big_turnover'] = lambda sec: 10.0
 ns['_rebuild_first_zt_tick']()
-ok('T131e 重建超时(31min) 移出队列', not g.first_zt_rebuild_pending)
+ok('T131e 午后重启有证据不误杀(fallback)', (g.first_zt.get('600001.XSHG') or {}).get('src') == 'restart_rebuild_fallback')
 
-# T131f 10:00 截止放弃：now_dt>=10:00（入队仅 1 分钟）-> 移出队列
+# T131f v1.5 无涨停证据重试轮次耗尽 -> 放弃移出队列（今日未涨停票不全天卡队）
 ns = fresh(); g = ns['g']
+g.now_dt = datetime.datetime(2026, 10, 16, 13, 0, 0)
+g.spot['600002.XSHG'] = {'up_px': 0.0, 'last_px': 9.5}
 g.first_zt_rebuild_pending = ['600002.XSHG']
 g.first_zt_rebuild_ts = {'600002.XSHG': time.time() - 60.0}
-g.now_dt = datetime.datetime(2026, 10, 16, 10, 0, 1)
+g.first_zt_rebuild_retry_ts = {}
+g.restart_rebuild_hb_ts = 0.0
+g.first_zt = {}
+g.first_zt_rebuild_attempts = {'600002.XSHG': 8}
 ns['_rebuild_first_zt_tick']()
-ok('T131f 10:00 截止放弃移出队列', not g.first_zt_rebuild_pending)
+ok('T131f 无证据重试耗尽移出队列', '600002.XSHG' not in g.first_zt_rebuild_pending)
 
 # T131g 同因日志节流：30s 内同 (tag,sec,reason) 只打 1 条；不同 reason 立即打；间隔后恢复
 ns = fresh(); g = ns['g']
@@ -5094,6 +5235,38 @@ for _c, _sp in {
     ok('T142 缺字段 exp_rt 等待', st2 == ns['PM'])
     r = ns['_attempt_expected_buy'](ns['_ctx'], _c)
     ok('T142 缺字段不买不弃', r is None and _c not in ns['g'].daily['bought'] and _c not in ns['g'].exp_fired)
+
+# --- T143 v1.5 同日午后重启纵深：exp_file 持久化 + daily.bought 未成交释放 ---
+# T143a exp_file 持久化：盘中合成预期池 34 家 -> 重启 load_state 恢复（防 34->5 收缩）
+ns = fresh(); g = ns['g']
+g.state_day = '2026-10-16'
+g.exp_file = {'6001%02d.XSHG' % i: {'side': 'buy', 'expected_status': 'pending_meet', '_src': 'zt_pool'}
+              for i in range(34)}
+ns['_save_state']()
+g.exp_file = {}
+ns['load_state']()
+ok('T143 exp_file 同日重启恢复 34 家', len(g.exp_file) == 34 and '600100.XSHG' in g.exp_file)
+
+# T143b daily.bought 未成交挂单释放：无持仓且无 FILLED buy -> 释放名额并清 buy_commit/exp_fired
+ns = fresh(); g = ns['g']
+ns['get_positions'] = lambda: {'600001.XSHG': {'amount': 100}}
+g.daily = {'bought': ['600001.XSHG', '600002.XSHG'], 'sold': []}
+g.pending = {'600002.XSHG': {'side': 'buy', 'status': 'SENT', 'filled': 0}}
+g.buy_commit = {'600002.XSHG': 1200.0}
+g.exp_fired = {'600002.XSHG'}
+n = ns['_reconcile_daily_bought_slots']()
+ok('T143 未成交挂单释放名额', n == 1 and g.daily['bought'] == ['600001.XSHG'])
+ok('T143 释放同步清 buy_commit/exp_fired',
+   '600002.XSHG' not in g.buy_commit and '600002.XSHG' not in g.exp_fired)
+
+# T143c 已成交买单保留：桥缺持仓但 pending=FILLED -> 不误杀
+ns = fresh(); g = ns['g']
+ns['get_positions'] = lambda: {'600005.XSHG': {'amount': 100}}
+g.daily = {'bought': ['600003.XSHG'], 'sold': []}
+g.pending = {'600003.XSHG': {'side': 'buy', 'status': 'FILLED', 'filled': 100}}
+g.buy_commit = {'600003.XSHG': 1000.0}
+n = ns['_reconcile_daily_bought_slots']()
+ok('T143 已成交买单保留(桥缺持仓不误杀)', n == 0 and g.daily['bought'] == ['600003.XSHG'])
 
 print('ALL DONE')
 

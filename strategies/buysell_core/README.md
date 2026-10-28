@@ -3,11 +3,50 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.4（2026-10-28）
+- 当前版本：v1.6（2026-10-28）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.4 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.6 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.6
+- v1.6 打板排单封单衰减撤单 + 弹性套利纳入北交所（2026-10-28）：
+  - 弹性套利生命周期收窄：`elastic_arb_window_minute` 与 `elastic_top_window_minute` 30->20，
+    两条通道均改为 09:30-09:50 有效（09:51 起停止评估），与盘中主窗口节奏一致。
+  - 打板未成交转排单：`place_order/place_expected_order` 落 `pending` 时记录 `mode/seal_base/seal_bid_base`；
+    `tick_data` 逐票与 `handle_data` 1m 兜底调用 `_board_queue_cancel()`，封单<=基准
+    `board_queue_cancel_seal_ratio`（缺省 0.333，唯一身位回落 0.25）或买一委托笔数<=基准
+    `board_queue_cancel_bid_ratio`（缺省 0.5）即撤单，释放买入名额与资金承诺，日志 `[board-cancel]`；
+    无封单基准保守不撤，已成交/终态不重复撤，撤单去重 `board_cancel_log` 跨重启持久化。
+  - 弹性套利纳入北交所（8/4/92 前缀，30cm）：`_is_elastic_eligible()` = 20cm ∪ BSE；
+    `_try_elastic_arb_buy/_calc_elastic_top_candidates` 候选域同步放开；
+    弹性追高买入价上限北交所前收*1.15（`elastic_max_buy_pct_bse=0.15`），20cm 维持前收*1.10。
+  - 北交弹性区间分档：当前涨幅 20cm 6%-10% / 北交 8%-15%；弹性 top 买入前涨幅
+    20cm 10% / 北交 15%；开盘涨幅上限 20cm 12% / 北交 15%（`elastic_arb_min/max_change_bse`、
+    `elastic_top_buy_before_pct_bse`、`elastic_arb_max_open_change_bse`）。
+  - 弹性通道进攻加分：arb/top 两条通道消费 L2 大单净量占比>=10%（`_l2_big_bonus_pts`，+5 分）
+    参与“最主动”排序（1m surge + 大单加分）；订单 note 带 `big=xx% big_ok=0/1` 便于核对。
+  - 测试：selftest_exp_rt.py 新增 T45（封单衰减撤单/笔数骤降撤单/释放名额/去重/终态/无基准 8 例）、
+    T46（北交 15% 上限/20cm 10% 不变/北交打板涨停价/北交纳入弹性套利 4 例）、
+    T46b（北交 8-15%/20cm 6-10% 分档与大单加分排序 10 例）、T56（09:50 弹性窗口内放行 /
+    09:51 两条弹性通道窗口外 skip 3 例）、T86b/c（top 候选大单加分排序与北交 15% 前买入 3 例）；全量 PASS、
+    selftest_ops_oneclick 28 PASS、pytest 50 passed、双编译通过。
+- 待重传：strategy_deploy.py（已本地重生成，tokenize 剔除注释版）云端，核对日志首行 `buysell_core init version=v1.6`；
+  盘中核对 `[board-cancel]` 撤单日志与北交弹性 `chase` 限价（前收*1.15 封顶）。
+
+### v1.5
+- v1.5 同日午后重启纵深加固（2026-10-28 12:16 重启日志复盘修复）：
+  - `_rebuild_first_zt_tick()` 放弃判定改重试轮次：不再用入队墙钟 30min/10:00 一刀切，
+    12:16 重启登记 34 家、13:00 首帧曾全部误杀；现在每票实际尝试
+    `first_zt_rebuild_max_attempts=8` 轮仍无涨停证据才放弃，有证据票首次 tx 回看即重建。
+  - `exp_file` 持久化：`_save_state/load_state` 增加盘中合成预期池字段，
+    同日重启 `before_trading_start` 对 `_load_expectation(merge=True)`，
+    防重启后 34->5 收缩丢候选。
+  - 新增 `_reconcile_daily_bought_slots()`：同日重启交叉核对 `daily.bought`，
+    无真实持仓且无 FILLED buy 在途的挂单（如海洋王 09:30:04 未成交单）释放名额，
+    并同步清 `buy_commit/exp_fired`；桥数据为空时保守不动。
+  - 测试：selftest_exp_rt.py 新增午后重启重建队列（无证据轮次耗尽放弃/有证据首次成功）、
+    exp_file 持久化合并防收缩、daily.bought 未成交释放三组回归。
 
 ### v1.4
 - v1.4 预期买入纵深加固 + 竞价情绪全池就绪（2026-10-28 实盘数据链路复盘修复）：
