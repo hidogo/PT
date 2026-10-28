@@ -3,11 +3,17 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.6（2026-10-28）
+- 当前版本：v1.7（2026-10-28）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.6 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.7 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.7
+- v1.7 单日买入上限 2->3（2026-10-28）：`daily_max_buy` 由 2 调整为 3（用户确认 2026-10-28），
+  首板/回封/弹性/低吸/预期等全部买入闸门按 `g.daily['bought'] >= 3` 拦截，即每日最多 3 笔真实买入。
+- 验证：selftest_exp_rt 全量 PASS（新增 T144 默认值断言，既有 daily_max_buy 用例均显式设置不受影响）；
+  deploy 剔除注释编译通过。
 
 ### v1.6
 - v1.6 打板排单封单衰减撤单 + 弹性套利纳入北交所（2026-10-28）：

@@ -5268,5 +5268,9 @@ g.buy_commit = {'600003.XSHG': 1000.0}
 n = ns['_reconcile_daily_bought_slots']()
 ok('T143 已成交买单保留(桥缺持仓不误杀)', n == 0 and g.daily['bought'] == ['600003.XSHG'])
 
+# T144 v1.7 单日买入上限默认值=3
+ns = fresh()
+ok('T144 默认 daily_max_buy=3', ns['BLS']['daily_max_buy'] == 3)
+
 print('ALL DONE')
 

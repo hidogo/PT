@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.6（2026-10-28）
-# 部署核对：日志首行 `buysell_core init version=v1.6 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.7（2026-10-28）
+# 部署核对：日志首行 `buysell_core init version=v1.7 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.6"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-28）
+STRATEGY_VERSION = "v1.7"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-28）
 
 
 def _warn(msg):
@@ -56,7 +56,7 @@ BLS = {
     'ma5_first_5d': False,             # v0.69 默认按“当日首次触线”；True 可回退五日内首次回踩
     'ma5_buy_score_min': 50.0,         # 5D低吸独立评分门槛（L2 净大单加分已并入 score_now）
     'ma5_buy_ratio': 0.10,             # 5D低吸单笔仓位=总资产10%
-    'cold_secs': 60, 'daily_max_buy': 2,   # v1.1 每日最多 2 笔真实买入（用户确认 2026-10-27）
+    'cold_secs': 60, 'daily_max_buy': 3,   # v1.7 每日最多 3 笔真实买入（用户确认 2026-10-28）
     # 实盘单门控（v1.0）：DO_ORDER=True 放开全路径真实委托（买卖闭环）；EXPECT_ORDER 预期买入路径
     'EXPECT_ORDER': True,           # v1.0 实盘：预期买入发真实 order()
     'tick_exp_enabled': True,       # 预期买入走 tick_data 3s 事件触发（敏捷）
