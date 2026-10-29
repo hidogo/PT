@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.8"
+STRATEGY_VERSION = "v1.9"
 
 def _warn(msg):
 
@@ -7549,13 +7549,23 @@ def on_order_response(context, order_list):
                     for _sec, _pp in (getattr(g, 'pending', None) or {}).items():
                         if str(_pp.get('no') or '') == _ent:
                             _sec_m = _sec; _p = _pp
-                            _pp['status'] = _st
-                            if _st == 'FILLED':
-                                _pp['filled'] = int(_pp.get('qty') or 0)
-                            elif _st in ('CANCELLED', 'REJECTED'):
-                                _pp['filled'] = int(_pp.get('filled') or 0)
                             break
-                log.info('on_order_response %s status=%s' % (_ent, _st_raw))
+                if _sec_m is None:
+
+                    _sec_r = _norm_sec(_o_get(_o, 'stock_code', 'ticker', 'code', 'sec', 'symbol') or '')
+                    _pp2 = (getattr(g, 'pending', None) or {}).get(_sec_r) if _sec_r else None
+                    if _pp2:
+                        _sec_m = _sec_r; _p = _pp2
+                        if _ent:
+                            _p['no'] = _ent
+                if _sec_m:
+                    _p['status'] = _st
+                    if _st == 'FILLED':
+                        _p['filled'] = int(_p.get('qty') or 0)
+                    elif _st in ('CANCELLED', 'REJECTED'):
+                        _p['filled'] = int(_p.get('filled') or 0)
+                log.info('on_order_response %s status=%s sec=%s pend_side=%s' % (
+                    _ent, _st_raw, _sn(_sec_m) if _sec_m else '-', _p.get('side') or '-'))
                 _signal(_sec_m, 'ORD', int(_p.get('qty') or 0), float(_p.get('limit') or 0.0), 'ord', 'order_response', ent=_ent, status=_st)
                 if _sec_m and str(_p.get('side') or '') == 'buy' and _st in ('CANCELLED', 'REJECTED', 'FILLED'):
                     _buy_commit_rel(_sec_m, int(_p.get('qty') or 0), float(_p.get('limit') or 0.0))

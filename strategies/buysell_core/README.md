@@ -3,11 +3,22 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.8（2026-10-29）
+- 当前版本：v1.9（2026-10-29）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.8 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.9 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.9
+- v1.9 委托回报关联修复（2026-10-29 日志复核确认）：
+  - `on_order_response` 增加按股票代码关联兜底：`order()` 返回 UUID，而 PTrade 委托回报
+    `entrust_no` 为数字，旧逻辑匹配不上，日志出现 `[signal] side=ORD qty=0` 空代码，
+    且撤单/废单主推不会更新 pending、不释放买入名额与资金承诺（`_sell_inflight` 还可能
+    因 pending 卡 SENT 阻塞重卖）。现在按 code 关联并把网关委托号回填 `pending.no`，
+    后续回报与 `_board_queue_cancel` 撤单均使用真实 `entrust_no`。
+  - 委托回报日志补充 `sec/pend_side`，买卖方向与标的可直接核对。
+  - 测试：selftest_exp_rt 新增 T150（废单按 code 关联+释放名额/承诺/exp_fired）、
+    T151（已成按 code 关联回填 FILLED+释放承诺）、T152（排单撤单用网关委托号）；全量 PASS。
 
 ### v1.8
 - v1.8 竞价终态数据链路修复（2026-10-29 实盘日志复盘，用户确认后实施）：

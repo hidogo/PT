@@ -5336,5 +5336,42 @@ ns['on_trade_response'](ns['_ctx'], [{'stock_code': '600077.XSHG', 'entrust_bs':
 ok('T149 卖出回报 side=1 按在途委托判定 sell', ns['g'].daily['sold'] == ['600077.XSHG']
    and _sig149 and _sig149[-1][1] == 'sell' and ns['g'].pending['600077.XSHG']['filled'] == 700)
 
+# --- T150 v1.9 委托回报关联：order() UUID 与 PTrade 数字 entrust_no 无法匹配时按 code 关联 ---
+# （2026-10-29 日志 [signal] side=ORD qty=0 空代码根因；撤单/废单此前不释放名额与承诺）
+ns = fresh()
+ns['g'].daily = {'bought': ['600080.XSHG'], 'sold': []}
+ns['g'].pending = {'600080.XSHG': {'no': 'UUID1', 'side': 'buy', 'qty': 200, 'limit': 11.0,
+                                   'status': 'SENT', 'filled': 0}}
+ns['g'].buy_commit = {'600080.XSHG': 2200.0}
+ns['g'].exp_fired = {'600080.XSHG'}
+ns['on_order_response'](ns['_ctx'], [{'entrust_no': 655001746, 'order_status': '6',
+                                      'stock_code': '600080.XSHG'}])
+ok('T150 废单按 code 关联并回填网关委托号', ns['g'].pending['600080.XSHG']['no'] == '655001746'
+   and ns['g'].pending['600080.XSHG']['status'] == 'REJECTED')
+ok('T150 废单释放买入名额+承诺+exp_fired', ns['g'].daily['bought'] == []
+   and '600080.XSHG' not in ns['g'].buy_commit and '600080.XSHG' not in ns['g'].exp_fired)
+
+# T151 已成委托回报按 code 关联 -> pending FILLED + 释放资金承诺（名额保留）
+ns = fresh()
+ns['g'].daily = {'bought': ['600081.XSHG'], 'sold': []}
+ns['g'].pending = {'600081.XSHG': {'no': 'UUID2', 'side': 'buy', 'qty': 200, 'limit': 11.0,
+                                   'status': 'SENT', 'filled': 0}}
+ns['g'].buy_commit = {'600081.XSHG': 2200.0}
+ns['on_order_response'](ns['_ctx'], [{'entrust_no': 655001747, 'order_status': '8',
+                                      'stock_code': '600081.XSHG'}])
+ok('T151 已成按 code 关联回填 FILLED', ns['g'].pending['600081.XSHG']['status'] == 'FILLED'
+   and ns['g'].pending['600081.XSHG']['filled'] == 200
+   and ns['g'].pending['600081.XSHG']['no'] == '655001747')
+ok('T151 已成释放 buy_commit 保留名额', '600081.XSHG' not in ns['g'].buy_commit
+   and '600081.XSHG' in ns['g'].daily['bought'])
+
+# T152 排单撤单使用回填后的网关委托号
+ns = _bq_setup(); ns['g'].pending['600080.XSHG']['no'] = '655001746'
+ns['_seal_metrics'] = lambda sec: (300000.0, 4)
+ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4)
+_c152 = ns['_RECC']['calls'][-1]
+ok('T152 撤单使用网关委托号', _c152.get('cancel') is True and _c152.get('sec') == '655001746'
+   and _c152.get('ent') is None)
+
 print('ALL DONE')
 
