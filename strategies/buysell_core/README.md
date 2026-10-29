@@ -3,11 +3,35 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.11（2026-10-29）
+- 当前版本：v1.12（2026-10-29）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.11 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.12 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.12
+- v1.12 成交率与链路可观测性增强（2026-10-29 用户确认后实施）：
+  - 追高/预期买入限价优先取 L2 卖2价（`buy_limit_use_sell2=True`，`buy_limit_sell2_level=2`）：
+    `_order_limit('chase')` 在卖2价有效且不低于现价时用卖2价并记 `src=sell2`；缺失/低于现价
+    回退现价上浮 `buy_chase_pct`；打板仍挂涨停价、回踩仍挂现价、卖出路径不变；300/688/北交
+    弹性上限与涨停价封顶仍生效。发单前统一打印 `[order-limit] src=... limit=... up=... sell2=...`
+    供云端核对，`order_limit_src` 记录最近一次来源。
+  - [score-na] 恢复探针：`score_now` 因 spot/board 未就绪返回 None 时写入 `score_na_pending`，
+    1m 帧末 `_score_recover_probe` 数据就绪后补评并打 `[score-recover]`（每帧上限
+    `score_recover_probe_cap=20`），避免重启后评分链路静默失效。
+  - [lb-senti] 分钟级 heartbeat：`lb_senti_heartbeat_sec=60`，phase 变化立即打、之后每 60s
+    补打，并附方向闸门拒绝计数 `reject=sum(mid_high_skip:..,unq_space_skip:..)`；
+    `_lb_senti_buy_gate` 两个拦截分支统一走 `_lb_senti_gate_reject` 累计，拦截是否生效可审计。
+  - [sell-skip] 心跳节流：`sell_skip_heartbeat_sec=60`，同因 60s 一次并带窗口计数
+    `(positions=..., N次/60s)`，定位持仓为何不下单时不再静默。
+  - 情绪仓位闸门拦截计数：`_buy_pos_ok` 超限时 `pos_cap_skips` 当日累计，`[pos-cap]` 日志带
+    `total=`，配合心跳核对闸门实际拦截力度。
+  - 重启重建诊断：`_rebuild_first_zt_tick` 放弃日志追加 `last_px/up_px/had_zt`；
+    `_rows_have_limit_tx` 在逐笔回看中识别 09:30 后是否存在涨停价成交，区分「未涨停正确放弃」
+    与「已涨停回看失败」，`first_zt_rebuild_zt_seen` 记录证据。
+  - 测试：selftest_exp_rt 新增 T156-T164（卖2价/回退/打板定价、pos_cap 计数、sell-skip 心跳、
+    方向闸拒绝计数、score-recover、涨停价成交诊断、追高发单端到端卖2价、lb-senti 心跳对账），
+    全量 PASS、ops 28/28、pytest 50 passed、双编译通过。
 
 ### v1.11
 - v1.11 买入节奏与分时确认收敛（2026-10-29 各买入场景复盘，用户确认后实施）：

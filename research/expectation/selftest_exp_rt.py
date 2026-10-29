@@ -5489,5 +5489,156 @@ ns['on_trade_response'](ns['_ctx'], [{'stock_code': '600093.XSHG', 'entrust_bs':
 ok('T155 真实卖方向一致记 sold', '600093.XSHG' in ns['g'].daily['sold']
    and _sig155[-1][1] == 'sell' and not any('side-conflict' in m for m in _w155))
 
+# ================= v1.12 成交率与链路可观测性增强 =================
+def _cap_log(logs):
+    class CapLog:
+        def info(self, *a):
+            logs.append('info ' + (str(a[0]) % a[1:] if len(a) > 1 else str(a[0])))
+        def warn(self, *a):
+            logs.append('warn ' + str(a))
+        def error(self, *a):
+            logs.append('error ' + str(a))
+    return CapLog()
+
+# --- T156 v1.12 默认参数 ---
+ns = fresh()
+ok('T156 buy_limit_use_sell2 默认开启', ns['BLS'].get('buy_limit_use_sell2') is True)
+ok('T156 卖2档位=2', int(ns['BLS'].get('buy_limit_sell2_level') or 0) == 2)
+ok('T156 order_limit_log 默认开启', ns['BLS'].get('order_limit_log') is True)
+ok('T156 sell_skip 心跳 60s', abs(float(ns['BLS'].get('sell_skip_heartbeat_sec') or 0) - 60.0) < 1e-9)
+ok('T156 lb_senti 心跳 60s', abs(float(ns['BLS'].get('lb_senti_heartbeat_sec') or 0) - 60.0) < 1e-9)
+ok('T156 score 恢复探针上限 20', int(ns['BLS'].get('score_recover_probe_cap') or 0) == 20)
+
+# --- T157 卖2价追高限价：优先卖2、缺失/低于现价回退 pct、board 保持涨停价 ---
+ns = fresh()
+ns['g'].spot['600100.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0,
+                               'wavg_px': 10.0, 'trade_status': 'OPEN'}
+ns['BLS']['gear_cache_ttl'] = 0.0   # 每步立即重读 mock 盘口，防 DataHub 3s 缓存复用
+ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [10.01, 1000, 2], 2: [10.02, 2000, 3]}}
+ok('T157 _sell2_price 取卖2价', ns['_sell2_price']('600100.XSHG') == 10.02)
+lp = ns['_order_limit']('600100.XSHG', 'buy', 'chase')
+ok('T157 chase 用卖2价且 src=sell2', lp == 10.02 and ns['g'].order_limit_src == 'sell2')
+ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [10.01, 1000, 2]}}
+lp2 = ns['_order_limit']('600100.XSHG', 'buy', 'chase')
+ok('T157 卖2缺失回退 pct=10.08', lp2 == 10.08 and ns['g'].order_limit_src == 'pct')
+ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [9.99, 1000, 2], 2: [9.98, 2000, 3]}}
+lp3 = ns['_order_limit']('600100.XSHG', 'buy', 'chase')
+ok('T157 卖2低于现价回退 pct', lp3 == 10.08 and ns['g'].order_limit_src == 'pct')
+ok('T157 board 仍挂涨停价 src=board', ns['_order_limit']('600100.XSHG', 'buy', 'board') == 12.0
+   and ns['g'].order_limit_src == 'board')
+
+# --- T158 情绪仓位闸门拦截计数（pos_cap_skips） ---
+ns = fresh()
+ns['g'].spot['600101.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+ns['_sentiment_pos_cap'] = lambda ctx, sec: 0.1
+ns['_size_cash'] = lambda ctx: 10000.0
+ns['_pos_value'] = lambda p, sec: 0.0
+ok('T158 pos-cap 超限拦截并计数', ns['_buy_pos_ok'](ns['_ctx'], '600101.XSHG', 1000, 10.0) is False
+   and ns['g'].pos_cap_skips == 1)
+ok('T158 再次拦截计数累计', ns['_buy_pos_ok'](ns['_ctx'], '600101.XSHG', 1000, 10.0) is False
+   and ns['g'].pos_cap_skips == 2)
+
+# --- T159 [sell-skip] 60s 心跳 + 窗口计数 ---
+ns = fresh()
+ns['g'].holdings_keys_hint = ['600102.XSHG']
+logs159 = []
+ns['log'] = _cap_log(logs159)
+ns['_sn'] = lambda sec: sec
+ns['_audit_sell_skip']('600102.XSHG', 'amt0', now=1000.0)
+ns['_audit_sell_skip']('600102.XSHG', 'amt0', now=1001.0)
+ok('T159 60s 内心跳只打一次', len([x for x in logs159 if '[sell-skip]' in x]) == 1
+   and '1次/60s' in logs159[0])
+ns['_audit_sell_skip']('600102.XSHG', 'amt0', now=1061.0)
+ok('T159 60s 后心跳再打并带窗口计数', len([x for x in logs159 if '[sell-skip]' in x]) == 2
+   and '2次/60s' in logs159[1])
+
+# --- T160 方向闸门拒绝计数（mid_high_skip / unq_space_skip） ---
+ns = fresh()
+ns['_lb_senti_phase'] = lambda: {'phase': 'high_diverg'}
+ns['_lb_senti_tier'] = lambda sec: 'mid'
+ns['_exp_original_theme_leader'] = lambda sec: ''
+ok('T160 高位分歧拦截中位', ns['_lb_senti_buy_gate']('600103.XSHG') == (False, 'mid_high_skip(high_diverg)'))
+rc160 = ns['_lb_senti_state']().get('reject_cnt') or {}
+ok('T160 reject_cnt 累计 mid_high_skip', int(rc160.get('mid_high_skip(high_diverg)') or 0) == 1)
+ns['_lb_senti_buy_gate']('600103.XSHG')
+rc160b = ns['_lb_senti_state']().get('reject_cnt') or {}
+ok('T160 reject_cnt 再次累计', int(rc160b.get('mid_high_skip(high_diverg)') or 0) == 2)
+
+ns2 = fresh()
+ns2['_lb_senti_phase'] = lambda: {'phase': 'attack_high'}
+ns2['_lb_senti_tier'] = lambda sec: 'mid'
+ns2['_is_unique_lianban'] = lambda sec: True
+ns2['_unq_height_space'] = lambda sec: 0.10
+ns2['g'].sentiment = {'height_suppress': 4}
+r160, n160 = ns2['_lb_senti_buy_gate']('600104.XSHG')
+ok('T160 高度压制唯一连板拦截', r160 is False and n160.startswith('unq_space_skip'))
+rc160c = ns2['_lb_senti_state']().get('reject_cnt') or {}
+ok('T160 unq_space_skip 拒绝计数', int(list(rc160c.values())[0] or 0) == 1)
+
+# --- T161 [score-recover] 恢复探针：数据就绪后补评并清理 pending ---
+ns = fresh()
+logs161 = []
+ns['log'] = _cap_log(logs161)
+ns['_sn'] = lambda sec: sec
+ns['g'].spot['600105.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0}
+ns['_board_strength_info'] = lambda sec: (1.0, True)
+ns['score_now'] = lambda sec: 77.5
+ns['g'].score_na_pending = {'600105.XSHG': time.time() - 60.0}
+ns['_score_recover_probe']()
+ok('T161 数据就绪补评并清理 pending', '600105.XSHG' not in ns['g'].score_na_pending
+   and any('[score-recover]' in x and 'score=77.5' in x for x in logs161))
+
+# --- T162 重启重建诊断：区分是否见过涨停价成交 ---
+ns = fresh()
+ns['g'].spot['600106.XSHG'] = {'up_px': 11.0}
+ns['get_trading_day'] = lambda: datetime.date(2026, 10, 29)
+fields162 = ['business_time', 'hq_px']
+rows162 = [['20261029093000000', 10.5], ['20261029093100000', 11.0]]
+ok('T162 含涨停价成交判定 True', ns['_rows_have_limit_tx']('600106.XSHG', rows162, fields162) is True)
+rows162b = [['20261029093000000', 10.5], ['20261029093100000', 10.9]]
+ok('T162 无涨停价成交判定 False', ns['_rows_have_limit_tx']('600106.XSHG', rows162b, fields162) is False)
+
+# --- T163 追高发单端到端：真实 order limit 用卖2价 + [order-limit] src=sell2 ---
+ns = fresh()
+ns['BLS']['DO_ORDER'] = True
+ns['g'].spot['600107.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0,
+                               'wavg_px': 10.0, 'trade_status': 'OPEN'}
+ns['get_gear_price'] = lambda sec: {'ask_grp': {1: [10.01, 1000, 2], 2: [10.02, 2000, 3]}}
+ns['_seal_metrics'] = lambda sec: (1000000.0, 10)
+ns['_mid_board_avoid'] = lambda sec: False
+ns['_buy_pos_ok'] = lambda *a, **k: True
+logs163 = []
+ns['log'] = _cap_log(logs163)
+r163 = ns['place_order'](ns['_ctx'], '600107.XSHG', 'buy', note='t163')
+ok('T163 追高发单限价=卖2价', r163 is True and ns['_RECC']['calls'][-1]['limit_price'] == 10.02)
+ok('T163 [order-limit] src=sell2 审计', any('src=sell2' in x and 'limit=10.02' in x for x in logs163))
+
+# --- T164 [lb-senti] 60s 心跳 + reject 拒绝对账 ---
+ns = fresh()
+ns['g'].zt_lianban = {'600200.XSHG': {'board_cnt': 2}}
+ns['g'].first_zt = {'600200.XSHG': {'break': False}}
+ns['g'].now_dt = datetime.datetime(2026, 10, 16, 9, 40, 0)
+ns['_lb_senti_tier'] = lambda c: 'mid' if c == '600200.XSHG' else 'low'
+ns['_today_zt'] = lambda c: True
+ns['_dyn_theme_ferment'] = lambda: {}
+ns['_market_red_ratio'] = lambda: 0.60
+ns['_lb_senti_t100_passed'] = lambda: False
+ns['_sn'] = lambda sec: sec
+logs164 = []
+ns['log'] = _cap_log(logs164)
+ns['_lb_senti_gate_reject']('mid_high_skip(high_diverg)')
+fake164 = _FakeTime(5000.0)
+ns['time'] = fake164
+d164 = ns['_lb_senti_mid']()
+ok('T164 首次落档 phase=high_continue', d164['phase'] == 'high_continue')
+n164 = len([x for x in logs164 if '[lb-senti]' in x])
+fake164.t += 21.0   # 缓存过期（>15s）但 60s 心跳未到
+d164b = ns['_lb_senti_mid']()
+ok('T164 60s 内心跳不重复', len([x for x in logs164 if '[lb-senti]' in x]) == n164)
+fake164.t += 50.0   # 距上次心跳 >=60s
+d164c = ns['_lb_senti_mid']()
+ok('T164 60s 后 heartbeat 带 reject 对账', any('reject=1' in x and 'mid_high_skip:1' in x
+   for x in logs164))
+
 print('ALL DONE')
 
