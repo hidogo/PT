@@ -1,8 +1,7 @@
-
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.9"
+STRATEGY_VERSION = "v1.10"
 
 def _warn(msg):
 
@@ -5868,7 +5867,9 @@ def tick_sell_manager(context):
 
         if BLS.get('seal_low_sell_enabled', True) and ft.get('seal_low'):
             if sec not in (getattr(g, 'seal_sold', None) or set()):
-                _do_sell(context, sec, amt, 'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)))
+                _do_sell(context, sec, amt,
+                         'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)),
+                         mode='sell_break')
                 _mark_sold_event(sec, 'seal')
                 continue
 
@@ -7468,13 +7469,14 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         _signal(sec, side, qty, limit, mode, note, ent='', status='SIM')
         return True
     try:
-        ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
+        amt = qty if side == 'buy' else -qty
+        ent = order(sec, amt, limit_price=limit) if limit else order(sec, amt)
         _sb, _sbc = _seal_metrics(sec)
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
                           'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}
         if side == 'buy':
             _buy_commit_add(sec, qty, limit or px)
-        log.info('order sent %s %s qty=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, limit, ent, note, _lag))
+        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, amt, limit, ent, note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
         return True
     except Exception as e:
@@ -7599,8 +7601,10 @@ def on_trade_response(context, trade_list):
                 p = (getattr(g, 'pending', None) or {}).get(code) or {}
                 _ps = str(p.get('side') or '')
 
-                _eff = _ps if _ps in ('buy', 'sell') else _side
-                if _ps == 'sell':
+                _eff = _side if _side in ('buy', 'sell') else _ps
+                if _side in ('buy', 'sell') and _ps in ('buy', 'sell') and _side != _ps:
+                    _warn('side-conflict %s raw=%s pend=%s eff=%s' % (_sn(code), side, _ps, _eff))
+                if _eff == 'sell':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     p['last_trade_ts'] = time.time()
                     if p['filled'] >= int(p.get('qty') or p['filled']):
@@ -7614,7 +7618,7 @@ def on_trade_response(context, trade_list):
                     if code not in daily:
                         daily.append(code)
                     _save_state()
-                elif _ps == 'buy':
+                elif _eff == 'buy':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     if p['filled'] >= int(p.get('qty') or p['filled']):
                         p['status'] = 'FILLED'

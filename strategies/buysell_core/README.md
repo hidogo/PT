@@ -3,11 +3,23 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.9（2026-10-29）
+- 当前版本：v1.10（2026-10-29）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.9 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.10 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.10
+- v1.10 卖出方向与成交方向闭环修复（2026-10-29 日志复核确认，用户确认后实施）：
+  - `place_order` 卖单改为 `order(sec, -qty, limit_price=...)`：PTrade `order(amount)` 正数=买入、
+    负数=卖出，此前 buy/sell 统一传正 qty，全部卖单实际发成买单（日志 `数量：买入700`，成交回报
+    `side=1`，文投 19 笔卖单全部误买）。v1.8 只修了成交回报的日志/内部方向，真实发单方向未修。
+  - `on_trade_response` 成交方向改为真实 `entrust_bs/side` 优先（'1'=买 '2'=卖），pending 仅作缺失
+    回退；方向冲突打 `side-conflict` 告警，不再用 pending 掩盖真实方向。
+  - seal_low 封单衰减紧急卖出改走 `sell_break` 定价（L2 买N档 + 0.95 下限），避免陈旧现价限价卖单
+    不成交；`order sent` 日志增加 `amt=` 供云端核对。
+  - 测试：selftest_exp_rt 更新 T149（真实买方向优先+冲突告警）、新增 T153（卖单 amount 为负）、
+    T154（买单 amount 为正）、T155（真实卖方向一致正常记 sold）；全量 PASS。
 
 ### v1.9
 - v1.9 委托回报关联修复（2026-10-29 日志复核确认）：

@@ -5324,17 +5324,18 @@ ok('T148 1m 就绪 meet -> CM 可买', st2 == ns2['CM'])
 r2 = ns2['_attempt_expected_buy'](ns2['_ctx'], '600007.XSHG')
 ok('T148 1m 就绪触发买入', r2 is True and '600007.XSHG' in ns2['g'].daily['bought'])
 
-# --- T149 v1.8 成交回报方向：在途委托 side 为准（PTrade 卖出回报 side=1 不误读为 buy） ---
+# --- T149 v1.10 成交方向：真实 entrust_bs/side 优先，pending 不再掩盖方向 ---
 ns = fresh()
-ns['g'].pending = {'600077.XSHG': {'no': 'E4', 'side': 'sell', 'qty': 300, 'limit': 10.0,
+ns['g'].pending = {'600077.XSHG': {'no': 'E4', 'side': 'sell', 'qty': 700, 'limit': 10.0,
                                    'status': 'SENT', 'filled': 0}}
 ns['_hold_exp_init'] = lambda sec, force=False: None
-_sig149 = []
+_sig149 = []; _w149 = []
 ns['_signal'] = lambda sec, side, qty, px, mode, note, ent='', status='': _sig149.append((sec, side, qty, status))
+ns['_warn'] = lambda msg: _w149.append(msg)
 ns['on_trade_response'](ns['_ctx'], [{'stock_code': '600077.XSHG', 'entrust_bs': '1',
                                       'business_amount': 700, 'real_type': '1', 'status': '8'}])
-ok('T149 卖出回报 side=1 按在途委托判定 sell', ns['g'].daily['sold'] == ['600077.XSHG']
-   and _sig149 and _sig149[-1][1] == 'sell' and ns['g'].pending['600077.XSHG']['filled'] == 700)
+ok('T149 回报 buy 优先且冲突告警', '600077.XSHG' not in ns['g'].daily['sold']
+   and _sig149[-1][1] == 'buy' and any('side-conflict' in m for m in _w149))
 
 # --- T150 v1.9 委托回报关联：order() UUID 与 PTrade 数字 entrust_no 无法匹配时按 code 关联 ---
 # （2026-10-29 日志 [signal] side=ORD qty=0 空代码根因；撤单/废单此前不释放名额与承诺）
@@ -5372,6 +5373,34 @@ ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4)
 _c152 = ns['_RECC']['calls'][-1]
 ok('T152 撤单使用网关委托号', _c152.get('cancel') is True and _c152.get('sec') == '655001746'
    and _c152.get('ent') is None)
+
+# --- T153/T154 v1.10 下单方向：PTrade order(amount) 正=买/负=卖 ---
+ns = fresh(); ns['BLS']['DO_ORDER'] = True
+ns['g'].spot['600090.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+ns['_seal_metrics'] = lambda sec: (1000000.0, 10)
+r153 = ns['place_order'](ns['_ctx'], '600090.XSHG', 'sell', qty=300, note='t153', mode='sell')
+ok('T153 卖单 amount 为负', r153 is True and ns['_RECC']['calls'][-1]['qty'] == -300)
+
+ns = fresh(); ns['BLS']['DO_ORDER'] = True
+ns['g'].spot['600091.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
+ns['_seal_metrics'] = lambda sec: (1000000.0, 10)
+ns['_mid_board_avoid'] = lambda sec: False
+ns['_buy_pos_ok'] = lambda *a, **k: True
+r154 = ns['place_order'](ns['_ctx'], '600091.XSHG', 'buy', note='t154')
+ok('T154 买单 amount 为正', r154 is True and ns['_RECC']['calls'][-1]['qty'] > 0)
+
+# --- T155 v1.10 真实卖方向与 pending 一致 -> 正常记 sold，方向冲突不掩盖 ---
+ns = fresh()
+ns['g'].pending = {'600093.XSHG': {'no': 'E93', 'side': 'sell', 'qty': 700, 'limit': 10.0,
+                                   'status': 'SENT', 'filled': 0}}
+ns['_hold_exp_init'] = lambda sec, force=False: None
+_sig155 = []; _w155 = []
+ns['_signal'] = lambda sec, side, qty, px, mode, note, ent='', status='': _sig155.append((sec, side, qty, status))
+ns['_warn'] = lambda msg: _w155.append(msg)
+ns['on_trade_response'](ns['_ctx'], [{'stock_code': '600093.XSHG', 'entrust_bs': '2',
+                                      'business_amount': 700, 'real_type': '1', 'status': '8'}])
+ok('T155 真实卖方向一致记 sold', '600093.XSHG' in ns['g'].daily['sold']
+   and _sig155[-1][1] == 'sell' and not any('side-conflict' in m for m in _w155))
 
 print('ALL DONE')
 

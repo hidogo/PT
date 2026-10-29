@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.9（2026-10-29）
-# 部署核对：日志首行 `buysell_core init version=v1.9 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.10（2026-10-29）
+# 部署核对：日志首行 `buysell_core init version=v1.10 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.9"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-29）
+STRATEGY_VERSION = "v1.10"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-29）
 
 
 def _warn(msg):
@@ -6251,7 +6251,9 @@ def tick_sell_manager(context):
         # \u5c01\u5355\u5927\u51cf\u5356\u51fa\uff1a\u5c01\u5355<=\u9996\u5c01*seal_fail_ratio \u6216\u59d4\u6258\u7b14\u6570\u8870\u7aed\uff08seal_low \u9996\u89e6\u53d1\uff0c\u9632\u70b8\u677f\u63d0\u524d\u8d70\uff09
         if BLS.get('seal_low_sell_enabled', True) and ft.get('seal_low'):
             if sec not in (getattr(g, 'seal_sold', None) or set()):
-                _do_sell(context, sec, amt, 'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)))
+                _do_sell(context, sec, amt,
+                         'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)),
+                         mode='sell_break')   # v1.10 封单衰减紧急卖出统一 L2 买N档+0.95 下限定价
                 _mark_sold_event(sec, 'seal')
                 continue
         # \u6025\u5356\u8fc1\u79fb\uff1aP1 \u7eff\u5f00 / P2E \u9884\u671f miss / P3 \u6b62\u635f\uff083s \u54cd\u5e94\uff1b\u6838\u5356\u9650\u4ef7\u8dcc\u505c\u5730\u677f\u4ef7\u4fdd\u6210\u4ea4\uff09
@@ -7931,13 +7933,14 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         _signal(sec, side, qty, limit, mode, note, ent='', status='SIM')
         return True
     try:
-        ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
+        amt = qty if side == 'buy' else -qty   # v1.10 PTrade order(amount) 正=买/负=卖
+        ent = order(sec, amt, limit_price=limit) if limit else order(sec, amt)
         _sb, _sbc = _seal_metrics(sec)   # v1.6 打板排单封单基准（封单衰减撤单用）
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
                           'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}
         if side == 'buy':
             _buy_commit_add(sec, qty, limit or px)   # v0.64 记入在途买单承诺（资金实时扣减）
-        log.info('order sent %s %s qty=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, limit, ent, note, _lag))
+        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, amt, limit, ent, note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
         return True
     except Exception as e:
@@ -8067,11 +8070,12 @@ def on_trade_response(context, trade_list):
                 _side = _trade_side(side)
                 p = (getattr(g, 'pending', None) or {}).get(code) or {}
                 _ps = str(p.get('side') or '')
-                # v1.8 成交方向以在途委托 side 为准：PTrade 成交回报 entrust_bs/side 语义随柜台而异
-                # （2026-10-29 文投卖出回报 side=1 被 _trade_side 误读为 buy，内部按 pending 分支不受影响，
-                #  但 _signal/日志方向失真）；无在途委托时才回退字段映射。
-                _eff = _ps if _ps in ('buy', 'sell') else _side
-                if _ps == 'sell':
+                # v1.10 成交方向优先真实 entrust_bs/side（PTrade '1'=买 '2'=卖）；pending 仅作缺失回退。
+                # 方向冲突必须告警：2026-10-29 卖出误发为买入时回报 side=1，v1.8 用 pending 掩盖了该缺陷。
+                _eff = _side if _side in ('buy', 'sell') else _ps
+                if _side in ('buy', 'sell') and _ps in ('buy', 'sell') and _side != _ps:
+                    _warn('side-conflict %s raw=%s pend=%s eff=%s' % (_sn(code), side, _ps, _eff))
+                if _eff == 'sell':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     p['last_trade_ts'] = time.time()
                     if p['filled'] >= int(p.get('qty') or p['filled']):
@@ -8085,7 +8089,7 @@ def on_trade_response(context, trade_list):
                     if code not in daily:
                         daily.append(code)
                     _save_state()
-                elif _ps == 'buy':
+                elif _eff == 'buy':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     if p['filled'] >= int(p.get('qty') or p['filled']):
                         p['status'] = 'FILLED'
