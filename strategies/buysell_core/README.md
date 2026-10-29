@@ -3,11 +3,34 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.7（2026-10-28）
+- 当前版本：v1.8（2026-10-29）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.7 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.8 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.8
+- v1.8 竞价终态数据链路修复（2026-10-29 实盘日志复盘，用户确认后实施）：
+  - 一字封单基准口径修正：`_mark_one_word_open` 直接以 `total_bidqty` 金额元作 `seal_base`，
+    不再乘 `100*up`（快照 `total_offerqty` 与 L2 `offer_sum` 实测等值验证口径）；
+    与 L2 封单金额量级差 >5 倍时保守等待 `_exp_one_word` 的 L2 base_init。
+    修复 2026-10-29 豪恩汽电（seal=400 vs base=99.9亿）、实丰文化、山东矿机
+    `ratio=0.00 -> CS` 一字票被误弃。
+  - 打板排单封单衰减撤单签名修复：`cancel_order(ent)`（云端 PTrade 仅 1 个位置参数），
+    修复富佳股份/中重科技 `IQTypeError` 导致 v1.6 撤单链路全失败。
+  - 竞价情绪池补快照：`_fill_zt_spot` 对已在 `g.spot` 但 open/preclose 缺失的票重拉并合并字段，
+    修复 09:25 `not_ready mid=4/7 low=60/62` 档位延迟到 09:31 的问题。
+  - `pending_meet` 硬就绪门：新增 `_intraday_confirmed_ready`（1m>=2 根或评分/board 就绪），
+    修复 09:30:04-05 中重科技/富佳股份/徕木股份 spot 三字段就绪即 `score=0.0 dir=neutral` 误发单。
+  - 可卖数量字段链路补齐：`_sellable_detail` 兼容 QMT 桥 `m_nCanUseVolume/m_nPREnableVolume/m_nVolume`
+    （`m_nVolume` 扣冻结量），`[sell-skip] amt0` 日志带字段/是否可卖字段/是否当日买入，区分
+    “T+1 当日不可卖（正常）”与“字段缺失（链路问题）”，不再误导为卖出监控断链。
+  - 成交回报方向日志修正：`on_trade_response` 以在途委托 `side` 为准（`_signal` 同步修正），
+    修复 2026-10-29 文投控股卖出成交回报 `side=1` 被 `_trade_side` 误读为 buy 的日志失真；
+    内部 `daily.sold` 按 pending 分支记录，不受影响。
+  - 测试：selftest_exp_rt 新增 T145-T149（封单金额口径+量级护栏、cancel_order 单参、
+    情绪池补快照、meet 硬就绪门、成交方向以在途委托为准），T95a 断言同步改为金额口径；
+    deploy 剔除注释编译通过。
 
 ### v1.7
 - v1.7 单日买入上限 2->3（2026-10-28）：`daily_max_buy` 由 2 调整为 3（用户确认 2026-10-28），

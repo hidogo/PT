@@ -1,7 +1,8 @@
+
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.7"
+STRATEGY_VERSION = "v1.8"
 
 def _warn(msg):
 
@@ -173,6 +174,7 @@ BLS = {
     'vwap_weak_confirm_sec': 6,
     'vwap_weak_at_limit_exempt': True,
     'exp_entry_type_resync': True,
+    'exp_meet_score_ready': True,
     'first_board_buy_enabled': True,
     'first_board_minute': 10,
     'first_board_seal_min': 200000.0,
@@ -1376,7 +1378,7 @@ def _board_queue_cancel(sec, seal, bids):
             return False
         _cc.add(sec)
         try:
-            cancel_order(sec, ent)
+            cancel_order(ent)
         except Exception as _e:
             _warn('board queue cancel fail %s: %r' % (_sn(sec), _e))
             return False
@@ -1574,7 +1576,14 @@ def _mark_one_word_open():
 
                 if float(g.seal_base.get(sec, 0.0) or 0.0) <= 0 and _tb is not None:
                     try:
-                        g.seal_base[sec] = float(_tb) * 100.0 * up
+                        _amt = float(_tb or 0.0)
+                        if _amt > 0:
+                            _seal0, _bids0 = _seal_metrics(sec)
+                            if _seal0 > 0 and (_amt > _seal0 * 5.0 or _amt < _seal0 * 0.2):
+                                log.info('[seal] %s 快照封单口径待核对 tb=%.0f seal=%.0f -> 等 L2 base_init' % (
+                                    _sn(sec), _amt, _seal0))
+                            else:
+                                g.seal_base[sec] = _amt
                     except Exception:
                         pass
                 log.info('[seal] %s 一字板(开=涨停价且无卖盘) sell1=%s buy1=%s -> 买入不排队' % (_sn(sec), _tq, _tb))
@@ -1698,6 +1707,22 @@ def _intraday_ready_detail(sec):
         return ''
     except Exception:
         return ''
+
+def _intraday_confirmed_ready(sec):
+
+    try:
+        dh = _get_ds()
+        if dh.cached('m1_ready2', sec, 3.0, lambda: _calc_intraday_bars_ready(sec), budget='m1', prio=1):
+            return True
+        if _spot_ready(sec) and BLS.get('exp_meet_score_ready', True):
+            try:
+                return bool(dh.cached('board_ready2', sec, 5.0,
+                                      lambda: _board_strength_info(sec)[1], budget='m1', prio=1))
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return False
 
 def _eval_intraday(sec, auction_status):
     if auction_status in (PS, CS):
@@ -3294,15 +3319,30 @@ def _lb_senti_t100_passed():
 def _fill_zt_spot():
 
     zt = getattr(g, 'zt_lianban', {}) or {}
-    _need = [sec for sec in zt if sec not in g.spot]
+
+    def _incomplete(sec):
+        s2 = g.spot.get(sec) or {}
+        return not (float(s2.get('open_px') or 0.0) > 0 and float(s2.get('preclose_px') or 0.0) > 0)
+
+    _need = [sec for sec in zt if _incomplete(sec)]
     if not _need:
         return 0
     try:
         _sn = _get_snapshot_many(_need, len(_need)) or {}
         _got = 0
         for _cc, _dd in _sn.items():
-            if _dd and _cc not in g.spot:
-                g.spot[_cc] = _dd
+            if not _dd:
+                continue
+            _old = g.spot.get(_cc) or {}
+            if _old:
+                _old = dict(_old)
+                for _k, _v in _dd.items():
+                    if _old.get(_k) in (None, 0, '', 0.0):
+                        _old[_k] = _v
+                g.spot[_cc] = _old
+            else:
+                g.spot[_cc] = dict(_dd)
+            if not _incomplete(_cc):
                 _got += 1
         if _got:
             log.info('[lb-senti] auction 全池补快照 got=%d/%d' % (_got, len(_need)))
@@ -4096,6 +4136,8 @@ def _exp_rt_status(code):
         return PM, "observe_auction_exceed %.1f%%" % actual
     if "miss" in exp_status:
         return CS, "expect_miss"
+    if not _intraday_confirmed_ready(code):
+        return PM, "intraday_not_confirmed_ready"
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
 
@@ -5492,21 +5534,43 @@ def _sellable_source():
         p = {}
     return p if isinstance(p, dict) and p else {}
 
-def _sellable(sec, positions):
+_SEL_FIELDS_AVAIL = ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
+                     'real_enable_amount', 'm_nCanUseVolume', 'm_nPREnableVolume',
+                     'can_use_volume', 'enable_volume', 'sellable_volume')
+_SEL_FIELDS_TOTAL = ('current_amount', 'amount', 'hold_amount', 'holding_amount', 'm_nVolume', 'volume')
+
+def _sellable_detail(sec, positions):
 
     p = positions.get(sec)
-    for key in ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
-                'real_enable_amount', 'current_amount', 'amount', 'hold_amount', 'holding_amount'):
+    for key in _SEL_FIELDS_AVAIL:
         try:
             v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
             if v is None:
                 continue
-            return max(int(float(v) or 0), 0)
+            return max(int(float(v) or 0), 0), key, True, False
+        except Exception:
+            continue
+    for key in _SEL_FIELDS_TOTAL:
+        try:
+            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
+            if v is None:
+                continue
+            qty = max(int(float(v) or 0), 0)
+            if key == 'm_nVolume':
+                try:
+                    fv = p.get('m_nFrozenVolume') if isinstance(p, dict) else getattr(p, 'm_nFrozenVolume', None)
+                    qty = max(qty - max(int(float(fv) or 0), 0), 0)
+                except Exception:
+                    pass
+            return qty, key, False, True
         except Exception:
             continue
     if p is not None:
         _audit_pos_fields(sec, p)
-    return 0
+    return 0, '', False, False
+
+def _sellable(sec, positions):
+    return _sellable_detail(sec, positions)[0]
 
 def _limit_down_price(sec):
 
@@ -5688,7 +5752,10 @@ def sell_manager(context):
             pass
         amt = _sellable(_raw, positions)
         if amt <= 0:
-            _audit_sell_skip(sec, 'amt0(lookup key=%s)' % _raw)
+            _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
+            _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
+            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total=%d t1=%s)' % (
+                _raw, _k0 or '-', int(_av0), int(_tv0), _bought_today))
             continue
         now = time.time()
         if _sell_inflight(sec):
@@ -7521,6 +7588,8 @@ def on_trade_response(context, trade_list):
                 _side = _trade_side(side)
                 p = (getattr(g, 'pending', None) or {}).get(code) or {}
                 _ps = str(p.get('side') or '')
+
+                _eff = _ps if _ps in ('buy', 'sell') else _side
                 if _ps == 'sell':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     p['last_trade_ts'] = time.time()
@@ -7542,8 +7611,9 @@ def on_trade_response(context, trade_list):
                     else:
                         p['status'] = 'PARTIAL'
                     _buy_commit_rel(code, qty, float(p.get('limit') or 0.0))
-                log.info('on_trade_response %s qty=%s side=%s' % (_sn(code), qty, side))
-                _signal(code, _side or _ps or side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
+                log.info('on_trade_response %s qty=%s raw_side=%s pend_side=%s eff=%s' % (
+                    _sn(code), qty, side, _ps, _eff))
+                _signal(code, _eff or _ps or side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
             except Exception:
                 continue
     except Exception as e:

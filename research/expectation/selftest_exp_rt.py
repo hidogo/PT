@@ -3420,7 +3420,7 @@ g.spot['600001.XSHG'] = {'open_px': 11.0, 'up_px': 11.0, 'last_px': 11.0, 'precl
 _rec = []; ns['log'] = types.SimpleNamespace(info=lambda *a: _rec.append(a[0] if a else ''), warn=lambda *a: None, error=lambda *a: None)
 ns['_mark_one_word_open']()
 ok('T95 真一字(卖1=0) 标 one_word', '600001.XSHG' in g.one_word_open)
-ok('T95 真一字 封单基准回填', abs(g.seal_base.get('600001.XSHG', 0.0) - 5000 * 100 * 11.0) < 1e-6)
+ok('T95 真一字 封单基准回填(金额口径)', abs(g.seal_base.get('600001.XSHG', 0.0) - 5000) < 1e-6)
 ok('T95 真一字 不排队日志', any('买入不排队' in m for m in _rec))
 
 # T95b 卖1>0（非真一字）-> 不标 + playable 日志，不误标不回填
@@ -5271,6 +5271,70 @@ ok('T143 已成交买单保留(桥缺持仓不误杀)', n == 0 and g.daily['boug
 # T144 v1.7 单日买入上限默认值=3
 ns = fresh()
 ok('T144 默认 daily_max_buy=3', ns['BLS']['daily_max_buy'] == 3)
+
+# --- T145 v1.8 一字封单基准金额口径：total_bidqty 已是金额元 ---
+# （2026-10-29 豪恩/实丰/山东矿机 base 被 *100*up 放大 100*up 倍 -> ratio=0.00 误判 CS 根因）
+ns = _ow_ns(); g = ns['g']
+g.spot['600001.XSHG'] = {'open_px': 11.0, 'up_px': 11.0, 'last_px': 11.0, 'preclose_px': 10.0,
+                         'total_offerqty': 0, 'total_bidqty': 29399280}
+ns['_seal_metrics'] = lambda sec: (29399280.0, 1086)
+ns['_mark_one_word_open']()
+ok('T145 快照金额口径直接作 seal_base', abs(g.seal_base.get('600001.XSHG', 0.0) - 29399280.0) < 1e-6)
+ns = _ow_ns(); g = ns['g']
+g.spot['600002.XSHG'] = {'open_px': 11.0, 'up_px': 11.0, 'last_px': 11.0, 'preclose_px': 10.0,
+                         'total_offerqty': 0, 'total_bidqty': 800000}
+ns['_seal_metrics'] = lambda sec: (400.0, 2)   # L2 与快照量级差 2000x：保守不落基准，等 L2 base_init
+ns['_mark_one_word_open']()
+ok('T145 量级护栏不落基准', g.seal_base.get('600002.XSHG') is None)
+st, _r = ns['_exp_one_word']('600002.XSHG')
+ok('T145 等 L2 base_init', st == ns['AW'] and 'seal_base_init' in _r)
+
+# --- T146 v1.8 打板排单撤单：云端 cancel_order 单位置参数 ---
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)
+ok('T146 封单衰减撤单成功', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True)
+_c146 = ns['_RECC']['calls'][-1]
+ok('T146 cancel_order 单位置参数(ent)', _c146.get('cancel') is True and _c146.get('ent') is None and _c146.get('sec') == 'E80')
+
+# --- T147 v1.8 竞价情绪池补快照：已在 spot 但 open/preclose 缺失也重拉合并 ---
+ns = fresh(); g = ns['g']
+g.zt_lianban = {'600001.XSHG': {'board_cnt': 1}, '600002.XSHG': {'board_cnt': 1}}
+g.spot = {'600001.XSHG': {'open_px': 11.0, 'preclose_px': 10.0, 'last_px': 11.0},
+          '600002.XSHG': {'last_px': 11.0}}
+ns['_get_snapshot_many'] = lambda secs, n: {'600002.XSHG': {'open_px': 11.0, 'preclose_px': 10.0, 'last_px': 11.0}}
+got = ns['_fill_zt_spot']()
+ok('T147 缺 open/preclose 重拉补全', got == 1 and float(g.spot['600002.XSHG']['open_px']) == 11.0
+   and float(g.spot['600002.XSHG']['preclose_px']) == 10.0)
+ok('T147 已完整票不重拉', g.spot['600001.XSHG'].get('total_bidqty') is None)
+
+# --- T148 v1.8 pending_meet 硬就绪门：1m>=2 根或评分就绪才允许 CM ---
+# （2026-10-29 09:30:04-05 中重/富佳/徕木 spot 三字段就绪但 board/1m data_na 即误发单）
+ns = _meet_ns('600006.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
+                              'wavg_px': 10.0, 'trade_status': 'OPEN'})
+ns['_board_strength_info'] = lambda sec: (0.0, False)   # 09:30 首帧 board data_na
+st, reason = ns['_exp_rt_status']('600006.XSHG')
+ok('T148 1m/评分未就绪 meet -> PM 等待', st == ns['PM'] and reason == 'intraday_not_confirmed_ready')
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600006.XSHG')
+ok('T148 未就绪不误发单', r is None and '600006.XSHG' not in ns['g'].daily['bought']
+   and '600006.XSHG' not in ns['g'].exp_fired)
+ns2 = _meet_ns('600007.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
+                               'wavg_px': 10.0, 'trade_status': 'OPEN'})
+ns2['_calc_intraday_bars_ready'] = lambda sec: True   # 09:31 1m>=2 根
+st2, reason2 = ns2['_exp_rt_status']('600007.XSHG')
+ok('T148 1m 就绪 meet -> CM 可买', st2 == ns2['CM'])
+r2 = ns2['_attempt_expected_buy'](ns2['_ctx'], '600007.XSHG')
+ok('T148 1m 就绪触发买入', r2 is True and '600007.XSHG' in ns2['g'].daily['bought'])
+
+# --- T149 v1.8 成交回报方向：在途委托 side 为准（PTrade 卖出回报 side=1 不误读为 buy） ---
+ns = fresh()
+ns['g'].pending = {'600077.XSHG': {'no': 'E4', 'side': 'sell', 'qty': 300, 'limit': 10.0,
+                                   'status': 'SENT', 'filled': 0}}
+ns['_hold_exp_init'] = lambda sec, force=False: None
+_sig149 = []
+ns['_signal'] = lambda sec, side, qty, px, mode, note, ent='', status='': _sig149.append((sec, side, qty, status))
+ns['on_trade_response'](ns['_ctx'], [{'stock_code': '600077.XSHG', 'entrust_bs': '1',
+                                      'business_amount': 700, 'real_type': '1', 'status': '8'}])
+ok('T149 卖出回报 side=1 按在途委托判定 sell', ns['g'].daily['sold'] == ['600077.XSHG']
+   and _sig149 and _sig149[-1][1] == 'sell' and ns['g'].pending['600077.XSHG']['filled'] == 700)
 
 print('ALL DONE')
 

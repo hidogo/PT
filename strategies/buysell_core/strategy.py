@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.7（2026-10-28）
-# 部署核对：日志首行 `buysell_core init version=v1.7 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.8（2026-10-29）
+# 部署核对：日志首行 `buysell_core init version=v1.8 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.7"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-28）
+STRATEGY_VERSION = "v1.8"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-29）
 
 
 def _warn(msg):
@@ -184,6 +184,7 @@ BLS = {
     'vwap_weak_confirm_sec': 6,          # v0.73 VWAP 弱化两帧确认（连续弱 N 秒才弃，允许回封恢复）
     'vwap_weak_at_limit_exempt': True,   # v0.73 贴板/封死豁免 VWAP 弱化（px>=up*0.998）
     'exp_entry_type_resync': True,       # v0.73 开盘重标 buy 候选 one_word/normal（防一字走普通超预期路径）
+    'exp_meet_score_ready': True,        # v1.8 pending_meet 评分就绪兜底（1m<2 根时 board 就绪也放行）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 200000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
@@ -1423,6 +1424,7 @@ def _board_queue_cancel(sec, seal, bids):
     # v1.6 打板未成交转排单：封单衰减即撤单（防排队等到破板才以涨停价成交）。
     # 基准取排单挂出时的封单（place_order 落 pending 时记录）；旧单缺省回退 first_zt 首封。
     # 封单阈值对齐卖出链 seal_fail_ratio（唯一身位用更容忍的 unique 阈值）；委托笔数骤降视为撤单松动。
+    # v1.8 云端 PTrade cancel_order 仅收 1 个位置参数（2026-10-29 富佳/中重 IQTypeError 根因）。
     try:
         pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
         if str(pp.get('side') or '') != 'buy' or int(pp.get('filled') or 0) > 0:
@@ -1455,7 +1457,7 @@ def _board_queue_cancel(sec, seal, bids):
             return False   # 已撤（防同帧/重试重复撤）
         _cc.add(sec)
         try:
-            cancel_order(sec, ent)
+            cancel_order(ent)
         except Exception as _e:
             _warn('board queue cancel fail %s: %r' % (_sn(sec), _e))
             return False
@@ -1665,11 +1667,20 @@ def _mark_one_word_open():
             _tb = s.get('total_bidqty')
             if _sealed_now(sec):
                 g.one_word_open.add(sec)
-                # 竞价终态封单基准回填（买1=涨停价封单≈total_bidqty 手；金额口径对齐 _seal_metrics）：
-                # _exp_one_word 首帧即可判 CX/CS，不必空等 L2 base_init
+                # 竞价终态封单基准回填（金额口径对齐 _seal_metrics）。
+                # v1.8 total_bidqty 实测已是金额元（快照 total_offerqty 与 L2 offer_sum 等值验证），
+                # 不再乘 100*up（2026-10-29 豪恩/实丰/山东矿机 base 放大 100*up 倍误判 CS 根因）；
+                # 与 L2 封单金额量级差异过大时保守等待 _exp_one_word 的 L2 base_init。
                 if float(g.seal_base.get(sec, 0.0) or 0.0) <= 0 and _tb is not None:
                     try:
-                        g.seal_base[sec] = float(_tb) * 100.0 * up
+                        _amt = float(_tb or 0.0)
+                        if _amt > 0:
+                            _seal0, _bids0 = _seal_metrics(sec)
+                            if _seal0 > 0 and (_amt > _seal0 * 5.0 or _amt < _seal0 * 0.2):
+                                log.info('[seal] %s 快照封单口径待核对 tb=%.0f seal=%.0f -> 等 L2 base_init' % (
+                                    _sn(sec), _amt, _seal0))
+                            else:
+                                g.seal_base[sec] = _amt
                     except Exception:
                         pass
                 log.info('[seal] %s 一字板(开=涨停价且无卖盘) sell1=%s buy1=%s -> 买入不排队' % (_sn(sec), _tq, _tb))
@@ -1798,6 +1809,23 @@ def _intraday_ready_detail(sec):
         return ''
     except Exception:
         return ''
+
+def _intraday_confirmed_ready(sec):
+    # v1.8 pending_meet 硬就绪：1m 已出 >=2 根，或评分链路（board）就绪；
+    # 防 09:30 首帧 spot 三字段就绪但 1m/评分 data_na 时 CM 误发单（2026-10-29 中重/富佳/徕木）。
+    try:
+        dh = _get_ds()
+        if dh.cached('m1_ready2', sec, 3.0, lambda: _calc_intraday_bars_ready(sec), budget='m1', prio=1):
+            return True
+        if _spot_ready(sec) and BLS.get('exp_meet_score_ready', True):
+            try:
+                return bool(dh.cached('board_ready2', sec, 5.0,
+                                      lambda: _board_strength_info(sec)[1], budget='m1', prio=1))
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return False
 
 def _eval_intraday(sec, auction_status):
     if auction_status in (PS, CS):
@@ -3514,16 +3542,33 @@ def _lb_senti_t100_passed():
 
 def _fill_zt_spot():
     # v1.4 B：竞价情绪全池缺 spot 批量补快照（复用 _elastic_yizi_scan 范式，0 额外逐只串行）
+    # v1.8 C：已在 spot 但 open/preclose 缺失的票也重拉并合并字段
+    # （2026-10-29 not_ready mid=4/7 low=60/62 根因：仅补 sec not in g.spot，漏掉 open_px=0 的在库票）
     zt = getattr(g, 'zt_lianban', {}) or {}
-    _need = [sec for sec in zt if sec not in g.spot]
+
+    def _incomplete(sec):
+        s2 = g.spot.get(sec) or {}
+        return not (float(s2.get('open_px') or 0.0) > 0 and float(s2.get('preclose_px') or 0.0) > 0)
+
+    _need = [sec for sec in zt if _incomplete(sec)]
     if not _need:
         return 0
     try:
         _sn = _get_snapshot_many(_need, len(_need)) or {}
         _got = 0
         for _cc, _dd in _sn.items():
-            if _dd and _cc not in g.spot:
-                g.spot[_cc] = _dd
+            if not _dd:
+                continue
+            _old = g.spot.get(_cc) or {}
+            if _old:
+                _old = dict(_old)
+                for _k, _v in _dd.items():
+                    if _old.get(_k) in (None, 0, '', 0.0):
+                        _old[_k] = _v
+                g.spot[_cc] = _old
+            else:
+                g.spot[_cc] = dict(_dd)
+            if not _incomplete(_cc):
                 _got += 1
         if _got:
             log.info('[lb-senti] auction 全池补快照 got=%d/%d' % (_got, len(_need)))
@@ -4372,6 +4417,8 @@ def _exp_rt_status(code):
         return PM, "observe_auction_exceed %.1f%%" % actual   # 竞价超预期初步确认 -> 观察，等分时
     if "miss" in exp_status:
         return CS, "expect_miss"
+    if not _intraday_confirmed_ready(code):
+        return PM, "intraday_not_confirmed_ready"   # v1.8 meet/未标注：1m 或评分未就绪 -> 等待，不误发单
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
 
@@ -5852,22 +5899,45 @@ def _sellable_source():
         p = {}
     return p if isinstance(p, dict) and p else {}
 
-def _sellable(sec, positions):
-    # 可卖数量：优先 enable_amount 等可卖类字段（A股T+1，T日买入不可卖=0，不回落总量），
-    # 缺可卖字段才回退持仓量 amount/current_amount；字段名随柜台而异(docs/06)，容忍 str/int/float。
+_SEL_FIELDS_AVAIL = ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
+                     'real_enable_amount', 'm_nCanUseVolume', 'm_nPREnableVolume',
+                     'can_use_volume', 'enable_volume', 'sellable_volume')
+_SEL_FIELDS_TOTAL = ('current_amount', 'amount', 'hold_amount', 'holding_amount', 'm_nVolume', 'volume')
+
+def _sellable_detail(sec, positions):
+    # v1.8 可卖数量明细：(qty, key, avail_present, total_present)。
+    # 可卖类字段优先（A股T+1：当日买入 enable=0 正确返回 0，不回退总量）；
+    # 兼容 QMT 桥 m_nCanUseVolume/m_nPREnableVolume/m_nVolume（m_nVolume 扣冻结量），供 [sell-skip] 定位链路。
     p = positions.get(sec)
-    for key in ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
-                'real_enable_amount', 'current_amount', 'amount', 'hold_amount', 'holding_amount'):
+    for key in _SEL_FIELDS_AVAIL:
         try:
             v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
             if v is None:
                 continue
-            return max(int(float(v) or 0), 0)   # 有可卖字段即采用(含0=当日不可卖), 不回落总量
+            return max(int(float(v) or 0), 0), key, True, False
+        except Exception:
+            continue
+    for key in _SEL_FIELDS_TOTAL:
+        try:
+            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
+            if v is None:
+                continue
+            qty = max(int(float(v) or 0), 0)
+            if key == 'm_nVolume':
+                try:
+                    fv = p.get('m_nFrozenVolume') if isinstance(p, dict) else getattr(p, 'm_nFrozenVolume', None)
+                    qty = max(qty - max(int(float(fv) or 0), 0), 0)
+                except Exception:
+                    pass
+            return qty, key, False, True
         except Exception:
             continue
     if p is not None:
         _audit_pos_fields(sec, p)
-    return 0
+    return 0, '', False, False
+
+def _sellable(sec, positions):
+    return _sellable_detail(sec, positions)[0]
 
 def _limit_down_price(sec):
     # 跌停地板价 = 前收 x (1 - 板块跌停幅)，供核卖限价保证下跌成交（无前收返回 None）
@@ -6061,7 +6131,10 @@ def sell_manager(context):
             pass
         amt = _sellable(_raw, positions)
         if amt <= 0:
-            _audit_sell_skip(sec, 'amt0(lookup key=%s)' % _raw)
+            _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
+            _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
+            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total=%d t1=%s)' % (
+                _raw, _k0 or '-', int(_av0), int(_tv0), _bought_today))
             continue
         now = time.time()
         if _sell_inflight(sec):            # 订单/成交回报驱动的去重：有未终态卖单在途则跳过(防叠单)
@@ -7982,6 +8055,10 @@ def on_trade_response(context, trade_list):
                 _side = _trade_side(side)
                 p = (getattr(g, 'pending', None) or {}).get(code) or {}
                 _ps = str(p.get('side') or '')
+                # v1.8 成交方向以在途委托 side 为准：PTrade 成交回报 entrust_bs/side 语义随柜台而异
+                # （2026-10-29 文投卖出回报 side=1 被 _trade_side 误读为 buy，内部按 pending 分支不受影响，
+                #  但 _signal/日志方向失真）；无在途委托时才回退字段映射。
+                _eff = _ps if _ps in ('buy', 'sell') else _side
                 if _ps == 'sell':
                     p['filled'] = int(p.get('filled') or 0) + qty
                     p['last_trade_ts'] = time.time()
@@ -8003,8 +8080,9 @@ def on_trade_response(context, trade_list):
                     else:
                         p['status'] = 'PARTIAL'
                     _buy_commit_rel(code, qty, float(p.get('limit') or 0.0))   # 按成交额释放承诺
-                log.info('on_trade_response %s qty=%s side=%s' % (_sn(code), qty, side))
-                _signal(code, _side or _ps or side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
+                log.info('on_trade_response %s qty=%s raw_side=%s pend_side=%s eff=%s' % (
+                    _sn(code), qty, side, _ps, _eff))
+                _signal(code, _eff or _ps or side, qty, 0, 'fill', 'trade_response', ent='', status=str(p.get('status') or 'TRADE'))
             except Exception:
                 continue
     except Exception as e:
