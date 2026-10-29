@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.10（2026-10-29）
-# 部署核对：日志首行 `buysell_core init version=v1.10 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.11（2026-10-29）
+# 部署核对：日志首行 `buysell_core init version=v1.11 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.10"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-29）
+STRATEGY_VERSION = "v1.11"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-29）
 
 
 def _warn(msg):
@@ -185,6 +185,7 @@ BLS = {
     'vwap_weak_at_limit_exempt': True,   # v0.73 贴板/封死豁免 VWAP 弱化（px>=up*0.998）
     'exp_entry_type_resync': True,       # v0.73 开盘重标 buy 候选 one_word/normal（防一字走普通超预期路径）
     'exp_meet_score_ready': True,        # v1.8 pending_meet 评分就绪兜底（1m<2 根时 board 就绪也放行）
+    'exp_meet_require_intraday_confirm': True,  # v1.11 meet/未标注买入强制分时确认（两1m强势或1分钟内触板，且不破VWAP）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 200000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
@@ -267,7 +268,7 @@ BLS = {
     'elastic_top_min_1m_surge': 2.0,  # 最主动弹性标的 1m 大阳线下限 %
     'elastic_top_buy_before_pct': 10.0,  # 20cm 10% 涨幅前买入
     'elastic_top_buy_before_pct_bse': 15.0,  # v1.6 北交所 15% 涨幅前买入
-    'elastic_top_cache_ttl': 30.0,    # 板块内弹性候选排序缓存 s
+    'elastic_top_cache_ttl': 15.0,    # v1.11 板块内弹性候选排序缓存 s（30->15 提升灵敏度）
     'elastic_top_surge_top_n': 5,     # v0.36e 弹性候选 surge 只算前 N（批量快照按涨幅粗排后）
     'elastic_top_member_cap': 20,     # v0.36e 概念板块强度/开盘涨幅成员样本上限（对齐旧 [:20]）
     'frame_snap_batch': 100,          # v0.36e 帧内合并快照成员批上限（概念板块并集分帧续算）
@@ -275,9 +276,10 @@ BLS = {
     # v0.36b 新爆发板块确认因子：T日开盘板块涨幅 明显强于 自身平均5日强度（docs/36 §9）
     'elastic_top_breakout_min_open': 1.0,   # 开盘板块涨幅自身下限 %
     'elastic_top_breakout_min_boost': 2.0,  # 开盘涨幅 - 5日均强度 的最小增强 %
+    'elastic_top_avg5_grace_min': 5.0,      # v1.11 5日均值样本未就绪宽限分钟（09:35 前降级触发，之后仍等 avg5）
     'elastic_top_max_trigger_per_day': 2,   # 当日「新最强板块」触发（易主）上限
     # v0.36c 稳定性：连续 N 帧保持第一才触发/易主；top1-top2 领先幅度门槛（防并列/紧咬）
-    'elastic_top_stable_frames': 3,     # top1 需连续 N 帧保持第一（3s 帧 ≈9s）
+    'elastic_top_stable_frames': 2,     # v1.11 top1 需连续 N 帧保持第一（3s 帧 ≈6s，3->2 收敛节奏）
     'elastic_top_lead_min': 0.5,        # top1 强度 - top2 强度 最小领先 %（防并列/紧咬误判）
     'board_probe_enabled': True,        # 盘中探针：get_stock_blocks 全类别 + get_industry_stocks HY/GN 返回量
     # v0.26 tick 级卖出（事件驱动：3s 帧末响应炸板/封单大减/急卖；docs/33）
@@ -308,7 +310,7 @@ BLS = {
     'dyn_unq_surge_pct': 1.5,           # 跟风 1m 拉升阈值 %
     'dyn_unq_sort_bonus': 2.0,          # 确认龙头排序加分（_pool_exp_priority）
     'dyn_sweep_enabled': True,          # 竞价唯一扫板 开关
-    'dyn_sweep_window_minute': 15,      # 扫板窗口 09:30-09:45
+    'dyn_sweep_window_minute': 30,      # v1.11 扫板窗口 09:30-10:00（15->30 与动态唯一/预期买入对齐）
     'dyn_sweep_budget_ratio': 0.20,     # 扫板单笔预算（=打板 20%）
     # v0.55 盘中题材身位/跟风/强度动态修正（docs/41）：zt_lianban 题材梯队列静态锚 + 盘中重算
     'zt_theme_dyn_enabled': True,       # 盘中动态题材状态总开关
@@ -4419,6 +4421,14 @@ def _exp_rt_status(code):
         return CS, "expect_miss"
     if not _intraday_confirmed_ready(code):
         return PM, "intraday_not_confirmed_ready"   # v1.8 meet/未标注：1m 或评分未就绪 -> 等待，不误发单
+    if BLS.get('exp_meet_require_intraday_confirm', True):
+        # v1.11 meet/未标注与 exceed 对齐：必须两1m强势或1分钟内触板，且不破 VWAP 才放行；
+        # 无分时超预期确认一律等待（2026-10-29 三笔 09:30:04-05 meet 首帧误发单根因）。
+        if _below_vwap_confirm(code):
+            return CS, "below_vwap_weak"
+        if _two_1m_break(code) or _limit_up_within_1m(code):
+            return CX, "meet_intraday_exceed"
+        return PM, "meet_wait_intraday_confirm"
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
 
@@ -4683,11 +4693,12 @@ def _dyn_unq_eval_follow(sec, st, u):
         log.info('[dyn-unq] %s 跟风确认 %d家(1m>=%.1f%%) -> 确认' % (
             _sn(sec), surge_cnt, float(BLS.get('dyn_unq_surge_pct', 1.5))))
 def _try_dyn_sweep(context, st=None):
-    # D 竞价唯一扫板：竞价终态超预期+同身位竞品不及预期(竞价唯一)+开盘上攻冲板(_two_1m_break/
+    # v1.11 D 竞价唯一扫板：竞价终态超预期+同身位竞品不及预期(竞价唯一)+开盘上攻冲板(_two_1m_break/
     # _limit_up_within_1m)+跟风确认+现价<涨停价(未封板) -> 涨停价扫板(预算20%)，避免买不到；已封板不扫。
+    # 生命周期 09:30-10:00（dyn_sweep_window_minute=30，与动态唯一/预期买入窗口对齐）。
     if not BLS.get('dyn_sweep_enabled', True):
         return
-    if _min_age() > int(BLS.get('dyn_sweep_window_minute', 15)):
+    if _min_age() > int(BLS.get('dyn_sweep_window_minute', 30)):
         return
     if len(g.daily['bought']) >= BLS['daily_max_buy']:
         return
@@ -5685,6 +5696,7 @@ def _new_top_board_scan():
     # v0.36c 当日「新最强板块」检测：候选范围（池+zt_lianban）所属板块中强度第一，
     # 需连续 elastic_top_stable_frames 帧保持第一 且 领先第二 >= elastic_top_lead_min，
     # 再通过「新爆发」因子（强度>=min_strength、T日开盘板块涨幅 显著强于 自身5日均值）。
+    # v1.11 5日均值样本未就绪时 09:35 宽限内降级触发（avg5_pending_degrade），之后仍严格等样本。
     # 触发后持续跟踪（易主/09:50/买入 为止）；易主同样需连续 N 帧确认（防单帧抖动打断）。
     if not BLS.get('elastic_top_enabled', True):
         return None
@@ -5699,7 +5711,7 @@ def _new_top_board_scan():
     top, lead = _concept_board_rank_top1(_elastic_top_cand_src())   # v0.36e 概念口径（文件未加载回退 API）
     if not top:
         return None
-    n_need = int(BLS.get('elastic_top_stable_frames', 3))
+    n_need = int(BLS.get('elastic_top_stable_frames', 2))
     lead_min = float(BLS.get('elastic_top_lead_min', 0.5))
     if top == et.get('top'):
         return None if et.get('done') else top          # 持续跟踪（买入后结束）
@@ -5718,12 +5730,17 @@ def _new_top_board_scan():
     if st < float(BLS.get('elastic_top_min_strength', 2.0)):
         return None
     open_g = _board_open_gain(top)
-    avg5 = _board_5d_strength(top)
-    if avg5 is None:
-        return None                                     # 5日样本未够，下帧续算
     if open_g < float(BLS.get('elastic_top_breakout_min_open', 1.0)):
         return None                                     # 开盘板块涨幅自身下限
-    if open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
+    avg5 = _board_5d_strength(top)
+    avg5_degraded = False
+    if avg5 is None:
+        # v1.11 5日均值样本未就绪：09:35 宽限内先按强度/开盘/领先降级触发，防首 5 分钟被日线续算卡住；
+        # 超过宽限仍严格等待样本，防无历史数据全天误判。
+        if _min_age() > float(BLS.get('elastic_top_avg5_grace_min', 5.0)):
+            return None
+        avg5_degraded = True
+    elif open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
         return None                                     # 未显著强于自身5日 -> 非新爆发
     if et.get('trig', 0) >= int(BLS.get('elastic_top_max_trigger_per_day', 2)):
         return None
@@ -5731,8 +5748,8 @@ def _new_top_board_scan():
     if top in (et.get('tracked') or set()):
         return None
     et['tracked'].add(top); et['trig'] = et.get('trig', 0) + 1
-    log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%.1f%% lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
-        top, st, open_g, avg5, lead))
+    log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%s lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
+        top, st, open_g, ('pending_degrade' if avg5_degraded else ('%.1f%%' % avg5)), lead))
     return top
 
 

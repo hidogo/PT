@@ -1,7 +1,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.10"
+STRATEGY_VERSION = "v1.11"
 
 def _warn(msg):
 
@@ -174,6 +174,7 @@ BLS = {
     'vwap_weak_at_limit_exempt': True,
     'exp_entry_type_resync': True,
     'exp_meet_score_ready': True,
+    'exp_meet_require_intraday_confirm': True,
     'first_board_buy_enabled': True,
     'first_board_minute': 10,
     'first_board_seal_min': 200000.0,
@@ -256,7 +257,7 @@ BLS = {
     'elastic_top_min_1m_surge': 2.0,
     'elastic_top_buy_before_pct': 10.0,
     'elastic_top_buy_before_pct_bse': 15.0,
-    'elastic_top_cache_ttl': 30.0,
+    'elastic_top_cache_ttl': 15.0,
     'elastic_top_surge_top_n': 5,
     'elastic_top_member_cap': 20,
     'frame_snap_batch': 100,
@@ -264,9 +265,10 @@ BLS = {
 
     'elastic_top_breakout_min_open': 1.0,
     'elastic_top_breakout_min_boost': 2.0,
+    'elastic_top_avg5_grace_min': 5.0,
     'elastic_top_max_trigger_per_day': 2,
 
-    'elastic_top_stable_frames': 3,
+    'elastic_top_stable_frames': 2,
     'elastic_top_lead_min': 0.5,
     'board_probe_enabled': True,
 
@@ -297,7 +299,7 @@ BLS = {
     'dyn_unq_surge_pct': 1.5,
     'dyn_unq_sort_bonus': 2.0,
     'dyn_sweep_enabled': True,
-    'dyn_sweep_window_minute': 15,
+    'dyn_sweep_window_minute': 30,
     'dyn_sweep_budget_ratio': 0.20,
 
     'zt_theme_dyn_enabled': True,
@@ -4137,6 +4139,13 @@ def _exp_rt_status(code):
         return CS, "expect_miss"
     if not _intraday_confirmed_ready(code):
         return PM, "intraday_not_confirmed_ready"
+    if BLS.get('exp_meet_require_intraday_confirm', True):
+
+        if _below_vwap_confirm(code):
+            return CS, "below_vwap_weak"
+        if _two_1m_break(code) or _limit_up_within_1m(code):
+            return CX, "meet_intraday_exceed"
+        return PM, "meet_wait_intraday_confirm"
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
 
@@ -4395,7 +4404,7 @@ def _try_dyn_sweep(context, st=None):
 
     if not BLS.get('dyn_sweep_enabled', True):
         return
-    if _min_age() > int(BLS.get('dyn_sweep_window_minute', 15)):
+    if _min_age() > int(BLS.get('dyn_sweep_window_minute', 30)):
         return
     if len(g.daily['bought']) >= BLS['daily_max_buy']:
         return
@@ -5347,7 +5356,7 @@ def _new_top_board_scan():
     top, lead = _concept_board_rank_top1(_elastic_top_cand_src())
     if not top:
         return None
-    n_need = int(BLS.get('elastic_top_stable_frames', 3))
+    n_need = int(BLS.get('elastic_top_stable_frames', 2))
     lead_min = float(BLS.get('elastic_top_lead_min', 0.5))
     if top == et.get('top'):
         return None if et.get('done') else top
@@ -5366,12 +5375,16 @@ def _new_top_board_scan():
     if st < float(BLS.get('elastic_top_min_strength', 2.0)):
         return None
     open_g = _board_open_gain(top)
-    avg5 = _board_5d_strength(top)
-    if avg5 is None:
-        return None
     if open_g < float(BLS.get('elastic_top_breakout_min_open', 1.0)):
         return None
-    if open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
+    avg5 = _board_5d_strength(top)
+    avg5_degraded = False
+    if avg5 is None:
+
+        if _min_age() > float(BLS.get('elastic_top_avg5_grace_min', 5.0)):
+            return None
+        avg5_degraded = True
+    elif open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
         return None
     if et.get('trig', 0) >= int(BLS.get('elastic_top_max_trigger_per_day', 2)):
         return None
@@ -5379,8 +5392,8 @@ def _new_top_board_scan():
     if top in (et.get('tracked') or set()):
         return None
     et['tracked'].add(top); et['trig'] = et.get('trig', 0) + 1
-    log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%.1f%% lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
-        top, st, open_g, avg5, lead))
+    log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%s lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
+        top, st, open_g, ('pending_degrade' if avg5_degraded else ('%.1f%%' % avg5)), lead))
     return top
 
 def _calc_elastic_top_candidates(top):

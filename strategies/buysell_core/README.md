@@ -3,11 +3,30 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.10（2026-10-29）
+- 当前版本：v1.11（2026-10-29）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.10 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.11 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.11
+- v1.11 买入节奏与分时确认收敛（2026-10-29 各买入场景复盘，用户确认后实施）：
+  - meet/未标注预期买入强制分时超预期确认（`exp_meet_require_intraday_confirm=True`）：
+    不再直接按 `_eval_intraday` 的 CM 放行，必须满足「两 1m 强势（`_two_1m_break`）或
+    09:30-09:32 内 1 分钟触涨停价（`_limit_up_within_1m`）」且不破 VWAP 才返回
+    `CX / meet_intraday_exceed`；未确认返回 `PM / meet_wait_intraday_confirm`，破 VWAP 返回
+    `CS / below_vwap_weak`。修复 2026-10-29 中重科技/富佳股份/徕木股份 09:30:04-05
+    `confired_meet intraday` 首帧误发单根因（v1.8 只堵数据未就绪，未要求分时强度确认）。
+  - 弹性 top 灵敏度收敛：`elastic_top_stable_frames` 3->2（约 6s 触发）、
+    `elastic_top_cache_ttl` 30->15s；新增 `elastic_top_avg5_grace_min=5`，09:35 前 5 日均值
+    样本未就绪时按强度/开盘/领先降级触发并打日志 `avg5=pending_degrade`，超过宽限仍严格
+    等 avg5，防无历史数据全天误判。生命周期仍为 09:50 前。
+  - 竞价唯一扫板窗口统一 30 分钟：`dyn_sweep_window_minute` 15->30（09:30-10:00），
+    与动态唯一/预期买入窗口对齐，10:00 后停止新扫。
+  - 测试：selftest_exp_rt 更新 T137b/T148（就绪 meet 无分时确认 -> PM 等待不买）、
+    T82j/T82k（稳定帧 2 帧）、T82h（宽限外样本未够不触发），新增 T137e-g（两1m强势/1分钟触板
+    买入、破VWAP 放弃）、T148b（分时确认放行）、T82h2/h3（宽限内降级触发、min_open 仍拦截）、
+    T93t/u（扫板 20 分钟仍触发、31 分钟停止）；全量 PASS、ops 28/28、pytest 50 passed、双编译通过。
 
 ### v1.10
 - v1.10 卖出方向与成交方向闭环修复（2026-10-29 日志复核确认，用户确认后实施）：

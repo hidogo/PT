@@ -2447,9 +2447,26 @@ ns3['BLS']['elastic_top_stable_frames'] = 1
 ns3['_board_open_gain'] = lambda b: 2.5
 ns3['_board_5d_strength'] = lambda b: 3.0        # 2.5 < 3+2 -> 非新爆发
 ok('T82g 开盘未显著强于5日均值不触发', ns3['_new_top_board_scan']() is None)
-# T82h 5日均值样本未够 -> 不误触发
+# T82h v1.11 5日均值样本未够：超过宽限（09:35+5min）仍严格等待不触发
 ns3['_board_5d_strength'] = lambda b: None
-ok('T82h 5日样本未够不触发', ns3['_new_top_board_scan']() is None)
+g3.now_dt = datetime.datetime(2026, 10, 20, 9, 40, 0)   # min_age=10 > avg5_grace_min=5
+ok('T82h 宽限外5日样本未够不触发', ns3['_new_top_board_scan']() is None)
+# T82h2 v1.11 5日均值样本未够但处宽限内（09:33）-> 强度/开盘/领先达标降级触发
+ns3b = fresh()
+g3b = ns3b['g']
+g3b.now_dt = datetime.datetime(2026, 10, 20, 9, 33, 0)
+g3b.watch = ['600001.XSHG']; g3b.pool_static = []; g3b.selfwatch = []
+ns3b['_boards_of'] = lambda sec: ['B_A']
+ns3b['_board_strength_by_code'] = lambda b: 5.0
+ns3b['_board_refresh_ttl'] = lambda: 3.0
+ns3b['BLS']['elastic_top_stable_frames'] = 1
+ns3b['_board_open_gain'] = lambda b: 5.0
+ns3b['_board_5d_strength'] = lambda b: None
+ok('T82h2 宽限内 avg5 未就绪降级触发', ns3b['_new_top_board_scan']() == 'B_A')
+# T82h3 v1.11 宽限内但开盘涨幅自身不达标 -> 仍不触发（降级只放宽 avg5，不放宽 min_open）
+ns3b['_board_open_gain'] = lambda b: 0.5
+ns3b['g'].elastic_top = None
+ok('T82h3 宽限内 min_open 未达标不触发', ns3b['_new_top_board_scan']() is None)
 # T82i 当日触发上限 2 -> 不再触发
 ns4 = fresh()
 g4 = ns4['g']
@@ -2493,7 +2510,7 @@ ns2['_try_elastic_top_buy'](ns2['_ctx'])
 ok('T82 买入后本轮跟踪结束不重买', len(ns2['_RECC']['calls']) == 1)
 
 
-# T82j 稳定窗口：默认 3 帧连续第一才触发；易主需连续 3 帧（防单帧抖动打断）
+# T82j v1.11 稳定窗口：默认 2 帧连续第一才触发；易主需连续 2 帧（防单帧抖动打断）
 ns6 = fresh()
 g6 = ns6['g']
 g6.now_dt = datetime.datetime(2026, 10, 20, 9, 35, 0)
@@ -2504,14 +2521,12 @@ ns6['_board_refresh_ttl'] = lambda: 3.0
 ns6['_board_open_gain'] = lambda b: 5.0
 ns6['_board_5d_strength'] = lambda b: 1.0
 ok('T82j 稳定窗口第1帧不触发', ns6['_new_top_board_scan']() is None)
-ok('T82j 稳定窗口第2帧不触发', ns6['_new_top_board_scan']() is None)
-ok('T82j 稳定窗口第3帧触发', ns6['_new_top_board_scan']() == 'B_A')
+ok('T82j 稳定窗口第2帧触发', ns6['_new_top_board_scan']() == 'B_A')
 # 易主：单帧 B_B 抖动不打断旧板块跟踪
 ns6['_boards_of'] = lambda sec: ['B_B']
 ns6['_board_strength_by_code'] = lambda b: 6.0 if b == 'B_B' else 1.0
 ok('T82j 易主第1帧仍跟踪旧板块', ns6['_new_top_board_scan']() == 'B_A')
-ok('T82j 易主第2帧仍跟踪旧板块', ns6['_new_top_board_scan']() == 'B_A')
-ok('T82j 易主第3帧确认', ns6['_new_top_board_scan']() == 'B_B')
+ok('T82j 易主第2帧确认', ns6['_new_top_board_scan']() == 'B_B')
 # T82k 领先幅度：top1-top2 < 0.5 不确认最强
 ns7 = fresh()
 g7 = ns7['g']
@@ -2526,8 +2541,7 @@ ok('T82k 领先不足不触发', ns7['_new_top_board_scan']() is None)
 ns7['_boards_of'] = lambda sec: ['B_A', 'B_C']
 ns7['_board_strength_by_code'] = lambda b: 5.0 if b == 'B_A' else 4.4   # 领先 0.6 >= 0.5
 ok('T82k 领先0.5以上第1帧不触发', ns7['_new_top_board_scan']() is None)
-ok('T82k 领先0.5以上第2帧不触发', ns7['_new_top_board_scan']() is None)
-ok('T82k 领先0.5以上第3帧触发', ns7['_new_top_board_scan']() == 'B_A')
+ok('T82k 领先0.5以上第2帧触发', ns7['_new_top_board_scan']() == 'B_A')
 # T82l 板块口径探针：打印全类别 + HY/GN 返回成员数（验证概念板块能否被行业接口消费）
 ns8 = fresh()
 g8 = ns8['g']
@@ -3379,6 +3393,38 @@ g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'
               '600002.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
 ns['_dyn_unq_auction_eval']()
 ok('T93 竞价并列(竞品exceed)', g.dyn_unq['auction']['600001.XSHG']['unique'] is False and g.dyn_unq['auction']['600001.XSHG']['peer_exceed'] == 1)
+
+# T93t v1.11 扫板窗口 09:30-10:00：20 分钟（原 15 分钟窗口外）仍可扫
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0, 'trade_status': 'OPEN'}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True, 'exceed': True, 'level': 1, 'peer_cnt': 0, 'peer_exceed': 0}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'level': 1, 'members': [], 'surge_cnt': 2}},
+             'swept': {}}
+ns['_min_age'] = lambda: 20
+ns['_two_1m_break'] = lambda c: True
+ns['_limit_up_within_1m'] = lambda c: False
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec, mode=mode, ratio=ratio) or True
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93t 20分钟窗口内扫板', _cap.get('sec') == '600001.XSHG' and _cap.get('mode') == 'board')
+
+# T93u v1.11 超过 30 分钟窗口停止扫板
+ns = fresh(); g = ns['g']
+g.exp_file = {'600001.XSHG': {'side': 'buy', 'expected_status': 'pending_exceed'}}
+g.spot['600001.XSHG'] = {'last_px': 10.9, 'preclose_px': 10.0, 'up_px': 11.0, 'open_px': 10.0, 'trade_status': 'OPEN'}
+g.dyn_unq = {'day': '2026-10-16',
+             'auction': {'600001.XSHG': {'unique': True, 'exceed': True, 'level': 1, 'peer_cnt': 0, 'peer_exceed': 0}},
+             'uniq': {'600001.XSHG': {'uniq': True, 'confirm': True, 'level': 1, 'members': [], 'surge_cnt': 2}},
+             'swept': {}}
+ns['_min_age'] = lambda: 31
+ns['_two_1m_break'] = lambda c: True
+ns['_limit_up_within_1m'] = lambda c: False
+_cap = {}
+ns['place_order'] = lambda ctx, sec, side, qty=None, note='', mode='chase', ratio=None: _cap.update(sec=sec, mode=mode) or True
+ns['_try_dyn_unq'](ns['_ctx'])
+ok('T93u 31分钟窗口外不扫', _cap == {} and '600001.XSHG' not in g.daily['bought'])
 
 # T93s 重启持久化：同日保留 / 跨日重置
 ns = fresh(); g = ns['g']
@@ -5146,13 +5192,16 @@ r = ns['_attempt_expected_buy'](ns['_ctx'], '600006.XSHG')
 ok('T137 未就绪不买不弃', r is None and '600006.XSHG' not in ns['g'].daily['bought']
    and '600006.XSHG' not in ns['g'].exp_fired)
 
-# T137b 就绪（spot VWAP/开盘/现价齐备）-> CM held_vwap 可买
+# T137b v1.11 就绪（spot VWAP/开盘/现价齐备）但无分时超预期确认 -> PM 等待，不买
 ns = _meet_ns('600007.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
                               'wavg_px': 10.0, 'trade_status': 'OPEN'})
 st, reason = ns['_eval_intraday']('600007.XSHG', ns['PM'])
 ok('T137 就绪 meet -> CM', st == ns['CM'] and reason == ['held_vwap'])
+st2, _r2 = ns['_exp_rt_status']('600007.XSHG')
+ok('T137b 就绪但无分时确认 exp_rt -> PM 等待', st2 == ns['PM'])
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600007.XSHG')
-ok('T137 就绪 meet 可买', r is True and '600007.XSHG' in ns['g'].daily['bought'])
+ok('T137b 就绪但无分时确认不买', r is None and '600007.XSHG' not in ns['g'].daily['bought']
+   and '600007.XSHG' not in ns['g'].exp_fired)
 
 # T137c 竞价已放弃 PS/CS 不受就绪门影响
 ns = _meet_ns('600008.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
@@ -5168,6 +5217,36 @@ ns['g'].spot['600009.XSHG']['wavg_px'] = 10.0
 ns['_two_1m_break'] = lambda c: True
 st, reason = ns['_eval_intraday']('600009.XSHG', ns['PX'])
 ok('T137 PX 就绪 + 上攻 -> CX', st == ns['CX'] and reason == ['two_1m_break'])
+
+# T137e v1.11 meet/未标注：两 1m 强势且不破 VWAP -> CX 买入
+ns = _meet_ns('600013.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
+                              'wavg_px': 10.0, 'trade_status': 'OPEN'})
+ns['_two_1m_break'] = lambda c: True
+ns['_limit_up_within_1m'] = lambda c: False
+st, reason = ns['_exp_rt_status']('600013.XSHG')
+ok('T137e meet 两1m强势 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed')
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600013.XSHG')
+ok('T137e meet 两1m强势触发买入', r is True and '600013.XSHG' in ns['g'].daily['bought'])
+
+# T137f v1.11 meet/未标注：1 分钟内触涨停价 -> CX 买入
+ns = _meet_ns('600014.XSHG', {'last_px': 10.9, 'open_px': 10.0, 'preclose_px': 10.0,
+                              'up_px': 11.0, 'wavg_px': 10.0, 'trade_status': 'OPEN'})
+ns['_two_1m_break'] = lambda c: False
+ns['_limit_up_within_1m'] = lambda c: True
+st, reason = ns['_exp_rt_status']('600014.XSHG')
+ok('T137f meet 1分钟触板 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed')
+
+# T137g v1.11 meet/未标注：分时破 VWAP -> CS 放弃
+ns = _meet_ns('600015.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
+                              'wavg_px': 10.0, 'trade_status': 'OPEN'})
+ns['_two_1m_break'] = lambda c: True
+ns['_limit_up_within_1m'] = lambda c: False
+ns['_below_vwap_confirm'] = lambda c: True
+st, reason = ns['_exp_rt_status']('600015.XSHG')
+ok('T137g meet 破VWAP -> CS', st == ns['CS'] and reason == 'below_vwap_weak')
+r = ns['_attempt_expected_buy'](ns['_ctx'], '600015.XSHG')
+ok('T137g meet 破VWAP不买不弃', r is True and '600015.XSHG' not in ns['g'].daily['bought']
+   and '600015.XSHG' in ns['g'].exp_fired)
 
 # --- T138 v1.4 预期买入纵深加固：发单前分时就绪兜底 ---
 ns = _meet_ns('600010.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0, 'trade_status': 'OPEN'})
@@ -5320,9 +5399,17 @@ ns2 = _meet_ns('600007.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 
                                'wavg_px': 10.0, 'trade_status': 'OPEN'})
 ns2['_calc_intraday_bars_ready'] = lambda sec: True   # 09:31 1m>=2 根
 st2, reason2 = ns2['_exp_rt_status']('600007.XSHG')
-ok('T148 1m 就绪 meet -> CM 可买', st2 == ns2['CM'])
+ok('T148 v1.11 1m 就绪但无分时确认 meet -> PM 等待', st2 == ns2['PM'])
 r2 = ns2['_attempt_expected_buy'](ns2['_ctx'], '600007.XSHG')
-ok('T148 1m 就绪触发买入', r2 is True and '600007.XSHG' in ns2['g'].daily['bought'])
+ok('T148 v1.11 1m 就绪但无分时确认不买', r2 is None and '600007.XSHG' not in ns2['g'].daily['bought'])
+
+# T148b v1.11 1m 就绪 + 两1m强势 -> CX 买入（分时超预期确认放行）
+ns2['_two_1m_break'] = lambda c: True
+ns2['_limit_up_within_1m'] = lambda c: False
+st3, reason3 = ns2['_exp_rt_status']('600007.XSHG')
+ok('T148b 1m 就绪 + 两1m强势 -> CX', st3 == ns2['CX'] and reason3 == 'meet_intraday_exceed')
+r3 = ns2['_attempt_expected_buy'](ns2['_ctx'], '600007.XSHG')
+ok('T148b 分时超预期确认触发买入', r3 is True and '600007.XSHG' in ns2['g'].daily['bought'])
 
 # --- T149 v1.10 成交方向：真实 entrust_bs/side 优先，pending 不再掩盖方向 ---
 ns = fresh()
