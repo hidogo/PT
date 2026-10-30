@@ -3,11 +3,57 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.12（2026-10-29）
+- 当前版本：v1.14（2026-10-30）
+
+## 审计与比对文档
+- 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.12 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.14 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.14
+- v1.14 各类买入信号每日次数闸门分类化（2026-10-30 用户确认后实施）：
+  - 打板类每日上限 2（`daily_max_board_buy=2`）：首板打板、回封打板、竞价唯一扫板、预期买入
+    board 模式统一计入；打板未成交（REJECTED/CANCELLED/撤单终态）释放名额，不算占用。
+  - 其它类每日上限 1（`daily_max_other_buy=1`）：预期买入 chase、5D 低吸、核心票、弹性套利、
+    弹性 top 统一计入。
+  - 保留总闸门 `daily_max_buy=3`（= 打板2 + 其它1）作为组合上限；`g.daily` 新增
+    `bought_board`/`bought_other` 分类列表，与 `bought` 全量列表同步增删，旧状态文件缺字段
+    时自动补齐。
+  - 释放链路同步：`_release_buy_slot`（REJECTED/CANCELLED）、`_board_cancel_reconcile`、
+    `_no_reply_reconcile`、`_reconcile_daily_bought_slots`（同日重启未成交释放）均同步移除
+    分类列表；`after_trading_end` 日志增加 `board=N other=N`。
+  - params.json 同步 `daily_max_buy=3`、`daily_max_board_buy=2`、`daily_max_other_buy=1`。
+  - 测试：selftest T144 扩展 + 新增 T174（分类上限/释放恢复/组合不互占/端到端拦截），
+    全量 PASS、pytest 通过、双编译 + deploy AST 一致。
+
+### v1.13
+- v1.13 唯一连板空间闸门按参与目标板数计算（2026-10-29 用户修正）：
+  - `_unq_height_space` 空间基准由「当前连板数」改为「T-1 权威 board_cnt + 1（今日参与打板/
+    续板后的目标高度）」：昨日 4 板参与 4 进 5，在压制 6 下按 5 板计空间 16.7% 放行、
+    在压制 5 下按 5 板计空间 0% 拦截；昨日 5 板参与 5 进 6，在压制 6 下按 6 板计空间 0% 拦截。
+  - 无权威 zt 记录回退 `_limitup_days + 1`（同样按参与目标高度）；low 档豁免、无压制数据
+    放行、开关关闭放行等既有语义不变。
+  - docs/40 §7 公式与示例同步；selftest T135 用例重写并新增「4进5 压制5 拦截」修正场景，
+    全量 PASS、pytest 通过、双编译 + deploy AST 一致。
+- v1.13 委托兜底/资金基线/首触保留修复补丁（2026-10-30 日志根因，用户确认后实施）：
+  - 卖单超时不再盲目重投：`_sell_inflight` 超时后先查 `get_open_orders/get_all_orders`，
+    在途/查询失败继续等、FILLED 不重投、CANCELLED/REJECTED/无匹配才放行重试
+    （徕木 603633 每 120s 重复投递根因）。
+  - 打板撤单失败不释放买入名额/承诺：`_board_queue_cancel` 撤单异常或返回 False 时标记
+    `cancel_pending`，等 `on_order_response` 或 `_board_cancel_reconcile` 60s 兜底查询
+    真实终态后释放（富佳/中重“撤单失败仍释放名额”根因）。
+  - 09:31 `after_open_probe` 不再无条件清空当日 `first_zt/L2/情绪`，仅跨日重置；
+    上海港湾 09:30:22 首触被 09:31 清空导致 lag=60.6s 根因修复。
+  - 开盘资金基线：`before_trading_start/09:25` 缓存真实正现金，`portfolio.cash=0` 且窗口内
+    （`cash_baseline_window=300s`）用基线兜底，真实恢复后切换；`[cash-src]` 日志审计
+    （开盘首帧 qty<=0 根因）。
+  - 无回报兜底：`_no_reply_reconcile` 60s 一次查询 SENT 超 90s 的委托，终态回填，
+    无匹配打 `[order-lost]` 且买入不释放 slot、卖出由 `_sell_inflight` 查询放行重投。
+  - 桥持仓残留只读审计：`[pos-stale]` 一次性日志提示 `sync_positions` 收敛，不改变卖出行为。
+  - 测试：selftest T165-T173（订单查询/卖单重投决策/撤单失败兜底/资金基线/首触保留/
+    order-lost/pos-stale），T24 FILLED 语义更新；全量 PASS、pytest 50 passed、双编译 + deploy AST 一致。
 
 ### v1.12
 - v1.12 成交率与链路可观测性增强（2026-10-29 用户确认后实施）：

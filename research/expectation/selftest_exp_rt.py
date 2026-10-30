@@ -36,6 +36,8 @@ def make_mod(**overrides):
     ns['get_trend_data'] = lambda **k: {}
     ns['get_snapshot'] = lambda sec: {}
     ns['get_price'] = lambda *a, **k: None
+    ns['get_open_orders'] = lambda: []   # v1.13 委托兜底查询默认无匹配（超时后放行重试语义不变）
+    ns['get_all_orders'] = lambda: []
     ctx = types.SimpleNamespace(
         portfolio=types.SimpleNamespace(positions={}, cash=100000.0),
         blotter=types.SimpleNamespace(current_dt=datetime.datetime(2026,10,16,10,0,0)))
@@ -471,7 +473,7 @@ ok('T24 核卖限价=跌停地板 9.0', ns['_order_limit']('600006.XSHG', 'sell'
 ns = fresh(); ns['g'].pending['600007.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT'}
 ok('T24 inflight SENT -> 跳过(防叠单)', ns['_sell_inflight']('600007.XSHG') is True)
 ns['g'].pending['600007.XSHG']['status'] = 'FILLED'
-ok('T24 inflight FILLED -> 放行', ns['_sell_inflight']('600007.XSHG') is False)
+ok('T24 inflight FILLED -> 不重投', ns['_sell_inflight']('600007.XSHG') is True)
 ns['g'].pending['600007.XSHG']['side'] = 'buy'
 ok('T24 inflight buy -> 不拦卖出', ns['_sell_inflight']('600007.XSHG') is False)
 
@@ -1116,7 +1118,8 @@ ns = _ea_setup(); ns['g'].watch = ['300001.XSHE', '300002.XSHE']
 ns['g'].spot['300002.XSHE'] = dict(ns['g'].spot['300001.XSHE'])
 ns['_l2_big_ratio'] = lambda sec: 0.12 if sec == '300001.XSHE' else -1.0
 pc = _ea_calls(ns)
-ok('T46b 大单净量>=10% 进攻加分优先排序', len(pc) >= 2 and pc[0]['sec'] == '300001.XSHE' and 'big_ok=1' in pc[0]['note'])
+ok('T46b 大单净量>=10% 进攻加分优先排序', len(pc) == 1 and pc[0]['sec'] == '300001.XSHE' and 'big_ok=1' in pc[0]['note'])
+ok('T46b 其它类每日1次 次优候选拦截', '300002.XSHE' not in ns['g'].daily['bought'])
 
 
 
@@ -2506,6 +2509,7 @@ _calls = ns2['_RECC']['calls']
 ok('T82 10%前买入最主动20cm', len(_calls) == 1 and _calls[0]['sec'] == '300001.XSHE' and (_calls[0].get('limit_price') or 0) > 0 and '300001.XSHE' in ns2['g'].daily['bought'])
 # 第二帧：抬高每日上限排除 daily_max_buy 掩盖，验证 买入后本轮跟踪结束（done）不重买
 ns2['BLS']['daily_max_buy'] = 5
+ns2['BLS']['daily_max_other_buy'] = 5   # v1.14 分类闸门同口径放开，排除分类上限掩盖
 ns2['_try_elastic_top_buy'](ns2['_ctx'])
 ok('T82 买入后本轮跟踪结束不重买', len(ns2['_RECC']['calls']) == 1)
 
@@ -5040,42 +5044,52 @@ if _ES_OK:
     _shutil.rmtree(_tmp_po, ignore_errors=True)
 
 # --- T135 v1.2 唯一连板空间闸门（_lb_senti_buy_gate）+ _load_sentiment 解析 ---
-def _gate_ns(suppress, bc, unq, lv):
+def _gate_ns(suppress, bc, unq):
     ns = fresh()
     ns['BLS']['lb_senti_enabled'] = False
     ns['g'].sentiment = {'height_suppress': suppress, 'max_board_10d': 11}
     ns['g'].zt_lianban = {'600001.XSHG': {'board_cnt': bc, 'unique_high': unq}}
-    ns['_limitup_days'] = lambda c: lv
     return ns, '600001.XSHG'
 
-ns, sec = _gate_ns(6, 5, True, 6)
+ns, sec = _gate_ns(6, 5, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
-ok('T135 唯一高标(6板/压制6) 空间0% 拦截', allow is False and 'unq_space_skip' in note)
-ns, sec = _gate_ns(6, 4, True, 5)
+ok('T135 唯一5进6/压制6 目标6板 空间0% 拦截', allow is False and 'unq_space_skip' in note)
+ns, sec = _gate_ns(6, 4, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
-ok('T135 唯一5板/压制6 空间16.7% 放行', allow is True and 'normal' in note)
-ns, sec = _gate_ns(5, 4, True, 5)
+ok('T135 唯一4进5/压制6 目标5板 空间16.7% 放行', allow is True and 'normal' in note)
+ns, sec = _gate_ns(5, 4, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
-ok('T135 唯一5板/压制5 空间0% 拦截', allow is False and 'unq_space_skip' in note)
-ns, sec = _gate_ns(20, 16, True, 17)
+ok('T135 唯一4进5/压制5 目标5板 空间0% 拦截(修正)', allow is False and 'unq_space_skip' in note)
+ns, sec = _gate_ns(20, 16, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 边界15%(17/20) 放行', allow is True)
-ns, sec = _gate_ns(20, 16, True, 18)
+ns, sec = _gate_ns(20, 17, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 10%(18/20) 拦截', allow is False and 'unq_space_skip' in note)
-ns, sec = _gate_ns(2, 1, True, 2)
+ns, sec = _gate_ns(2, 1, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 low档豁免(空间0%仍放行)', allow is True)
-ns, sec = _gate_ns(6, 4, False, 5)
+ns, sec = _gate_ns(6, 4, False)
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 非唯一中位不受空间闸门影响', allow is True and 'normal' in note)
-ns, sec = _gate_ns(0, 5, True, 6)
+ns, sec = _gate_ns(0, 5, True)
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 无压制数据放行', allow is True)
-ns, sec = _gate_ns(6, 5, True, 6)
+ns, sec = _gate_ns(6, 5, True)
 ns['BLS']['unq_space_gate_enabled'] = False
 allow, note = ns['_lb_senti_buy_gate'](sec)
 ok('T135 开关关闭放行', allow is True)
+
+# v1.13 修正：无权威 zt 记录回退 _limitup_days + 1（同样按参与目标高度）
+ns = fresh()
+ns['BLS']['lb_senti_enabled'] = False
+ns['g'].sentiment = {'height_suppress': 6, 'max_board_10d': 11}
+ns['g'].zt_lianban = {}
+ns['_limitup_days'] = lambda c: 5
+ns['_is_unique_lianban'] = lambda c: True
+ns['_lb_senti_tier'] = lambda c: 'high'
+allow, note = ns['_lb_senti_buy_gate']('600002.XSHG')
+ok('T135 回退口径按目标6板 空间0% 拦截', allow is False and 'unq_space_skip' in note)
 
 ns = fresh()
 _sent = os.path.join(ns['_TMP'], 'sentiment_latest.csv')
@@ -5347,9 +5361,45 @@ g.buy_commit = {'600003.XSHG': 1000.0}
 n = ns['_reconcile_daily_bought_slots']()
 ok('T143 已成交买单保留(桥缺持仓不误杀)', n == 0 and g.daily['bought'] == ['600003.XSHG'])
 
-# T144 v1.7 单日买入上限默认值=3
+# T144 v1.7/v1.14 单日买入上限默认值：总闸门3 = 打板2 + 其它1
 ns = fresh()
 ok('T144 默认 daily_max_buy=3', ns['BLS']['daily_max_buy'] == 3)
+ok('T144 默认打板/其它分类上限=2/1',
+   ns['BLS']['daily_max_board_buy'] == 2 and ns['BLS']['daily_max_other_buy'] == 1)
+
+# --- T174 v1.14 买入信号每日次数闸门：打板2 / 其它1，打板未成交不算占用 ---
+ns = fresh(); g = ns['g']
+g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}
+ns['_buy_slot_add']('600001.XSHG', 'board'); ns['_buy_slot_add']('600002.XSHG', 'board')
+ok('T174 打板2次后第3次拦截', ns['_buy_slot_ok']('board') is False)
+ok('T174 打板满不占用其它名额', ns['_buy_slot_ok']('other') is True)
+ns['_buy_slot_rel']('600001.XSHG')
+ok('T174 打板未成交释放后恢复名额', ns['_buy_slot_ok']('board') is True
+   and '600001.XSHG' not in g.daily['bought'] and '600001.XSHG' not in g.daily['bought_board'])
+ns['_buy_slot_add']('600003.XSHG', 'other')
+ok('T174 其它1次后第2次拦截', ns['_buy_slot_ok']('other') is False)
+ok('T174 其它满不占用打板名额', ns['_buy_slot_ok']('board') is True)
+
+# 端到端：打板通道已满 -> 首板不再评估
+ns = _fb_setup()
+ns['g'].daily['bought'] = ['600009.XSHG', '600010.XSHG']
+ns['g'].daily['bought_board'] = ['600009.XSHG', '600010.XSHG']
+ok('T174 打板满 首板拦截', _fb_calls(ns) == [])
+
+# 端到端：其它通道已满 -> 核心票拦截
+ns = _core_setup()
+ns['g'].daily['bought_other'] = ['600009.XSHG']
+pc = []
+ns['place_order'] = lambda *a, **k: pc.append(1) or True
+ns['try_core_buy'](ns['_CTX'])
+ok('T174 其它满 核心票拦截', pc == [])
+
+# 端到端：REJECTED 释放同步分类列表（打板未成交不算占用）
+ns = _fb_setup()
+ns['g'].daily['bought'] = ['600001.XSHG']
+ns['g'].daily['bought_board'] = ['600001.XSHG']
+ns['_release_buy_slot']('600001.XSHG')
+ok('T174 撤单释放分类名额', ns['g'].daily['bought'] == [] and ns['g'].daily['bought_board'] == [])
 
 # --- T145 v1.8 一字封单基准金额口径：total_bidqty 已是金额元 ---
 # （2026-10-29 豪恩/实丰/山东矿机 base 被 *100*up 放大 100*up 倍 -> ratio=0.00 误判 CS 根因）
@@ -5639,6 +5689,107 @@ fake164.t += 50.0   # 距上次心跳 >=60s
 d164c = ns['_lb_senti_mid']()
 ok('T164 60s 后 heartbeat 带 reject 对账', any('reject=1' in x and 'mid_high_skip:1' in x
    for x in logs164))
+
+# ================= v1.13 委托兜底/资金基线/首触保留 =================
+# --- T165 委托兜底查询：open 在途 / all 终态 / 无匹配 ---
+ns = fresh()
+ns['get_open_orders'] = lambda: [{'entrust_no': 'E160'}]
+ok('T165 open 在途返回 SENT', ns['_query_open_order_status']('E160') == 'SENT')
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E161', 'order_status': '5'}]
+ok('T165 all 终态回填 CANCELLED', ns['_query_open_order_status']('E161') == 'CANCELLED')
+ns['get_all_orders'] = lambda: []
+ok('T165 查询成功无匹配返回空串', ns['_query_open_order_status']('E162') == '')
+
+# --- T166-T168 卖单超时后按订单查询结果决策 ---
+ns = fresh(); fake166 = _FakeTime(1000.0); ns['time'] = fake166
+ns['g'].pending['600154.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT', 'ts': fake166.t - 200, 'no': 'E154'}
+ns['get_open_orders'] = lambda: [{'entrust_no': 'E154'}]
+ns['_sn'] = lambda sec: sec
+ok('T166 超时但在途 -> 刷新时间戳继续等', ns['_sell_inflight']('600154.XSHG') is True
+   and ns['g'].pending['600154.XSHG']['ts'] == fake166.t)
+
+ns = fresh(); fake167 = _FakeTime(1000.0); ns['time'] = fake167
+ns['g'].pending['600155.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT', 'ts': fake167.t - 200, 'no': 'E155'}
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: []
+ns['_sn'] = lambda sec: sec
+ok('T167 超时无匹配 -> 放行重试', ns['_sell_inflight']('600155.XSHG') is False)
+
+ns = fresh(); fake168 = _FakeTime(1000.0); ns['time'] = fake168
+ns['g'].pending['600156.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT', 'ts': fake168.t - 200, 'no': 'E156'}
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E156', 'order_status': '8'}]
+ns['_sn'] = lambda sec: sec
+ok('T168 超时查询已成交 -> 不重投', ns['_sell_inflight']('600156.XSHG') is True
+   and ns['g'].pending['600156.XSHG']['status'] == 'FILLED')
+
+# --- T169 撤单失败不释放名额/承诺，兜底对账终态释放 ---
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)
+def _bad_cancel(ent):
+    raise RuntimeError('订单id 不存在')
+ns['cancel_order'] = _bad_cancel
+ok('T169 撤单失败 cancel_pending 不释放', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True
+   and ns['g'].daily['bought'] == ['600080.XSHG'] and '600080.XSHG' in ns['g'].buy_commit
+   and ns['g'].pending['600080.XSHG'].get('cancel_pending') is True)
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E80', 'order_status': '5'}]
+ns['_board_cancel_reconcile']()
+ok('T169 兜底对账 CANCELLED 释放名额/承诺', ns['g'].daily['bought'] == []
+   and '600080.XSHG' not in ns['g'].buy_commit
+   and 'cancel_pending' not in ns['g'].pending['600080.XSHG'])
+
+# --- T170 开盘资金基线：窗口内兜底 / 窗口外不兜 / 真实恢复切换 ---
+ns = fresh(); fake170 = _FakeTime(1000.0); ns['time'] = fake170
+ns['g'].cash_baseline = 50000.0; ns['g'].cash_baseline_ts = fake170.t - 10
+ns['_CTX'].portfolio.cash = 0
+ok('T170 开盘 cash=0 窗口内用基线', abs(ns['_avail_cash'](ns['_CTX']) - 50000.0) < 1e-9
+   and ns['g'].cash_src == 'baseline')
+fake170.t += 400
+ok('T170 窗口外不再兜底', ns['_avail_cash'](ns['_CTX']) == 0.0)
+ns['_CTX'].portfolio.cash = 60000.0
+ok('T170 真实恢复切换并滚动基线', abs(ns['_avail_cash'](ns['_CTX']) - 60000.0) < 1e-9
+   and ns['g'].cash_src == 'real' and ns['g'].cash_baseline == 60000.0)
+
+# --- T171 09:31 首触保留：当日不重置，跨日才重置 ---
+ns = fresh(); g171 = ns['g']
+g171.exp_day = '2026-10-16'
+g171.first_zt = {'600150.XSHG': {'day': '2026-10-16', 'break': False}}
+g171.l2_big = {'600150.XSHG': {'buy': 1.0}}
+g171.lb_senti = {'phase': 'x'}
+ok('T171 当日 first_zt/L2 保留', ns['_after_open_state_sync']() == 'keep'
+   and '600150.XSHG' in g171.first_zt and '600150.XSHG' in g171.l2_big)
+g171.exp_day = '2026-10-17'
+g171.first_zt = {'600151.XSHG': {'day': '2026-10-17'}}
+ok('T171 跨日重置清空首触/L2', ns['_after_open_state_sync']() == 'reset'
+   and g171.first_zt == {} and g171.l2_big == {})
+
+# --- T172 无回报兜底：查询无匹配打 [order-lost]，买入不释放 ---
+ns = fresh(); fake172 = _FakeTime(1000.0); ns['time'] = fake172
+ns['g'].daily['bought'] = ['600152.XSHG']
+ns['g'].buy_commit = {'600152.XSHG': 2200.0}
+ns['g'].pending['600152.XSHG'] = {'no': 'E152', 'side': 'buy', 'qty': 200, 'limit': 11.0,
+                                  'status': 'SENT', 'filled': 0, 'ts': fake172.t - 100}
+ns['_save_state'] = lambda *a, **k: None
+ns['_sn'] = lambda sec: sec
+logs172 = []
+ns['log'] = _cap_log(logs172)
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: []
+ns['_no_reply_reconcile']()
+ok('T172 order-lost 不释放名额/承诺', '600152.XSHG' in ns['g'].daily['bought']
+   and '600152.XSHG' in ns['g'].buy_commit and any('[order-lost]' in x for x in logs172))
+
+# --- T173 桥持仓残留 [pos-stale] 一次性日志 ---
+ns = fresh()
+ns['g'].pending['600153.XSHG'] = {'side': 'sell', 'status': 'FILLED'}
+ns['g'].holdings_keys_hint = ['600153.XSHG']
+logs173 = []
+ns['log'] = _cap_log(logs173)
+ns['_sn'] = lambda sec: sec
+ns['_audit_sell_skip']('600153.XSHG', 'amt0(lookup key=600153.XSHG)', now=1000.0)
+ns['_audit_sell_skip']('600153.XSHG', 'amt0(lookup key=600153.XSHG)', now=1061.0)
+ok('T173 pos-stale 只打一次', len([x for x in logs173 if '[pos-stale]' in x]) == 1)
 
 print('ALL DONE')
 
