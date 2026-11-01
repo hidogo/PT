@@ -3,14 +3,36 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.14（2026-10-30）
+- 当前版本：v1.15（2026-10-30）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.14 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.15 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.15
+- v1.15 打板撤单终态确认 + 卖出重投熔断（2026-10-30 用户确认后实施，红太阳/603663 根因）：
+  - 撤单成败不以 `cancel_order` 返回值判断（PTrade 恒返回 None）：`_board_queue_cancel` 先标记
+    `cancel_pending`，调用后立即 `_query_open_order_status(sec=..., backfill=True)` 查询终态，
+    只有确认 `CANCELLED/REJECTED` 才释放买入名额/承诺；`FILLED` 保留名额但释放承诺；
+    `SENT/PARTIAL/无匹配` 保持 `cancel_pending` 交 `_board_cancel_reconcile` 60s 兜底对账，
+    长时间未确认打 `[board-cancel-warn]` 保留占坑（不假装已撤）。
+  - 零回报 UUID 单闭环：`_query_open_order_status` 新增按 symbol/side/qty 匹配辅助
+    `_order_matches_symbol` + `_backfill_entrust`，从 `get_open_orders/get_all_orders` 找回
+    云端数字委托号并回填 `pending.no`，之后撤单/查询才能命中（红太阳 P0 修复）。
+  - 卖出重投前可卖量校验：`_do_sell` 前置 `_retry_sell_blocked`，桥可卖 0 停止重投并打
+    `[sell-retry-block]`，防止 2026-10-30 603663 连续废单刷屏。
+  - 卖出连续 `CANCELLED/REJECTED` 熔断：`_sell_inflight` 按 `sell_retry_max=3` 计数，
+    超限后 `retry_pause_until=now+600s` 暂停重投（`[sell-retry-pause]`），暂停到期放行一次试探
+    （`[sell-retry-resume]`）；`g.sell_retry_cnt` 跨日重置。
+  - urgent 卖出限价贴近现价：默认 `现价-1分`（下限 `现价*0.98`，`sell_urgent_floor` 语义改为
+    仅当现价接近跌停价 `+1%` 或现价缺失时降级跌停地板价），`order_limit_src=sell_near/sell_floor`
+    审计。
+  - 测试：selftest T14 更新为贴近现价 10.49 + 新增 T14c/T175-T178（按 symbol 回填、
+    UUID 撤单确认释放、可卖 0 阻塞、连续 CANCELLED 熔断与到期试探），全量 PASS、
+    pytest 通过、双编译 + deploy AST 一致。
 
 ### v1.14
 - v1.14 各类买入信号每日次数闸门分类化（2026-10-30 用户确认后实施）：

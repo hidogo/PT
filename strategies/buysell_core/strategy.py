@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.14（2026-10-30）
-# 部署核对：日志首行 `buysell_core init version=v1.14 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.15（2026-10-30）
+# 部署核对：日志首行 `buysell_core init version=v1.15 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.14"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-30）
+STRATEGY_VERSION = "v1.15"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-30）
 
 
 def _warn(msg):
@@ -100,14 +100,19 @@ BLS = {
     'seal_exceed_ratio': 1.2,       # 一字板封单 >= 基准*1.2 -> 超预期
     'sell_half_ratio': 0.5,        # P6 评分半仓：卖 可卖数量×比例（整手取整）
     'sell_cold_secs': 30.0,        # 卖出冷却：成交回报驱动的去重备用（未成交防叠单）
-    'sell_urgent_floor': 1,        # 核卖(P1/P2E/P3)限价用跌停地板价, 保证下跌中成交(对齐AXquant核卖limit_down_price)
+    'sell_urgent_floor': 1,        # v1.15 核卖跌停地板价仅作降级(现价接近跌停/无现价时使用), 默认贴近现价
+    'urgent_sell_max_discount': 0.02,   # v1.15 urgent 卖出限价下限: 现价*(1-2%), 防超低价废单
+    'urgent_sell_floor_near': 0.01,     # v1.15 现价 <= 跌停价*(1+1%) 时才用跌停地板价
     'limit_down_main': 0.10,       # 主板跌停幅
     'limit_down_chinext': 0.20,    # 创业板/科创板 20cm
     'limit_down_bse': 0.30,        # 北交所 30cm
     'sell_pending_timeout': 120.0, # 卖单挂起超时无回报 -> 视为丢失, 放行重试(对齐AXquant order_lost)
+    'sell_retry_max': 3,           # v1.15 卖单连续 CANCELLED/REJECTED 轮数上限, 超过暂停重投
+    'sell_retry_pause_sec': 600.0, # v1.15 卖单重投熔断暂停秒数(暂停到期放行一次试探)
     'sell_skip_heartbeat_sec': 60.0, # v1.12 [sell-skip] 同因心跳节流（60s 一次并带期间计数）
     'order_no_reply_timeout': 90.0,  # v1.13 发单后无任何回报超时（_no_reply_reconcile 兜底查询）
     'order_reconcile_interval_sec': 60.0,  # v1.13 撤单失败/无回报委托兜底对账节流
+    'board_cancel_warn_sec': 300.0,  # v1.15 撤单终态长时间未确认告警阈值
     'cash_baseline_window': 300.0,   # v1.13 开盘资金未就绪时基线兜底窗口（09:25 前后缓存真实现金）
     'seal_fail_ratio': 0.333,       # 封单衰退：<= 基准*(1/3) -> 破
     'board_queue_cancel_seal_ratio': 0.333,   # v1.6 打板未成交排单：封单<=基准*该比例 -> 撤单（缺省对齐 seal_fail_ratio）
@@ -833,7 +838,7 @@ def _maybe_roll_day():
     g.ma5_lifecycle_day = day; g.ma5_lows = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0   # v0.74 跨日重置近涨停通道与扫描游标
-    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''   # v0.75/76/80/81/1.5 + v1.12 跨日重置
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}   # v0.75/76/80/81/1.5 + v1.12/1.15 跨日重置
     return True
 
 
@@ -1535,25 +1540,36 @@ def _board_queue_cancel(sec, seal, bids):
         if sec in _cc:
             return False   # 已撤（防同帧/重试重复撤）
         _cc.add(sec)
+        # v1.15 撤单成败不以返回值判断（PTrade cancel_order 恒返回 None，失败仅打印日志）：
+        # 先标记 cancel_pending，调用后立即查询终态确认，只有确认 CANCELLED/REJECTED 才释放名额/承诺。
+        pp['cancel_pending'] = True
+        pp['cancel_pending_ts'] = time.time()
         try:
-            _ok = cancel_order(ent)
+            cancel_order(ent)
         except Exception as _e:
             # v1.13 撤单失败不释放名额/承诺：标记 cancel_pending，等回报或 _board_cancel_reconcile 兜底
             _warn('board queue cancel fail %s: %r -> cancel_pending(等回报/兜底对账)' % (_sn(sec), _e))
-            pp['cancel_pending'] = True
-            pp['cancel_pending_ts'] = time.time()
             return True
-        if _ok is False:
-            # v1.13 云端明确返回 False 同样视为撤单失败，不释放
-            _warn('board queue cancel fail %s: return False -> cancel_pending(等回报/兜底对账)' % _sn(sec))
-            pp['cancel_pending'] = True
-            pp['cancel_pending_ts'] = time.time()
+        st = _query_open_order_status(ent, sec=sec, side='buy', qty=pp.get('qty'), backfill=True)
+        if st in ('CANCELLED', 'REJECTED'):
+            pp['status'] = st
+            pp['cancel_ts'] = time.time()
+            _buy_commit_rel(sec, int(pp.get('qty') or 0), float(pp.get('limit') or 0.0))
+            log.info('[board-cancel-ok] %s 撤单确认终态=%s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 释放名额/承诺' % (
+                _sn(sec), st, seal, base, (seal / base if base > 0 else 0.0), bids, bbase))
+            _release_buy_slot(sec)
+            pp.pop('cancel_pending', None)
             return True
-        pp['status'] = 'CANCELLED'; pp['cancel_ts'] = time.time()
-        _buy_commit_rel(sec, int(pp.get('qty') or 0), float(pp.get('limit') or 0.0))
-        log.info('[board-cancel] %s 打板排单封单衰减 seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 撤单 ent=%s' % (
-            _sn(sec), seal, base, (seal / base if base > 0 else 0.0), bids, bbase, ent))
-        _release_buy_slot(sec)
+        if st == 'FILLED':
+            pp['status'] = 'FILLED'
+            pp['filled'] = int(pp.get('qty') or 0)
+            _buy_commit_rel(sec, int(pp.get('qty') or 0), float(pp.get('limit') or 0.0))
+            log.info('[board-cancel-filled] %s 撤单查询已成交 -> 保留名额释放承诺' % _sn(sec))
+            pp.pop('cancel_pending', None)
+            return True
+        # st in (None, '', 'SENT', 'PARTIAL')：保持 cancel_pending，等 _board_cancel_reconcile 兜底
+        log.info('[board-cancel-pending] %s 撤单请求已发 查询=%s -> cancel_pending(不释放)' % (
+            _sn(sec), st if st is not None else 'fail'))
         return True
     except Exception:
         return False
@@ -6134,9 +6150,13 @@ def _sell_inflight(sec):
     # 是否有未终态卖出挂单在途（订单/成交回报驱动，替代纯时间冷却）：有则本次不叠单
     # v1.13 超时后先查 open/all orders：在途/查询失败继续等；FILLED 禁止重投；
     # CANCELLED/REJECTED 或无匹配才放行重试（防 2026-10-30 徕木 120s 重复投递）。
+    # v1.15 连续 CANCELLED/REJECTED 熔断暂停；零回报单按 symbol 回填委托号。
     p = (getattr(g, 'pending', None) or {}).get(sec) or {}
     if str(p.get('side') or '') != 'sell':
         return False
+    _pu = float(p.get('retry_pause_until') or 0)
+    if str(p.get('retry_blocked')) == 'True' and _pu > time.time():
+        return True   # v1.15 熔断暂停期：不重投
     st = str(p.get('status') or 'SENT').upper()
     if st == 'FILLED':
         return True   # v1.13 已成交不再重投（桥残留由 [pos-stale]/sync_positions 收敛）
@@ -6146,7 +6166,7 @@ def _sell_inflight(sec):
     if ts > 0 and (time.time() - ts) > float(BLS.get('sell_pending_timeout', 120.0)):
         ent = str(p.get('no') or '')
         if ent:
-            st2 = _query_open_order_status(ent)
+            st2 = _query_open_order_status(ent, sec=sec, side='sell', qty=p.get('qty'), backfill=True)
             if st2 == 'SENT':
                 p['ts'] = time.time()   # 仍在在途：刷新时间戳继续等
                 return True
@@ -6159,6 +6179,35 @@ def _sell_inflight(sec):
                 log.info('[sell-replace] %s 查询确认已成交 -> 不重投' % _sn(sec))
                 return True
             if st2 in ('CANCELLED', 'REJECTED'):
+                # v1.15 熔断：连续超限后暂停重投，暂停到期放行一次试探
+                _rc = int((getattr(g, 'sell_retry_cnt', None) or {}).get(sec) or 0) + 1
+                if not isinstance(getattr(g, 'sell_retry_cnt', None), dict):
+                    g.sell_retry_cnt = {}
+                g.sell_retry_cnt[sec] = _rc
+                _max = int(BLS.get('sell_retry_max', 3) or 3)
+                if _rc > _max:
+                    _pu2 = float(p.get('retry_pause_until') or 0)
+                    _ps = float(BLS.get('sell_retry_pause_sec', 600.0) or 600.0)
+                    if _pu2 <= 0:
+                        p['retry_pause_until'] = time.time() + _ps
+                        p['retry_blocked'] = True
+                        g.sell_retry_cnt[sec] = 1
+                        log.info('[sell-retry-pause] %s 连续%d轮%s -> 暂停重投%.0fs' % (_sn(sec), _rc, st2, _ps))
+                    elif time.time() < _pu2:
+                        p['retry_blocked'] = True
+                        _skip_log('sell_retry', sec, 'pause',
+                                  '[sell-retry-pause] %s 暂停中(至%.1f) %s' % (_sn(sec), _pu2, st2),
+                                  throttle_sec=60.0)
+                    else:
+                        g.sell_retry_cnt[sec] = 0
+                        p.pop('retry_pause_until', None)
+                        p['retry_blocked'] = False
+                        log.info('[sell-retry-resume] %s 暂停到期 -> 放行一次重试' % _sn(sec))
+                    p['status'] = st2
+                    if str(p.get('retry_blocked')) == 'True':
+                        return True
+                    return False
+                p['retry_blocked'] = False
                 p['status'] = st2
                 log.info('[sell-replace] %s 查询确认终态=%s -> 放行重试' % (_sn(sec), st2))
                 return False
@@ -6169,9 +6218,33 @@ def _sell_inflight(sec):
     return True
 
 
+def _retry_sell_blocked(sec):
+    # v1.15 卖单重投前可卖量校验：桥可卖0/不可用 -> 停止重投，防止连续废单刷屏
+    try:
+        pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
+        if str(pp.get('side') or '') != 'sell':
+            return False
+        if str(pp.get('status') or '').upper() == 'FILLED':
+            return False
+        _pos = _sellable_source() or {}
+        _q = _sellable(sec, _pos)
+        if _q <= 0:
+            pp['retry_blocked'] = True
+            _skip_log('sell_retry', sec, 'block',
+                      '[sell-retry-block] %s 重投前可卖量=0 -> 停止重投' % _sn(sec),
+                      throttle_sec=60.0)
+            return True
+        pp['retry_blocked'] = False
+        return False
+    except Exception:
+        return False
+
+
 def _do_sell(context, sec, qty, note, urgent=False, mode=None, cool=True):
     # 统一卖出入口：sold_log 冷却 + 在途挂单守卫(_sell_inflight)；urgent(核卖)限价用跌停地板价保成交
     if qty <= 0:
+        return
+    if _retry_sell_blocked(sec):
         return
     if not isinstance(getattr(g, 'sold_log', None), dict):
         g.sold_log = {}
@@ -7825,9 +7898,17 @@ def _order_limit(sec, side, mode):
     if side == 'sell':
         g.order_limit_src = 'sell'
         if mode == 'sell_urgent' and BLS.get('sell_urgent_floor', 1):
+            # v1.15 urgent 卖出贴近现价：现价-1档（下限现价*0.98），跌停地板价仅接近跌停/无现价时降级
             floor = _limit_down_price(sec)
-            if floor and floor > 0:
+            _near = _round_price(px - 0.01)
+            _low = _round_price(px * (1.0 - float(BLS.get('urgent_sell_max_discount', 0.02) or 0.02)))
+            if _near < _low:
+                _near = _low
+            if floor and floor > 0 and px <= floor * (1.0 + float(BLS.get('urgent_sell_floor_near', 0.01) or 0.01)):
+                g.order_limit_src = 'sell_floor'
                 return _round_price(floor)
+            g.order_limit_src = 'sell_near'
+            return _near
         if mode == 'sell_break':   # v0.49 炸板卖出：L2 买N档限价（默认买3），缺失回退现价；0.95 下限防过度杀价
             try:
                 gp = _gear(sec)
@@ -8037,9 +8118,47 @@ def _trade_side(bs):
     return ''
 
 
-def _query_open_order_status(ent):
+def _order_matches_symbol(o, sec, side=None, qty=None):
+    # v1.15 按 symbol 匹配委托（零回报 UUID 单找回数字委托号的辅助判断）
+    try:
+        _sym = str(_o_get(o, 'symbol') or _o_get(o, 'stock_code') or '')
+        if not _sym:
+            return False
+        if _norm_sec(_sym) != _norm_sec(sec):
+            return False
+        _bs = _trade_side(str(_o_get(o, 'side', 'entrust_bs') or ''))
+        if side and _bs and _bs != side:
+            return False
+        if qty:
+            _amt = int(float(_o_get(o, 'amount') or 0) or 0)
+            if _amt and abs(_amt) != int(qty):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _backfill_entrust(sec, o, st):
+    # v1.15 把云端数字 entrust_no 回填 pending.no，后续撤单/查询才能命中
+    try:
+        _ent = str(_o_get(o, 'entrust_no') or '')
+        if not _ent:
+            return st or ''
+        pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
+        old = str(pp.get('no') or '')
+        if old != _ent:
+            pp['no'] = _ent
+            log.info('[entrust-backfill] %s 按symbol回填委托号 old=%s -> %s status=%s' % (
+                _sn(sec), old or '-', _ent, st or '?'))
+        return st or ''
+    except Exception:
+        return st or ''
+
+
+def _query_open_order_status(ent, sec=None, side=None, qty=None, backfill=False):
     # v1.13 委托兜底查询：get_open_orders() 在途 -> SENT；get_all_orders() 终态回填；
     # 查询失败返回 None（保守等待），查询成功无匹配返回 ''（确认不在在途）。
+    # v1.15 零回报 UUID 单按 symbol 找回数字委托号（backfill=True 时回填 pending.no）。
     ent = str(ent or '')
     if not ent:
         return None
@@ -8047,12 +8166,20 @@ def _query_open_order_status(ent):
         for o in (get_open_orders() or []):
             if str(_o_get(o, 'entrust_no') or '') == ent:
                 return 'SENT'
+        if backfill and sec:
+            for o in (get_open_orders() or []):
+                if _order_matches_symbol(o, sec, side, qty):
+                    return _backfill_entrust(sec, o, 'SENT')
     except Exception:
         return None
     try:
         for o in (get_all_orders() or []):
             if str(_o_get(o, 'entrust_no') or '') == ent:
                 return _map_order_status(_o_get(o, 'order_status', 'status'))
+        if backfill and sec:
+            for o in reversed(list(get_all_orders() or [])):
+                if _order_matches_symbol(o, sec, side, qty):
+                    return _backfill_entrust(sec, o, _map_order_status(_o_get(o, 'order_status', 'status')))
     except Exception:
         return None
     return ''
@@ -8185,7 +8312,7 @@ def _board_cancel_reconcile():
             ent = str(pp.get('no') or '')
             if not ent:
                 continue
-            st = _query_open_order_status(ent)
+            st = _query_open_order_status(ent, sec=sec, side='buy', qty=pp.get('qty'), backfill=True)
             if st == 'SENT':
                 pp['cancel_pending_ts'] = now   # 撤单请求可能在途：继续等
                 continue
@@ -8210,6 +8337,12 @@ def _board_cancel_reconcile():
                 continue
             # st == ''：查询成功无匹配，无法确认终态，不释放（on_order_response 仍会兜底）
             _skip_log('board_cancel', sec, 'lost', '[board-cancel-lost] %s 查询无匹配，不释放名额/承诺' % _sn(sec), throttle_sec=60.0)
+            # v1.15 长时间无法确认终态告警（保留占坑，不新增重试频率）
+            _ts0 = float(pp.get('cancel_pending_ts') or 0)
+            if _ts0 > 0 and now - _ts0 > float(BLS.get('board_cancel_warn_sec', 300.0) or 300.0):
+                _skip_log('board_cancel_warn', sec, 'pending',
+                          '[board-cancel-warn] %s 撤单终态长时间未确认(%.0fs) -> 保留名额占坑' % (_sn(sec), now - _ts0),
+                          throttle_sec=300.0)
         return n
     except Exception:
         return 0
@@ -8237,7 +8370,7 @@ def _no_reply_reconcile():
             ent = str(pp.get('no') or '')
             if not ent:
                 continue
-            st = _query_open_order_status(ent)
+            st = _query_open_order_status(ent, sec=sec, side=pp.get('side'), qty=pp.get('qty'), backfill=True)
             if st in ('SENT', 'PARTIAL'):
                 pp['ts'] = now   # 仍在在途/部分成交：刷新时间戳继续等
                 continue

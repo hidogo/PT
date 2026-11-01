@@ -239,7 +239,20 @@ ns['_auction_change'] = lambda c: -3.0
 ns['get_stop_loss_pct'] = lambda sec: 0.05
 ns['BLS']['DO_ORDER'] = True
 ns['sell_manager'](ctx)
-ok('T14 P2E exp_miss clears via sell order(核卖地板价9.0)', len(ns['_RECC']['calls']) == 1 and ns['_RECC']['calls'][0]['limit_price'] == 9.0)
+ok('T14 P2E exp_miss clears via sell order(核卖贴近现价10.49)', len(ns['_RECC']['calls']) == 1 and ns['_RECC']['calls'][0]['limit_price'] == 10.49)
+
+# T14c v1.15 核卖贴近现价但接近跌停时降级地板价
+ns = fresh()
+ctx = ns['_ctx']
+ns['g'].exp_file = {}
+ctx.portfolio.positions = {'600050.XSHG': _t.SimpleNamespace(amount=1000, cost_basis=10.0)}
+ns['g'].exp_file['600050.XSHG'] = {'side':'sell','expected_status':'confirmed_miss'}
+ns['g'].spot['600050.XSHG'] = {'last_px':9.05,'preclose_px':10.0,'up_px':11.0,'wavg_px':9.05,'trade_status':'OPEN'}
+ns['_auction_change'] = lambda c: -3.0
+ns['get_stop_loss_pct'] = lambda sec: 0.05
+ns['BLS']['DO_ORDER'] = True
+ns['sell_manager'](ctx)
+ok('T14c 接近跌停核卖降级地板价9.0', len(ns['_RECC']['calls']) == 1 and ns['_RECC']['calls'][0]['limit_price'] == 9.0)
 
 # T14b pending_miss 默认不卖（exp_sell_on_pending_miss=False）
 ns = fresh()
@@ -467,7 +480,7 @@ ok('T24 limit_down 主板 -10% = 9.0', abs(ns['_limit_down_price']('600006.XSHG'
 ns['g'].spot['300006.XSHE'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 12.0, 'trade_status': 'OPEN'}
 ok('T24 limit_down 创业板 -20% = 8.0', abs(ns['_limit_down_price']('300006.XSHE') - 8.0) < 1e-9)
 ok('T24 普通卖出限价=现价 10.0', ns['_order_limit']('600006.XSHG', 'sell', 'sell') == 10.0)
-ok('T24 核卖限价=跌停地板 9.0', ns['_order_limit']('600006.XSHG', 'sell', 'sell_urgent') == 9.0)
+ok('T24 核卖限价=贴近现价 9.99', ns['_order_limit']('600006.XSHG', 'sell', 'sell_urgent') == 9.99)
 
 # 在途挂单守卫
 ns = fresh(); ns['g'].pending['600007.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT'}
@@ -1062,12 +1075,18 @@ def _bq_setup():
     return ns
 
 ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)   # 封单 30% < 33.3% -> 撤
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E80', 'order_status': '5'}]   # v1.15 撤单需查询确认终态
 ok('T45 封单衰减 -> 撤单', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True)
-ok('T45 撤单释放名额+承诺', ns['g'].daily['bought'] == [] and '600080.XSHG' not in ns['g'].buy_commit)
+ok('T45 撤单确认终态释放名额+承诺', ns['g'].daily['bought'] == [] and '600080.XSHG' not in ns['g'].buy_commit)
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)
+ok('T45 撤单查询未确认不释放', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True
+   and ns['g'].daily['bought'] == ['600080.XSHG'] and '600080.XSHG' in ns['g'].buy_commit
+   and ns['g'].pending['600080.XSHG'].get('cancel_pending') is True)
 ok('T45 撤单去重', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is False)
 ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (800000.0, 8)   # 封单 80% -> 不撤
 ok('T45 封单充足 -> 不撤', ns['_board_queue_cancel']('600080.XSHG', 800000.0, 8) is False)
 ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (600000.0, 4)   # 委托笔数 40% < 50% -> 撤
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E80', 'order_status': '5'}]
 ok('T45 委托笔数骤降 -> 撤单', ns['_board_queue_cancel']('600080.XSHG', 600000.0, 4) is True)
 ns = _bq_setup(); ns['g'].pending['600080.XSHG']['filled'] = 200   # 已成交/部分成交 -> 不撤
 ok('T45 已成交不撤', ns['_board_queue_cancel']('600080.XSHG', 0.0, 0) is False)
@@ -5790,6 +5809,64 @@ ns['_sn'] = lambda sec: sec
 ns['_audit_sell_skip']('600153.XSHG', 'amt0(lookup key=600153.XSHG)', now=1000.0)
 ns['_audit_sell_skip']('600153.XSHG', 'amt0(lookup key=600153.XSHG)', now=1061.0)
 ok('T173 pos-stale 只打一次', len([x for x in logs173 if '[pos-stale]' in x]) == 1)
+
+# ================= v1.15 撤单终态确认/卖出熔断 =================
+# --- T175 零回报 UUID 单按 symbol 回填数字委托号 ---
+ns = fresh()
+ns['g'].pending['600180.XSHG'] = {'side': 'buy', 'qty': 200, 'status': 'SENT', 'filled': 0}
+logs175 = []
+ns['log'] = _cap_log(logs175)
+ns['_sn'] = lambda sec: sec
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E180', 'symbol': '600180.XSHG', 'side': '1',
+                                 'amount': 200, 'order_status': '5'}]
+st175 = ns['_query_open_order_status']('UUID-180', sec='600180.XSHG', side='buy', qty=200, backfill=True)
+ok('T175 按symbol回填委托号并返回终态', st175 == 'CANCELLED'
+   and ns['g'].pending['600180.XSHG']['no'] == 'E180'
+   and any('[entrust-backfill]' in x for x in logs175))
+
+# --- T176 打板撤单：UUID 委托号经 symbol 回填确认后释放名额/承诺 ---
+ns = _bq_setup(); ns['_seal_metrics'] = lambda sec: (300000.0, 4)
+ns['g'].pending['600080.XSHG']['no'] = 'UUID-080'
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E80', 'symbol': '600080.XSHG', 'side': '1',
+                                 'amount': 200, 'order_status': '5'}]
+ok('T176 UUID撤单按symbol确认释放', ns['_board_queue_cancel']('600080.XSHG', 300000.0, 4) is True
+   and ns['g'].daily['bought'] == [] and '600080.XSHG' not in ns['g'].buy_commit
+   and ns['g'].pending['600080.XSHG'].get('no') == 'E80')
+
+# --- T177 卖单重投前可卖量校验：桥可卖 0 停止重投 ---
+ns = fresh()
+ns['_sn'] = lambda sec: sec
+ns['g'].pending['600181.XSHG'] = {'side': 'sell', 'status': 'SENT'}
+ns['get_positions'] = lambda: {'600181.XSHG': {'enable_amount': 0}}
+ok('T177 可卖0 -> 重投阻塞', ns['_retry_sell_blocked']('600181.XSHG') is True)
+ns['get_positions'] = lambda: {'600181.XSHG': {'enable_amount': 100}}
+ok('T177 可卖>0 -> 放行重投', ns['_retry_sell_blocked']('600181.XSHG') is False)
+ns['get_positions'] = lambda: {'600181.XSHG': {'enable_amount': 0}}
+ns['_do_sell'](ns['_CTX'], '600181.XSHG', 100, 't177')
+ok('T177 可卖0 -> _do_sell 不投单', len(ns['_RECC']['calls']) == 0)
+
+# --- T178 卖单连续 CANCELLED/REJECTED 熔断暂停，到期放行试探 ---
+ns = fresh(); fake178 = _FakeTime(1000.0); ns['time'] = fake178
+ns['_sn'] = lambda sec: sec
+ns['get_open_orders'] = lambda: []
+ns['get_all_orders'] = lambda: [{'entrust_no': 'E182', 'order_status': '5'}]
+def _retry_pending():
+    ns['g'].pending['600182.XSHG'] = {'side': 'sell', 'qty': 100, 'status': 'SENT',
+                                      'ts': fake178.t - 200, 'no': 'E182'}
+for _i in range(3):
+    _retry_pending()
+    ok('T178 连续CANCELLED前3轮放行', ns['_sell_inflight']('600182.XSHG') is False)
+_retry_pending()
+ok('T178 第4轮熔断暂停', ns['_sell_inflight']('600182.XSHG') is True
+   and ns['g'].pending['600182.XSHG'].get('retry_blocked') is True
+   and float(ns['g'].pending['600182.XSHG'].get('retry_pause_until') or 0) > fake178.t)
+ok('T178 暂停期内不重投', ns['_sell_inflight']('600182.XSHG') is True)
+fake178.t += 601.0
+_retry_pending()
+ok('T178 暂停到期放行试探', ns['_sell_inflight']('600182.XSHG') is False
+   and ns['g'].pending['600182.XSHG'].get('retry_blocked') is False)
 
 print('ALL DONE')
 
