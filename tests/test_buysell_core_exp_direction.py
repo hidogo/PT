@@ -227,7 +227,7 @@ def test_cx_order_note_logs_direction_but_keeps_position_ratio(mod):
         return 100
 
     mod._calc_buy_qty = _calc
-    mod._buy_pos_ok = lambda context, sec, qty, limit: True
+    mod._buy_pos_cap_qty = lambda context, sec, qty, limit: qty
     mod._signal = lambda *args, **kwargs: None
 
     def _place(context, sec, note=""):
@@ -259,7 +259,7 @@ def test_place_expected_order_ratio_is_independent_of_direction(mod):
         return 100
 
     mod._calc_buy_qty = _calc
-    mod._buy_pos_ok = lambda context, sec, qty, limit: True
+    mod._buy_pos_cap_qty = lambda context, sec, qty, limit: qty
     mod._signal = lambda *args, **kwargs: None
 
     ok = mod.place_expected_order(SimpleNamespace(), "A", note="direction ignored here")

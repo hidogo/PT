@@ -3,14 +3,150 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.15（2026-10-30）
+- 当前版本：v1.23（2026-11-02）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.15 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.23 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.23
+- v1.23 SEAL_LOW 稳健性（2026-11-02 用户确认“尾盘竞价阶段适用两帧确认”，红太阳 14:57 L2 整批空档误卖根因修复）：
+  - L2 封单数据有效性门：`_seal_book_ok` 区分「买一真实为 0」与「get_gear_price
+    整批返回空/缺 bid_grp」；数据未知时不再置 `seal_low`，从源头消除批量空档误卖。
+  - 两帧确认：`seal_low_confirm_sec=6.0`（3s tick 约两帧），首帧只打
+    `SEAL_LOW(待确认)`；尾盘竞价段同样生效，`[seal-low-guard] confirm_wait` 审计。
+  - 快确认保灵敏度：封单骤减至 `seal_low_fast_ratio=0.15`（首封比例，含 0）
+    时打 `SEAL_LOW_FAST`，1 帧即卖（`[seal-low-guard] ... 立即卖出`），
+    不损失盘中封单骤减的灵敏度；整批不健康时仍熔断并重置快确认时间戳。
+  - 恢复清除：封单恢复或现价仍 ≥ 涨停价且未破板时立即撤销 `seal_low` 并清确认时间戳，
+    防止单帧抖动永久误卖（`_update_seal_low_state`）。
+  - 整批熔断：帧末统计 L2 十档缺失家数/占比，超过
+    `seal_low_batch_invalid_min=5` 且 `seal_low_batch_invalid_ratio=0.3` 时
+    `seal_batch_unhealthy=True`，该帧跳过 SEAL_LOW 卖出并打 `[gear-na]`。
+  - 测试：新增 `tests/test_buysell_core_v123_seal_low_guard.py`（空档不置位、
+    单帧不卖/两帧卖、整批熔断、封死恢复清除、有效数据低位仍置位）。
+
+### v1.22
+- v1.22 重启稳健性/降噪/桥持仓审计（2026-11-02 用户确认“优先考虑灵敏度、稳健性，并实施”）：
+  - 同日重启日线冷缓存恢复：`before_trading_start` 同日重启分支新增
+    `_hist1d_restart_warm('restart')`，按 positions + exp buy + CORE 优先级暖
+    hist1d 并同步 `_ma5_base4`，受 `frame_hist1d_prio_limit_fast` 高优先级配额
+    控制；超配额票进 `hist_na_pending` 由恢复探针续拉，参数
+    `hist1d_restart_warm_enabled/hist1d_restart_warm_cap`。
+  - 恢复日志当日去重：`g.hist_recover_once[(tag,day,sec)]`，同一票当日
+    `[score-recover]/[ma5-recover]` 各只打一次；TTL 失效补拉仍执行，只抑制重复
+    日志（参数 `score_recover_dedup_enabled`）。
+  - 桥持仓 amount=0 审计：`on_trade_response` buy 成交累计 `g.bought_qty[code]`
+    并持久化；`[sell-skip] amt0(...)` 补 bought_qty；`_sellable_backfill_detail`
+    总量缺失/为 0 时打 `[pos-amt0]` 明细且不回填（参数
+    `sell_avail_amt0_warn_only=True`，防虚构可卖）。
+  - `sync_positions.py` 加固：API amount=0 而导出 CSV 有量时以 CSV 为准
+    （`export_csv_override`）；新源与 CSV 均无量但昨日有持仓时保留旧记录
+    `stale_keep` 并打 `[sync-pos] amount_lost` 告警，不静默覆盖。
+  - 反复炸板/回封降噪：`last_break_ts/last_reboard_ts` 每次翻转更新，
+    TICK 炸板卖出 held 改用最近破板时间（`_break_held_ts`），`reboard_ts` 保留
+    首回封语义；炸板/回封日志按 `firstzt_rebreak_log_sec=30s` 节流，不阻塞
+    状态机与卖出主链路。
+  - 测试：新增 `tests/test_buysell_core_v122_restart_robust.py`（重启暖缓存
+    配额/MA5 同步、恢复日志去重、firstzt 炸板日志节流、bought_qty 成交累计、
+    amt0 不回填审计、break held 时间戳），全量 pytest 通过。
+
+### v1.21
+- v1.21 每日买入分类闸门 + 逐票跳过审计 + MA5 预温补评（2026-11-02 用户确认 A→B→C→D 后实施）：
+  - 名额规则：打板类 `board` 2 个名额（打板未成交不算占用）；`exp_chase`/`ma5`/`core`/
+    `elastic_arb`/`elastic_top` 各自独立 1 个名额、不共用；仍保留单日总买入上限
+    `daily_max_buy=3`。旧状态 `bought_other`/`legacy_other` 仅作未知 kind 兜底迁移，
+    不参与新通道占用判定；`_new_daily` 统一初始化各分类列表与 `bought_kind` 映射，
+    `_buy_slot_rel/_release_buy_slot/_reconcile_buy_slot_lists` 全量同步释放/对账，
+    收盘日志按策略输出 `kind=used/limit`。
+  - 逐票跳过审计：`elastic-arb-skip`（not_eligible/strong_board/board_rank/one_word/
+    no_preclose/open_high/no_px/chg_range/1m_surge/cold_or_trade/sealed）、
+    `elastic-top-skip`（position/bought/direction_gate/one_word/sealed/mid_avoid/no_preclose/
+    no_px/chg_range/open_high/1m_surge/cold）、`elastic-top-scan`（no_top/stability/
+    strength/open/avg5_na/boost/trig_max/tracked）、`ma5-skip`（core_only/no_px/cold_or_trade/
+    ma5_na/no_ref/band/score_na/touched/score/red），全部按 `(tag,sec,reason)` 节流防刷屏。
+  - MA5 数据链路：`_hist1d_prewarm` 预温日线后同步缓存 `_ma5_base4`，09:25 起动态 MA5
+    即可就绪；`_ensure_ma5` 未就绪进 `g.ma5_pending` 待补评，`_score_recover_probe` 内
+    新增 `_ma5_pending_probe` 在 hist1d 恢复后补算一次并打 `[ma5-recover]`，区分
+    “无数据”与“未触线”。
+  - 测试：新增 `tests/test_buysell_core_v121_slots.py`（分类名额互不共用、总闸门 3 只、
+    legacy 迁移不锁新通道、取消/拒绝只释放对应 kind、ma5_na 恢复只补评一次、预温后
+    MA5 base4 不重复拉日线、买入仓位 10%/打板预算更新），pytest 相关文件通过。
+
+### v1.20
+- v1.20 卖出保护/日线配额/评分确认三项加固（2026-11-02 用户确认 A→B→C→D 后实施）：
+  - 桥 `enable_amount` 回填：`_sellable` 走 `_sellable_backfill_detail`，可用字段缺失或
+    为 0 且总量 >0 时，非当日买入按总量兜底并打 `[sell-avail]` 审计；当日买入默认
+    `sell_avail_t1_strict=True` 保持 T+1 不回填，可配置放开；`_retry_sell_blocked`
+    先查在途卖单，防回填后对冻结份额重复重投；`sync_positions.py` 对 API 可卖 0 标
+    `api_zero`、CSV 缺“可用数量”列按总量回填标 `export_backfill`，API 空且已有持仓
+    文件非空时保留旧文件不覆盖。
+  - hist1d 配额：`_source_limit` 高优先级也支持 10:00 前 `_fast` 档，新增
+    `frame_hist1d_prio_limit_fast=40`（10:00 后回落 12）；核心/预期票日线 TTL 放大到
+    `hist1d_core_ttl=180` 覆盖 09:25→09:31 窗口；预暖 miss 进 `hist_na_pending` 由
+    恢复探针统一 `prio=1` 续拉，防旁路票挤占。
+  - P6 两帧确认：新增 `p6_two_frame_enabled/p6_confirm_frames/p6_confirm_win_sec`，
+    1m 与 3s 共用 `g.p6_weak` 计数，连续两帧弱分（间隔 ≤30s）才减半卖；评分恢复或
+    P5 清仓路径清空计数，P5 仍单帧即时执行；计数随 `_save_state` 持久化、跨日清空。
+
+### v1.19
+- v1.19 P7d 核心冲高偏离减半（2026-11-02 实施）：非唯一性核心持仓（连板≥3）
+  冲高未封板（距涨停 ≤4%）且偏离分时均价 ≥3% 时减半仓，`p7d_sold` 跨重启去重，
+  1m/3s 卖出闭环共用。
+
+### v1.18
+- v1.18 打板排单成交保护 + 卖出监控降噪 + 审计日志补齐（2026-11-02 用户确认后实施）：
+  - 排单成交保护：`place_expected_order` board 模式新增 `exp_board_queue_gate`，对已有
+    break 历史（`first_zt.break_cnt>0`）的票要求当前已回封且封单达标才下板单，否则等待
+    回封后重评、不置 `exp_fired`（修复沈阳机床 09:32 炸板排队、上海沪工 09:47 成交后
+    8 秒炸板两类风险单）；`g.pending` 记录 `break_cnt_at_send`，
+    `_board_queue_cancel` 在 `exp_board_queue_max_sec` 窗口内发现 break_cnt 增加且
+    未回封时撤单（`[board-cancel-ok] reason=break(...)`），稳定封单不硬撤。
+  - 卖出监控降噪：当日买入 T+1 `enable=0` 属正确语义，`[sell-skip]` 心跳降频
+    `sell_skip_heartbeat_t1_sec=300`；`_sellable_source` 按 `daily.sold` + 在途卖单
+    FILLED 过滤已全部成交票（PARTIAL 残留不回退），减少 `[pos-stale]` 噪音；
+    `sync_positions.py` `_record` 探测
+    `available_amount/sellable_amount/m_nCanUseVolume/m_nPREnableVolume/can_use_volume`
+    回填 `enable_amount` 并打 `[sync-pos] src=` 日志。
+  - 审计日志：中位带放行打节流后的 `[mid-allow]`（role/board/unique_high/dyn_leader/
+    new_front）；预期买入 note 与 `[exp-order]` 增加 `ft_state=`（src/ms/break_cnt/seal）；
+    `_exp_rt_status` CX 注明 `two_1m/limit_1m` 来源；`_hist1d_prewarm` 输出
+    `regress_from_prev` 与 miss 样本（46/46 -> 15/46 掉链审计）；发单前 `[qty-calc]`
+    输出 cash/total/held_mv/cap/budget/lot/qty（按票+tag 节流）。
+  - 测试：新增 `tests/test_buysell_core_v118_guards.py`（板单闸门拦截/回封放行、
+    在途 break 撤单、T+1 降频、`[mid-allow]`/`[qty-calc]` 日志、已卖过滤），
+    pytest 全量通过、双编译一致。
+
+### v1.17
+- v1.17 打板/扫板预算口径修正 + 情绪仓位闸门超限缩量参数化（2026-11-02 用户确认后实施）：
+  - `_calc_buy_qty` 期望金额由 `min(现金×比例, 单支上限, 现金)` 修正为
+    `min(总资产×比例, 单支上限, 现金)`，与 AXquant `_calc_buy_volume` 注释口径对齐；
+    空仓时等价，持仓时按总资产 20% 预算、仍受可用现金与单支上限约束，不会超配。
+  - 情绪仓位闸门超限不再一律整单拒绝：新增 `pos_cap_over_behavior`（默认
+    `shrink`=按剩余额度缩量，可选 `skip`=整单拒绝）；缩量不足一手按拒绝并计入
+    `g.pos_cap_skips`，成功缩量计入 `g.pos_cap_shrinks`，日志带 `[pos-cap] ... -> shrink`。
+  - 整手步长参数化：新增 `buy_lot_step=100`，`_calc_buy_qty` 与仓位缩量取整共用。
+  - 测试：新增 `tests/test_buy_qty_pos_cap.py`（总资产预算/单支上限/步长/缩量/不足一手/
+    skip/限内放行），selftest T67/T158 同步更新，pytest 全量通过、双编译 + deploy AST 一致。
+
+### v1.16
+- v1.16 竞价终态数据新鲜度/消费时效增强（2026-11-01 用户确认后实施，灵敏度、节奏优先）：
+  - 百日新高三态化：`_is_100day_high` 返回 `True/False/None`，复用 `_ma5_base4` 的
+    “当日未完成日线剔除”口径，比较基准改为实时价；日线缺失进 `g.hist_na_pending` 由
+    恢复探针重评，不再静默当成“非新高”。
+  - hist1d 预算与预暖：新增 `frame_hist1d_limit_fast=24`（10:00 前普通日线 10→24）与
+    `frame_hist1d_prio_limit=12`（核心/预期票独立配额）；`_hist_1d` 支持 `prio` 透传，
+    exp buy/持仓/CORE 优先；09:25/09:31 `_hist1d_prewarm` 预暖并打 `[hist1d-prewarm]`。
+  - 09:25 竞价情绪补拉：`_fill_zt_spot` 返回 `(got, missing)`，`_lb_senti_auction`
+    not_ready 时输出 missing 明细并保留 ready_detail；新增 09:26
+    `lb_senti_auction_retry`，09:31 仅作异常兜底。
+  - score-recover 优先级：`score_na_pending` 记录 prio，10:00 前恢复探针上限
+    `score_recover_probe_cap_fast=40`，核心/预期票先补评，日志带 `prio=N`。
+  - 测试：新增 `tests/test_freshness_hist1d_auction.py`（当日未完成日线剔除/缺失待重评/
+    预暖 prio=1/核心优先/补快照 missing 返回），全量 pytest 56 passed、双编译 + deploy AST 一致。
 
 ### v1.15
 - v1.15 打板撤单终态确认 + 卖出重投熔断（2026-10-30 用户确认后实施，红太阳/603663 根因）：

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.15（2026-10-30）
-# 部署核对：日志首行 `buysell_core init version=v1.15 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.23（2026-11-02）
+# 部署核对：日志首行 `buysell_core init version=v1.20 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.15"   # 部署核对：日志首行 buysell_core init version=.. （2026-10-30）
+STRATEGY_VERSION = "v1.23"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
 
 
 def _warn(msg):
@@ -56,9 +56,15 @@ BLS = {
     'ma5_first_5d': False,             # v0.69 默认按“当日首次触线”；True 可回退五日内首次回踩
     'ma5_buy_score_min': 50.0,         # 5D低吸独立评分门槛（L2 净大单加分已并入 score_now）
     'ma5_buy_ratio': 0.10,             # 5D低吸单笔仓位=总资产10%
-    'cold_secs': 60, 'daily_max_buy': 3,   # v1.14 总闸门：打板类2 + 其它类1（用户确认 2026-10-30）
+    'cold_secs': 60, 'daily_max_buy': 3,   # v1.21 总闸门：打板2 + 其它各策略1（用户确认 2026-11-02）
     'daily_max_board_buy': 2,   # v1.14 打板类每日上限（首板/回封/扫板/预期board）；未成交终态释放不占名额
-    'daily_max_other_buy': 1,   # v1.14 其它类每日上限（预期chase/5D低吸/核心票/弹性arb/top）
+    'daily_strategy_buy_limit': {   # v1.21 其它策略各独立1个名额，不共用（用户确认 2026-11-02）
+        'exp_chase': 1,             # 预期买入（非涨停价路径）
+        'ma5': 1,                   # 5D 低吸
+        'core': 1,                  # 核心票买入
+        'elastic_arb': 1,           # 弹性套利 arb
+        'elastic_top': 1,           # 新最强板块弹性 top
+    },
     # 实盘单门控（v1.0）：DO_ORDER=True 放开全路径真实委托（买卖闭环）；EXPECT_ORDER 预期买入路径
     'EXPECT_ORDER': True,           # v1.0 实盘：预期买入发真实 order()
     'tick_exp_enabled': True,       # 预期买入走 tick_data 3s 事件触发（敏捷）
@@ -85,6 +91,10 @@ BLS = {
     'first_zt_rebuild_heartbeat_sec': 60.0,  # v0.76 [restart-rebuild] 进度 heartbeat 节流
     'first_zt_rebuild_timeout_min': 30.0,  # v0.80 保留参数（v1.5 起放弃判定改用重试轮次，不再按墙钟一刀切）
     'first_zt_rebuild_max_attempts': 8,    # v1.5 重建重试轮次上限：无涨停证据票自然放弃，有证据票首次即成功
+    'hist1d_restart_warm_enabled': True,   # v1.22 同日重启日线冷缓存恢复总开关
+    'hist1d_restart_warm_cap': 40,         # v1.22 重启暖缓存单次上限（受 frame_hist1d_prio_limit_fast 配额约束）
+    'score_recover_dedup_enabled': True,   # v1.22 [score-recover]/[ma5-recover] 当日恢复日志去重（补拉不抑制）
+    'firstzt_rebreak_log_sec': 30.0,       # v1.22 反复炸板/回封日志节流秒（同票 30s 内只打一次）
     'restart_rebuild_1m_enabled': True,      # v0.76 handle_data 1m 兜底消化重建队列（tick 禁用/丢帧）
     'sim_cash_base': 0.0,                 # v1.0 实盘：关闭 SIM 虚拟资金（真实资金基准；回切模拟时改回 200000.0）
     'sim_min_lot': 100,                   # v0.80 SIM 最小一手兜底（qty<=0 时按 1 手发 SIM 信号，仅纯模拟模式）
@@ -110,6 +120,11 @@ BLS = {
     'sell_retry_max': 3,           # v1.15 卖单连续 CANCELLED/REJECTED 轮数上限, 超过暂停重投
     'sell_retry_pause_sec': 600.0, # v1.15 卖单重投熔断暂停秒数(暂停到期放行一次试探)
     'sell_skip_heartbeat_sec': 60.0, # v1.12 [sell-skip] 同因心跳节流（60s 一次并带期间计数）
+    'sell_skip_heartbeat_t1_sec': 300.0, # v1.18 当日买入(T+1 enable=0) [sell-skip] 心跳降频
+    'sell_source_filter_sold': True,     # v1.18 _sellable_source 过滤已全部成交的卖出票，减少 [pos-stale] 噪音
+    'sell_avail_backfill_enabled': True, # v1.20 桥 enable_amount 缺失/0 时按总量回填（防卖出监控空转）
+    'sell_avail_t1_strict': True,        # v1.20 T+1 严格：当日买入 enable=0 不回填；False 才允许当日回填
+    'sell_avail_amt0_warn_only': True,   # v1.22 总量=0 时仅审计 [pos-amt0] 不回填（防虚构可卖）
     'order_no_reply_timeout': 90.0,  # v1.13 发单后无任何回报超时（_no_reply_reconcile 兜底查询）
     'order_reconcile_interval_sec': 60.0,  # v1.13 撤单失败/无回报委托兜底对账节流
     'board_cancel_warn_sec': 300.0,  # v1.15 撤单终态长时间未确认告警阈值
@@ -117,6 +132,9 @@ BLS = {
     'seal_fail_ratio': 0.333,       # 封单衰退：<= 基准*(1/3) -> 破
     'board_queue_cancel_seal_ratio': 0.333,   # v1.6 打板未成交排单：封单<=基准*该比例 -> 撤单（缺省对齐 seal_fail_ratio）
     'board_queue_cancel_bid_ratio': 0.5,      # v1.6 打板未成交排单：买一委托笔数<=基准*该比例 -> 撤单（对齐一字封单 bid_fail）
+    'board_queue_cancel_break_enabled': True, # v1.18 在途 break_cnt 增加且未回封 -> 撤单（排单成交保护）
+    'exp_board_queue_gate': True,             # v1.18 预期打板：已有 break 历史需回封+封单达标才下板单
+    'exp_board_queue_max_sec': 600.0,         # v1.18 在途 break 保护窗口（窗口内出现 break/封单衰减才撤，不硬撤稳定封单）
     'firstzt_min_seal': 200000.0,      # 首此涨停上报最小封单额(元)，过滤假封
     'firstzt_min_bids': 5,            # 首此涨停上报最小买一挂单量(手)
     # v0.49 炸板应对收紧 + 回封打板（docs/33）
@@ -142,6 +160,13 @@ BLS = {
     'p7c_surge_min': 1.5,                # P7c 冲高触发：现价>=标记价×(1+%) 分批卖
     'p7c_batch_cold_secs': 10.0,         # P7c 批次冷却（两批 2×50%，10s 批次间隔替代 30s 通用冷却）
     'p7c_active_threshold': 0.5,         # 主动判定：个股涨幅 >= 板块强度 + 阈值（%）
+    'p7d_sell_enabled': True,            # P7d 核心冲高偏离总开关：非唯一核心持仓 冲高未封板+偏离分时均价 -> 减半
+    'p7d_limit_gap': 0.04,               # P7d 冲高判定：现价距涨停价 <= 4%（未封板视为冲高）
+    'p7d_vwap_dev_min': 3.0,             # P7d 偏离分时均价阈值 %（现价 >= VWAP×(1+%)）
+    'p7d_half_ratio': 0.5,               # P7d 减半比例
+    'p6_two_frame_enabled': True,        # v1.20 P6 两帧确认：连续弱分才减半（防单帧抖动误卖）
+    'p6_confirm_frames': 2,              # v1.20 连续弱分帧数
+    'p6_confirm_win_sec': 30.0,          # v1.20 两帧间隔窗口（超时重新计数）
     'hold_stand_cache_sec': 15.0,        # _hold_stand 节流缓存
     'hold_stand_log_sec': 60.0,          # [hold] 地位日志节流（/股）
     # 预期文件：AXquant 预期三态 csv（docs/25）
@@ -160,6 +185,7 @@ BLS = {
     'p2e_auction_drop_min': -2.0,      # 自身大不及竞价涨幅阈值 %（文件 miss + 今日竞价绿开幅度）
     'p2e_confirm_at': '09:24:45',      # 9:15-9:25 钩子确认段起点（此前预热只日志不触发）
     'single_stock_cap': 0.30,          # 单支市值上限：买入后该股市值 <= 总资产×30%（AXquant single_stock_cap）
+    'buy_lot_step': 100,               # v1.17 买入整手步长（A股最小申报单位，取整/仓位缩量共用）
     'ordinary_buy_ratio': 0.10,        # 普通买入单笔=总资产×10%（AXquant ordinary_buy_ratio=1/10，替代硬编码0.3）
     'board_buy_budget_ratio': 0.20,    # 打板买入单笔=总资产×20%（AXquant board_buy_budget_ratio）
     'red_gate_enabled': False,         # 红盘比买入门（默认关；开启才要求板块红盘比>=red_ratio_buy_min 且情绪回暖，v0.29）
@@ -169,6 +195,7 @@ BLS = {
     'sentiment_warm_min': 0.45,        # 恢复阈值下限
     'sentiment_ice_ratio': 0.40,       # 盘中实时红盘比 < 此值 = 今日继续冰点
     'sentiment_pos_cap_enabled': True,   # v0.31 情绪仓位上限（总仓位：冰点40%/回暖80%，已默认启用，盘前/盘中均有 [pos-cap] 日志）
+    'pos_cap_over_behavior': 'shrink',   # v1.17 情绪仓位闸门超限处理：shrink=缩量至剩余额度 / skip=整单拒绝
     'ice_pos_pct': 0.40,              # 冰点日最大总仓位
     'warm_pos_pct': 0.80,             # 回暖日最大总仓位
     'warm_taper_start': 3,            # 连续回暖/延续 >= N 日开始递减（分歧概率上升）
@@ -265,6 +292,9 @@ BLS = {
     'frame_gear_limit': 15,           # 帧内 get_gear_price 总次数
     'frame_m1_limit': 20,             # 帧内 1m K线 get_price 总次数（two_1m/弹性 surge 共用）
     'frame_hist1d_limit': 10,         # 帧内 1d 历史 get_price 总次数
+    'frame_hist1d_limit_fast': 24,    # v1.16 10:00 前日线预算放大（原 frame_day_limit_fast 未接入 hist1d 消费链）
+    'frame_hist1d_prio_limit': 12,    # v1.16 核心/预期票日线独立配额，不挤占普通预算
+    'frame_hist1d_prio_limit_fast': 40,  # v1.20 10:00 前核心/预期票日线独立配额放大
     'frame_board_limit': 6,           # 帧内板块强度组（get_industry_stocks+get_snapshot 各 1 次/组）
     'frame_blocks_limit': 10,         # 帧内 get_stock_blocks 总次数（300s 缓存后≈0）
     'frame_bcode_limit': 20,          # 帧内板块归属（3600s 缓存后≈0）
@@ -300,11 +330,19 @@ BLS = {
     'tick_sell_enabled': True,       # tick 级卖出总开关
     'break_sell_enabled': True,      # 炸板卖出：first_zt.break 首触发 -> 卖
     'seal_low_sell_enabled': True,   # 封单大减卖出：first_zt.seal_low 首触发 -> 卖
+    'seal_low_confirm_sec': 6.0,     # v1.23 封单大减两帧确认（3s tick 约 2 帧），尾盘竞价段同样生效
+    'seal_low_fast_ratio': 0.15,     # v1.23 封单骤减快确认：seal <= 首封*该比例（含0）时 1 帧即卖，保灵敏度
+    'seal_low_batch_invalid_ratio': 0.3,  # v1.23 同帧 L2 十档缺失占比超阈值 -> 整批不健康，跳过 SEAL_LOW 卖出
+    'seal_low_batch_invalid_min': 5,      # v1.23 整批不健康的缺失家数下限（与占比同时满足才熔断）
     'sealed_fresh_secs': 5.0,        # 封死判定持续 N 秒才生效（防瞬时零卖盘误判不排单）
     'sealed_offerqty_enabled': True, # 用 total_offerqty==0 判封死（快照总委卖量；缺失回退 ask_grp 空判）
     # 打分引擎（AXquant 默认）
     'score_base': 40,
     'score_recover_probe_cap': 20,  # v1.12 [score-na] 恢复探针每帧最多补评票数（防 board 预算打满）
+    'score_recover_probe_cap_fast': 40,  # v1.16 10:00 前恢复探针扩容（核心优先，灵敏度优先）
+    'hist1d_prewarm_enabled': True,  # v1.16 09:25/09:31 核心/预期票日线预暖
+    'hist1d_core_ttl': 180.0,        # v1.20 核心/预期票日线缓存 TTL 放大（覆盖 09:25->09:31 窗口）
+    'lb_senti_auction_retry_enabled': True,  # v1.16 09:26 竞价情绪未就绪补拉
     'vwap_penalty_per_30s': 1.0, 'vwap_daily_limit': 12,
     # 预期角色容忍度（AXquant sell_policy_hint 迁移，docs/17）：绿开/止损/评分阈值缩放系数
     'sell_policy': {
@@ -615,15 +653,18 @@ class DataHub(object):
 def _source_limit(source, prio=0):
     # 帧预算限额解析（v0.36）：10:00 前走 _fast 档（对齐 _board_refresh_ttl 快速期）；prio=1 走独立高优先级配额。
     # gear 快速期无 _fast 键时动态按 tick 目标集数量（min(len(_tick_targets), 25)），防 watch 池大时 L2 封单采集缺。
-    if prio:
-        return float(BLS.get('frame_%s_prio_limit' % source,
-                             BLS.get('frame_%s_limit' % source, 1e9)))
     fast = False
     try:
         if _min_age() <= int(BLS.get('board_rank_fast_until_minute', 30)):
             fast = True
     except Exception:
         pass
+    if prio:
+        k = 'frame_%s_prio_limit_fast' % source
+        if fast and k in BLS and BLS[k]:
+            return float(BLS[k])   # v1.20 10:00 前高优先级独立配额放大（核心/预期票日线）
+        return float(BLS.get('frame_%s_prio_limit' % source,
+                             BLS.get('frame_%s_limit' % source, 1e9)))
     if fast:
         k = 'frame_%s_limit_fast' % source
         if k in BLS and BLS[k]:
@@ -647,11 +688,12 @@ def _get_ds():
 def initialize(context):
     set_universe(BLS['universe'])
     g.buy_log = {}; g.sold_log = {}
-    g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}
+    g.daily = _new_daily()
     g.state_day = None   # 持久化的“交易日”戳（跨重启每日买入计数恢复）
     g.spot = {}; g.last_ma5 = {}
     g.ma5_touch_day = None; g.ma5_touched = set()   # v0.69 当日首次触 MA5 去重
     g.ma5_lifecycle_day = None; g.ma5_lows = {}     # v0.70 当日生命周期最低两价
+    g.ma5_pending = set()                            # v1.21 MA5 日线未就绪待补评
     _get_ds()  # DataHub singleton warmup (kept out of g)
     g.one_word_open = set()   # 09:25/开盘识别的一字板（买入不排队）
     g.one_word_marked_open = False   # v0.42 09:30 首帧补标去重（按日重置）
@@ -693,7 +735,11 @@ def initialize(context):
     g.restart_rebuild_hb_ts = 0.0     # v0.76 重建进度 heartbeat 节流时间戳
     g.skip_log_ts = {}                # v0.80 同因日志节流表 (tag|sec|reason)->ts
     g.score_na_pending = {}           # v1.12 评分未就绪待恢复票（数据就绪后补评并打 [score-recover]）
+    g.hist_recover_once = {}          # v1.22 (tag|day|sec) -> ts 恢复日志当日去重（补拉不刷重复行）
+    g.firstzt_log_ts = {}             # v1.22 反复炸板/回封日志节流表 sec->ts
+    g.bought_qty = {}                 # v1.22 当日买入成交累计 sec->qty（桥 enable 未回填审计基准）
     g.pos_cap_skips = 0               # v1.12 情绪仓位闸门当日拦截次数（skip 日志带 total）
+    g.pos_cap_shrinks = 0             # v1.17 情绪仓位闸门当日缩量次数（shrink 日志带 total）
     g.sell_skip_cnt = {}              # v1.12 [sell-skip] 60s 窗口内重复计数
     g.order_limit_src = ''            # v1.12 最近一次 _order_limit 限价来源（sell2/pct/board/px/sell）
     g.last_save_ts = 0.0              # v0.75 盘中定期保存节流时间戳
@@ -725,6 +771,8 @@ def initialize(context):
     g.lb_senti = {}        # v0.65 连板盘中情绪动态 {auction, mid, t100}
     g.lb_senti_cache = {}  # v0.65 盘中确认滚动缓存 {'ts','data'}
     g.exp_file = {}     # sec -> 预期文件条目（AXquant 竞价终态）
+    g.hist_prio_cache = {}   # v1.16 核心/预期日线优先集缓存 {'tok','set'}
+    g.hist_na_pending = {}   # v1.16 百日新高日线缺失待重评 {'sec': ts}
     g.exp_fired = set() # sec -> 本日已触发(买/放弃)的预期买入（一次触发+跨重启去重）
     g.pending = {}      # sec -> 已发送委托（成交确认前的去重/回执）
     g.buy_commit = {}   # v0.64 在途买单占用资金(现价×量，防6s资金同步滞后超配)；终态回报释放
@@ -732,9 +780,12 @@ def initialize(context):
     g.p7b_sold = set()    # v0.59 P7b 跟风拉升不封板 卖出首触发标记（跨重启持久化）
     g.p7c_part = {}       # v0.59 P7c 首板次日不主动冲板 标记（price/half/sold1_ts）
     g.p7c_sold = set()    # v0.59 P7c 分批清仓完成标记（跨重启持久化）
+    g.p7d_sold = set()    # v1.19 P7d 核心冲高偏离 卖出首触发标记（跨重启持久化）
+    g.p6_weak = {}        # v1.20 P6 两帧确认计数 {sec: {cnt, ts, score}}（跨重启持久化，跨日清空）
     g.hold_stand_cache = {}  # v0.59 持仓地位评估缓存（15s 节流，不持久化）
     g.hold_stand_log = {}    # v0.59 持仓地位日志节流（60s/股，不持久化）
     run_daily(context, auction_pre_confirm, time='09:25')
+    run_daily(context, lb_senti_auction_retry, time='09:26')   # v1.16 竞价情绪未就绪补拉
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, lb_senti_t100_freeze, time='10:00')   # v0.65 10:00 情绪冻结快照（之后降频监控不归零）
     run_daily(context, mid_probe, time='11:00')
@@ -751,13 +802,17 @@ def before_trading_start(context, data):
     if getattr(g, 'state_day', None) == _today:
         _restart_same_day = True
         # 同日盘中重启：保留当日已买计数（跨重启恢复），sold 本就每日清
-        g.daily = {'bought': [x for x in (g.daily.get('bought') or [])],
-                   'bought_board': [x for x in (g.daily.get('bought_board') or [])],
-                   'bought_other': [x for x in (g.daily.get('bought_other') or [])],
-                   'sold': []}
+        _old_daily = dict(g.daily or {})
+        g.daily = _new_daily()
+        for _k in ('bought', 'bought_board', 'bought_exp_chase', 'bought_ma5',
+                   'bought_core', 'bought_elastic_arb', 'bought_elastic_top',
+                   'bought_other', 'legacy_other'):
+            g.daily[_k] = [x for x in (_old_daily.get(_k) or [])]
+        g.daily['bought_kind'] = dict(_old_daily.get('bought_kind') or {})
+        g.daily['sold'] = []
         log.info('before_trading_start restore same-day daily=%s (restart)' % (_snl(g.daily.get('bought')),))
     else:
-        g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}
+        g.daily = _new_daily()
         g.exp_fired = set()   # 跨日清空预期买入触发
         g.buy_commit = {}     # 跨日清空在途买单承诺
     # v1.3 防御兜底：load_state 已按 first_zt_day/记录 day 清跨日残留，这里再兜一次，
@@ -820,6 +875,7 @@ def before_trading_start(context, data):
             _mark_one_word_open()   # v0.31c 盘中重启：重标一字板（免5s门槛不丢）
             _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])), pages=int(BLS.get('l2_tickdir_pages_restart', 10)))   # v0.52a 重启补种加大页数（覆盖9:30-10:30活跃窗口至09:25竞价）
             _rebuild_first_zt_queue()   # v0.75 重启登记缺失 first_zt（tick 帧分批重建，防下午补 first/tx_ms 失真）
+            _hist1d_restart_warm('restart')   # v1.22 同日重启日线冷缓存恢复（positions/exp buy/CORE 优先）
         except Exception:
             pass
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
@@ -835,10 +891,12 @@ def _maybe_roll_day():
         return False
     g.exp_day = day
     g.ma5_touch_day = day; g.ma5_touched = set()
-    g.ma5_lifecycle_day = day; g.ma5_lows = {}
+    g.ma5_lifecycle_day = day; g.ma5_lows = {}; g.ma5_pending = set()
+    g.hist_prio_cache = {}; g.hist_na_pending = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0   # v0.74 跨日重置近涨停通道与扫描游标
-    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}   # v0.75/76/80/81/1.5 + v1.12/1.15 跨日重置
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.pos_cap_shrinks = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}   # v0.75/76/80/81/1.5 + v1.12/1.15 跨日重置
+    g.hist_recover_once = {}; g.firstzt_log_ts = {}; g.bought_qty = {}   # v1.22 跨日重置恢复日志去重/炸板日志节流/买入成交累计
     return True
 
 
@@ -959,14 +1017,119 @@ def handle_data(context, data):
 
 
 # ================= 行情/工具 =================
-def _hist_1d(sec):
+def _hist_1d(sec, prio=0):
     # 1d OHLCV 缓存（约 60s 有效，统一 DataHub 注册表）
     try:
         dh = _get_ds()
-        return dh.cached('hist1d', sec, 60.0,
-                         lambda: get_price(sec, start_date=None, end_date=None, count=120, frequency='1d'), budget='hist1d')
+        ttl = float(BLS.get('hist1d_core_ttl', 180.0) or 180.0) if prio == 1 else 60.0
+        return dh.cached('hist1d', sec, ttl,
+                         lambda: get_price(sec, start_date=None, end_date=None, count=120, frequency='1d'),
+                         budget='hist1d', prio=prio)
     except Exception:
         return None
+
+
+def _hist_prio_set():
+    # v1.16 核心/预期票日线优先集：5s token 缓存，避免每票高频 get_positions
+    try:
+        tok = int(time.time() / 5.0)
+        c = getattr(g, 'hist_prio_cache', None)
+        if isinstance(c, dict) and c.get('tok') == tok:
+            return c.get('set') or set()
+        pos = set(get_positions())
+        buy = set(c for c, en in (getattr(g, 'exp_file', {}) or {}).items()
+                  if str((en or {}).get('side') or '') == 'buy')
+        core = set(c for c, rec in (getattr(g, 'zt_lianban', {}) or {}).items()
+                   if int((rec or {}).get('board_cnt') or 0) >= 3)
+        s = pos | buy | core
+        g.hist_prio_cache = {'tok': tok, 'set': s}
+        return s
+    except Exception:
+        return set()
+
+
+def _is_hist_priority(sec):
+    # v1.16 exp buy/持仓/CORE 优先拉取日线，保证 09:30 首帧 BS/MA5 不缺基准
+    try:
+        return str(sec or '') in _hist_prio_set()
+    except Exception:
+        return False
+
+
+def _hist_na_pending_add(sec):
+    # v1.16 百日新高日线缺失记录，供恢复探针重评，不静默当“非新高”
+    try:
+        hp = getattr(g, 'hist_na_pending', None)
+        if not isinstance(hp, dict):
+            hp = {}; g.hist_na_pending = hp
+        hp[sec] = time.time()
+        _skip_log('hist_na', sec, 'hist1d_na', '[hist-na] %s hist1d 缺失 -> 待重评' % _sn(sec))
+    except Exception:
+        pass
+
+
+def _hist1d_prewarm(tag='09:25'):
+    # v1.16 09:25/09:31 核心日线预暖：只用高优先级独立配额，不阻塞主流程
+    # v1.18 记录前轮 ok 名单，输出“前轮 ok 本轮 miss”的回归票数/样本，缓解 46/46 -> 15/46 掉链审计缺口
+    try:
+        if not BLS.get('hist1d_prewarm_enabled', True):
+            return 0
+        codes = list(dict.fromkeys([x for x in (_pool() + list(get_positions())
+                                                + list((getattr(g, 'exp_file', {}) or {}).keys())
+                                                + list((getattr(g, 'zt_lianban', {}) or {}).keys()))
+                                    if x and _is_hist_priority(x)]))
+        ok = 0
+        ok_codes = []
+        miss = []
+        for sec in codes:
+            if _hist_1d(sec, prio=1) is not None:
+                ok += 1
+                ok_codes.append(sec)
+                _ma5_base4(sec)   # v1.21 预温一并缓存 MA5 base4，09:25 起即可动态 MA5
+            else:
+                miss.append(sec)
+        prev_ok = set(getattr(g, 'hist1d_prewarm_prev_ok', None) or [])
+        regressed = sorted(set(miss) & prev_ok)
+        for sec in miss:
+            _hist_na_pending_add(sec)   # v1.20 预暖 miss 交给恢复探针按 prio=1 续拉，不再只打日志
+        g.hist1d_prewarm_prev_ok = set(ok_codes)
+        log.info('[hist1d-prewarm] %s core=%d ok=%d miss=%d regress_from_prev=%d miss_sample=%s' % (
+            tag, len(codes), ok, len(miss), len(regressed), _snl(miss[:10])))
+        return ok
+    except Exception:
+        return 0
+
+
+def _hist1d_restart_warm(tag='restart'):
+    # v1.22 同日重启冷缓存恢复：优先 positions + exp buy + CORE，受高优先级日线配额
+    # frame_hist1d_prio_limit_fast 控制（超配额返回 None，转 hist_na_pending 由恢复探针续拉）。
+    try:
+        if not BLS.get('hist1d_restart_warm_enabled', True):
+            return 0
+        codes = list(dict.fromkeys([x for x in (
+            list(get_positions())
+            + [c for c, en in (getattr(g, 'exp_file', {}) or {}).items()
+               if str((en or {}).get('side') or '') == 'buy']
+            + [c for c, rec in (getattr(g, 'zt_lianban', {}) or {}).items()
+               if int((rec or {}).get('board_cnt') or 0) >= 3])
+            if x]))
+        cap = max(1, int(BLS.get('hist1d_restart_warm_cap', 40) or 40))
+        ok = 0
+        miss = []
+        for sec in codes[:cap]:
+            if _hist_1d(sec, prio=1) is not None:
+                ok += 1
+                _ma5_base4(sec)
+            else:
+                miss.append(sec)
+        overflow = codes[cap:]
+        for sec in miss + overflow:
+            _hist_na_pending_add(sec)
+        log.info('[hist1d-restart-warm] %s core=%d ok=%d miss=%d overflow=%d miss_sample=%s' % (
+            tag, len(codes), ok, len(miss), len(overflow), _snl((miss + overflow)[:10])))
+        return ok
+    except Exception:
+        return 0
 
 
 def _date_key(v):
@@ -995,7 +1158,7 @@ def _ma5_base4(sec):
     rec = cache.get(sec)
     if isinstance(rec, dict) and rec.get('day') == day:
         return float(rec.get('base4') or 0.0)
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None:
         return None
     try:
@@ -1143,40 +1306,106 @@ def _score_na_log(sec, why):
 
 
 def _score_na_pending_add(sec):
-    # v1.12 记录评分未就绪待恢复票（探针数据就绪后补评）
+    # v1.12 记录评分未就绪待恢复票；v1.16 核心/预期票带 prio 先恢复
     try:
         sp = getattr(g, 'score_na_pending', None)
         if not isinstance(sp, dict):
             sp = {}; g.score_na_pending = sp
-        sp[sec] = time.time()
+        sp[sec] = {'ts': time.time(), 'prio': 1 if _is_hist_priority(sec) else 0}
+    except Exception:
+        pass
+
+
+def _hist_recover_logged(tag, sec):
+    # v1.22 恢复日志当日去重：同一 (tag, day, sec) 当日只打一次；TTL 失效补拉仍执行，只抑制重复日志
+    try:
+        if not BLS.get('score_recover_dedup_enabled', True):
+            return False
+        d = getattr(g, 'hist_recover_once', None)
+        if not isinstance(d, dict):
+            d = {}; g.hist_recover_once = d
+        key = '%s|%s|%s' % (tag, str(get_trading_day()), sec)
+        if key in d:
+            return True
+        d[key] = time.time()
+        return False
+    except Exception:
+        return False
+
+
+def _ma5_pending_probe():
+    # v1.21 MA5 日线未就绪待补评：hist 恢复后补算 base4 并清除待办，区分“无数据”与“未触线”
+    try:
+        pending = getattr(g, 'ma5_pending', None)
+        if not isinstance(pending, set):
+            pending = set(pending or []); g.ma5_pending = pending
+        if not pending:
+            return
+        cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
+        jobs = sorted(pending, key=lambda x: (0 if _is_hist_priority(x) else 1, x))
+        for sec in jobs[:cap]:
+            base4 = _ma5_base4(sec)
+            if base4 is None:
+                continue
+            pending.discard(sec)
+            if not _hist_recover_logged('ma5', sec):
+                log.info('[ma5-recover] %s MA5 日线恢复 base4=%.2f' % (_sn(sec), base4))
     except Exception:
         pass
 
 
 def _score_recover_probe():
-    # v1.12 [score-na] 恢复探针：数据就绪后补评并打 [score-recover]，避免重启后评分链路静默失效
+    # v1.12/v1.16 [score-na]/[hist-na] 恢复探针：数据就绪后补评，核心优先、10:00 前扩容
     try:
-        pending = getattr(g, 'score_na_pending', None)
-        if not isinstance(pending, dict) or not pending:
-            return
         now = time.time()
-        cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
-        for sec in list(pending.keys())[:cap]:
-            if now - float(pending.get(sec) or 0) < 30.0:
+        if not _lb_senti_t100_passed():
+            cap = max(1, int(BLS.get('score_recover_probe_cap_fast', 40) or 40))
+        else:
+            cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
+        pending = getattr(g, 'score_na_pending', None)
+        if not isinstance(pending, dict):
+            pending = {}; g.score_na_pending = pending
+        hist_pending = getattr(g, 'hist_na_pending', None)
+        if not isinstance(hist_pending, dict):
+            hist_pending = {}; g.hist_na_pending = hist_pending
+        jobs = []
+        for sec, v in list(pending.items()):
+            if isinstance(v, dict):
+                ts = float(v.get('ts') or 0.0)
+                prio = int(v.get('prio') or 0)
+            else:
+                ts = float(v or 0.0); prio = 0
+            jobs.append((sec, ts, prio, 'board'))
+        for sec, ts in list(hist_pending.items()):
+            jobs.append((sec, float(ts or 0.0), 1 if _is_hist_priority(sec) else 0, 'hist'))
+        jobs.sort(key=lambda x: (-x[2], x[1]))
+        for sec, ts, prio, why in jobs[:cap]:
+            if now - ts < 30.0:
                 continue
-            if not _spot_ready(sec):
-                continue
-            try:
-                _b_ready = _board_strength_info(sec)[1]
-            except Exception:
-                _b_ready = False
-            if not _b_ready:
-                continue
+            if why == 'hist':
+                if _hist_1d(sec, prio=1) is None:   # v1.20 待重评票统一高优先级配额，防被旁路票挤占
+                    continue
+                if _is_100day_high(sec) is None:
+                    continue
+                hist_pending.pop(sec, None)
+            else:
+                if not _spot_ready(sec):
+                    continue
+                try:
+                    _b_ready = _board_strength_info(sec)[1]
+                except Exception:
+                    _b_ready = False
+                if not _b_ready:
+                    continue
             sc = score_now(sec)
             if sc is None:
                 continue
-            pending.pop(sec, None)
-            log.info('[score-recover] %s 评分恢复 score=%.1f (data_na 曾跳过)' % (_sn(sec), sc))
+            if why == 'board':
+                pending.pop(sec, None)
+            _why = 'hist1d 恢复' if why == 'hist' else 'data_na 曾跳过'
+            if not _hist_recover_logged('score', sec):
+                log.info('[score-recover] %s 评分恢复 score=%.1f prio=%d (%s)' % (_sn(sec), sc, prio, _why))
+        _ma5_pending_probe()   # v1.21 MA5 待补评随恢复探针一并续算
     except Exception:
         pass
 
@@ -1220,7 +1449,7 @@ def _static_bonus(sec):
         b += BONUS['touched_limit_up_early']
     if _volume_ratio(sec) < 0.6:
         b += BONUS['volume_ratio_shrink']
-    if _is_100day_high(sec):
+    if _is_100day_high(sec) is True:
         b += BONUS['is_100day_high']
     b += _board_bonus(sec)
     tags = _tags(sec)
@@ -1285,7 +1514,7 @@ def _tags(sec):
     tags = []
     if lb >= 2:
         tags.append('LB')
-    if _is_100day_high(sec):
+    if _is_100day_high(sec) is True:
         tags.append('BS')
     if lb >= 3:
         tags.append('CORE')
@@ -1343,20 +1572,66 @@ def _mid_board_avoid(sec):
         cnt = int(zt.get('board_cnt') or 0)
         if 2 <= cnt <= 5:
             if zt.get('unique_high'):
+                _mid_allow_log(sec, 'unique_high')
                 return False
             if _dyn_theme_leader(sec):
+                _mid_allow_log(sec, 'dyn_leader')
                 return False
             return True
     return False
 
 
+def _mid_allow_log(sec, why):
+    # v1.18 中位带放行审计：复现澳洋健康 09:30:07 拦截 -> 09:31:01 放行的依据（role/身位/动态龙头/新题材前排）
+    try:
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        en = g.exp_file.get(sec) or {}
+        dl = _dyn_theme_leader(sec)
+        fm = _dyn_theme_ferment()
+        front = ''
+        for nm in _new_themes_of(sec):
+            d = fm.get(nm) or {}
+            if d.get('front') == sec:
+                front = nm
+                break
+        _skip_log('mid_allow', sec, why,
+                  '[mid-allow] %s role=%s board=%d unique_high=%s dyn_leader=%s new_front=%s' % (
+                      _sn(sec), en.get('role_detail') or '-', int(zt.get('board_cnt') or 0),
+                      zt.get('unique_high') or '-', dl, front or '-'),
+                  throttle_sec=300.0)
+    except Exception:
+        pass
+
+
 def _is_100day_high(sec):
-    df = _hist_1d(sec)
+    # v1.16 三态：True/False/None（缺失可重评，不静默当非新高）
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 2:
-        return False
-    closes = list(df['close'])
-    now = closes[-1]
-    return now >= max(closes[:-1]) * 0.9999
+        _hist_na_pending_add(sec)
+        return None
+    try:
+        closes = [float(x) for x in list(df['close'])]
+    except Exception:
+        _hist_na_pending_add(sec)
+        return None
+    day = str(get_trading_day())
+    last_is_today = False
+    try:
+        last_is_today = (_date_key(df.index[-1]) == day)
+    except Exception:
+        pass
+    completed = closes[:-1] if last_is_today else closes
+    if not completed:
+        _hist_na_pending_add(sec)
+        return None
+    now = last_px(sec)
+    if not now or now <= 0:
+        return None
+    try:
+        return float(now) >= max(completed) * 0.9999
+    except Exception:
+        _hist_na_pending_add(sec)
+        return None
 
 
 def _volume_ratio(sec):
@@ -1368,7 +1643,7 @@ def _volume_ratio(sec):
             return vr
     except Exception:
         pass
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 6:
         return 1.0
     vols = list(df['volume'])
@@ -1492,6 +1767,18 @@ def _gear(sec):
     except Exception:
         return {}
 
+
+def _seal_book_ok(sec):
+    # v1.23: L2 gear validity gate. Empty batch book is unknown, not seal=0.
+    gp = _gear(sec)
+    if not isinstance(gp, dict):
+        return False
+    bg = gp.get('bid_grp')
+    if not isinstance(bg, dict) or not bg:
+        return False
+    return True
+
+
 def _seal_metrics(sec):
     # 实时封单（L2）：十档买一挂单金额 + 买一委托笔数（仅交易；回测返回 (0.0, 0)）
     try:
@@ -1504,22 +1791,110 @@ def _seal_metrics(sec):
         return 0.0, 0
 
 
+def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_ratio=0.15):
+    # v1.23 封单大减两帧确认：数据有效才置位；封单恢复/仍封死涨停立即撤销，
+    # 防止 L2 整批空档或单帧抖动被当成真实封单清零（2026-11-02 红太阳误卖根因）。
+    if fs > 0 and book_ok and seal < fs * sfr:
+        fast = float(fast_ratio or 0.0) > 0.0 and seal < fs * float(fast_ratio)
+        if fast:
+            if not ft.get('seal_low_fast'):
+                ft['seal_low_fast'] = True
+                ft['seal_low_fast_ts'] = time.time()
+                log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW_FAST(1帧确认)' % (_sn(sec), seal, fs, seal / fs, bids))
+            if not ft.get('seal_low'):
+                ft['seal_low'] = True
+                ft['seal_low_confirm_ts'] = time.time()
+        elif not ft.get('seal_low'):
+            ft['seal_low'] = True
+            ft['seal_low_confirm_ts'] = time.time()
+            log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW(待确认)' % (_sn(sec), seal, fs, seal / fs, bids))
+    elif ft.get('seal_low'):
+        if (book_ok and seal >= fs * sfr) or (last >= u - 1e-9 and not ft.get('break')):
+            ft['seal_low'] = False
+            ft['seal_low_fast'] = False
+            ft.pop('seal_low_fast_ts', None)
+            ft.pop('seal_low_confirm_ts', None)
+            log.info('[seal-low-guard] %s 封单恢复(seal=%.0f ratio=%.2f)或仍封死 -> 撤销 SEAL_LOW' % (_sn(sec), seal, (seal / fs if fs else 0.0)))
+
+
+def _gear_batch_health():
+    # v1.23 同帧 L2 十档缺失占比：达标返回 (unhealthy, total, invalid, ratio)
+    try:
+        _tot = int(getattr(g, 'gear_total_cnt', 0) or 0)
+        _inv = int(getattr(g, 'gear_invalid_cnt', 0) or 0)
+        _ratio = (float(_inv) / float(_tot)) if _tot > 0 else 0.0
+        _min_n = int(BLS.get('seal_low_batch_invalid_min', 5) or 0)
+        _min_r = float(BLS.get('seal_low_batch_invalid_ratio', 0.3) or 0.0)
+        _bad = bool(_inv >= _min_n and _ratio >= _min_r)
+        return _bad, _tot, _inv, _ratio
+    except Exception:
+        return False, 0, 0, 0.0
+
+
+def _reset_seal_low_confirm_on_batch_bad():
+    # v1.23 整批不健康时重置在途确认时间戳，批次恢复后需重新两帧确认
+    try:
+        for _sec0, _ft0 in (getattr(g, 'first_zt', None) or {}).items():
+            if _ft0.get('seal_low'):
+                _ft0['seal_low_confirm_ts'] = time.time()
+                _ft0.pop('seal_low_fast_ts', None)
+    except Exception:
+        pass
+
+
+def _exp_board_gate(sec):
+    # v1.18 预期打板排单保护：已有 break 历史时，要求当前已回封且封单达标才允许下板单/保留在途；
+    # 返回 (ok, reason)。break_cnt<=0 视为无 break 历史，直接放行。
+    try:
+        ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
+        bc = int(ft.get('break_cnt') or 0)
+        if bc <= 0:
+            return True, ''
+        if ft.get('break'):
+            return False, 'break_open'
+        s0 = g.spot.get(sec) or {}
+        px = float(s0.get('last_px') or 0.0)
+        up = float(s0.get('up_px') or 0.0)
+        if px <= 0 or up <= 0 or px < up * 0.998:
+            return False, 'not_at_limit'
+        seal, _bids = _seal_metrics(sec)
+        seal_min = float(BLS.get('reboard_seal_min', 200000.0) or 0.0)
+        if seal_min > 0 and seal > 0 and seal < seal_min:
+            return False, 'seal_low'
+        return True, ''
+    except Exception:
+        return False, 'gate_error'
+
+
 def _board_queue_cancel(sec, seal, bids):
     # v1.6 打板未成交转排单：封单衰减即撤单（防排队等到破板才以涨停价成交）。
     # 基准取排单挂出时的封单（place_order 落 pending 时记录）；旧单缺省回退 first_zt 首封。
     # 封单阈值对齐卖出链 seal_fail_ratio（唯一身位用更容忍的 unique 阈值）；委托笔数骤降视为撤单松动。
     # v1.8 云端 PTrade cancel_order 仅收 1 个位置参数（2026-10-29 富佳/中重 IQTypeError 根因）。
+    # v1.18 在途 break 保护：break_cnt_at_send 之后再次炸板且当前未回封 -> 撤单（复用 cancel_pending 终态闭环）。
     try:
         pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
         if str(pp.get('side') or '') != 'buy' or int(pp.get('filled') or 0) > 0:
             return False
         if str(pp.get('status') or '') in ('CANCELLED', 'REJECTED', 'FILLED'):
             return False
+        break_fail = False
+        _cancel_reason = 'seal_decay'
+        if BLS.get('board_queue_cancel_break_enabled', True):
+            bc_send = int(pp.get('break_cnt_at_send') or 0)
+            bc_now = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0)
+            age = time.time() - float(pp.get('ts') or 0)
+            max_sec = float(BLS.get('exp_board_queue_max_sec', 600.0) or 600.0)
+            if bc_now > bc_send and (max_sec <= 0 or age <= max_sec):
+                _ok, _r = _exp_board_gate(sec)
+                if not _ok:
+                    break_fail = True
+                    _cancel_reason = 'break(%s)' % _r
         base = float(pp.get('seal_base') or 0.0) or 0.0
         if base <= 0:
             ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
             base = float(ft.get('first_seal') or 0.0) or 0.0
-        if base <= 0:
+        if base <= 0 and not break_fail:
             return False   # 无封单基准：不撤（数据未就绪保守等待）
         ratio = float(BLS.get('board_queue_cancel_seal_ratio', 0.333) or 0.333)
         try:
@@ -1529,7 +1904,7 @@ def _board_queue_cancel(sec, seal, bids):
             pass
         bbase = int(pp.get('seal_bid_base') or 0)
         bid_fail = bbase > 0 and bids < bbase * float(BLS.get('board_queue_cancel_bid_ratio', 0.5) or 0.5)
-        if seal > 0 and not bid_fail and seal / base > ratio:
+        if not break_fail and seal > 0 and not bid_fail and seal / base > ratio:
             return False
         ent = str(pp.get('no') or '')
         if not ent:
@@ -1555,8 +1930,8 @@ def _board_queue_cancel(sec, seal, bids):
             pp['status'] = st
             pp['cancel_ts'] = time.time()
             _buy_commit_rel(sec, int(pp.get('qty') or 0), float(pp.get('limit') or 0.0))
-            log.info('[board-cancel-ok] %s 撤单确认终态=%s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 释放名额/承诺' % (
-                _sn(sec), st, seal, base, (seal / base if base > 0 else 0.0), bids, bbase))
+            log.info('[board-cancel-ok] %s 撤单确认终态=%s reason=%s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 释放名额/承诺' % (
+                _sn(sec), st, _cancel_reason, seal, base, (seal / base if base > 0 else 0.0), bids, bbase))
             _release_buy_slot(sec)
             pp.pop('cancel_pending', None)
             return True
@@ -2031,7 +2406,7 @@ def _broken_now(sec):
 
 def _auction_beat_history(sec):
     # 开盘涨幅优于近 20 日平均开盘涨幅（近似，真实为竞价后对比历史同期）
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 21:
         return False
     opens = list(df['open']); closes = list(df['close'])
@@ -2610,25 +2985,48 @@ def _sentiment_pos_cap(context, sec):
     return cap
 
 
-def _buy_pos_ok(context, sec, qty, limit):
-    # 总仓位上限闸门：买入后总持仓市值/总资产 <= 情绪仓位上限，超限 skip（读只/实盘一致可观察）
+def _buy_pos_cap_qty(context, sec, qty, limit):
+    # 情绪仓位闸门：返回允许买入股数（0=整单拒绝）。
+    # v1.17 超限默认按剩余额度缩量（pos_cap_over_behavior='shrink'），可选 'skip' 整单拒绝。
     cap = _sentiment_pos_cap(context, sec)
     if cap is None:
-        return True
+        return qty
     pos = getattr(getattr(context, 'portfolio', None), 'positions', {}) or {}
     pv = sum(_pos_value(p, sec) for p in pos.values())
     cash = _size_cash(context)   # v0.64 资金实时最新（减在途买单承诺）; v0.80 SIM 虚拟资金基准
     total = cash + pv
     if total <= 0:
-        return True
-    add = qty * (limit or last_px(sec) or 0.0)
+        return qty
+    price = limit or last_px(sec) or 0.0
+    if price <= 0:
+        return qty
+    lot = int(BLS.get('buy_lot_step', 100) or 100)
+    add = qty * price
     ratio = (pv + add) / total
-    if ratio > cap:
-        g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1   # v1.12 拦截计数
-        log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> skip total=%d'
-                 % (_sn(sec), qty, add, ratio, cap, g.pos_cap_skips))
-        return False
-    return True
+    if ratio <= cap:
+        return qty
+    behavior = str(BLS.get('pos_cap_over_behavior', 'shrink') or 'shrink').lower()
+    if behavior == 'shrink':
+        allowed = max(0.0, cap * total - pv)
+        shrink_qty = int(allowed / (price * lot)) * lot
+        if shrink_qty < lot:
+            g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1   # 缩量不足一手按拒绝
+            log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> shrink<%d skip total=%d'
+                     % (_sn(sec), qty, add, ratio, cap, lot, g.pos_cap_skips))
+            return 0
+        g.pos_cap_shrinks = int(getattr(g, 'pos_cap_shrinks', 0) or 0) + 1
+        log.info('[pos-cap] %s qty=%d -> %d add=%.0f pos_ratio=%.2f > cap=%.2f -> shrink total=%d'
+                 % (_sn(sec), qty, shrink_qty, add, ratio, cap, g.pos_cap_shrinks))
+        return shrink_qty
+    g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1   # v1.12 拦截计数
+    log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> skip total=%d'
+             % (_sn(sec), qty, add, ratio, cap, g.pos_cap_skips))
+    return 0
+
+
+def _buy_pos_ok(context, sec, qty, limit):
+    # 兼容布尔入口：True=闸门放行（shrink 后仍有可买股数），False=整单拒绝
+    return _buy_pos_cap_qty(context, sec, qty, limit) > 0
 
 def _set_now(context):
     g.now_dt = getattr(getattr(context, 'blotter', None), 'current_dt', None) or None
@@ -3661,7 +4059,7 @@ def _fill_zt_spot():
 
     _need = [sec for sec in zt if _incomplete(sec)]
     if not _need:
-        return 0
+        return 0, []
     try:
         _sn = _get_snapshot_many(_need, len(_need)) or {}
         _got = 0
@@ -3681,9 +4079,9 @@ def _fill_zt_spot():
                 _got += 1
         if _got:
             log.info('[lb-senti] auction 全池补快照 got=%d/%d' % (_got, len(_need)))
-        return _got
+        return _got, [sec for sec in _need if _incomplete(sec)]
     except Exception:
-        return 0
+        return 0, _need
 
 
 def _lb_senti_auction():
@@ -3747,27 +4145,36 @@ def _lb_senti_auction():
             'ready_detail': {'mid': mid_ready, 'low': low_ready},
         }, ready, mid_n, high_n, low_n
 
-    _fill_zt_spot()
+    _got, _missing = _fill_zt_spot()
     out, ready, mid_n, high_n, low_n = _stats()
     if not ready:
-        _got = _fill_zt_spot()
-        if _got:
+        _got2, _missing2 = _fill_zt_spot()
+        if _missing2:
+            _missing = _missing2
+        if _got2:
             out, ready, mid_n, high_n, low_n = _stats()
     if not ready:
         _ready_n = out['ready_detail']['mid'] + out['ready_detail']['low']
+        _mid_missing = [c for c in zt if _lb_senti_tier(c) == 'mid' and not _auction_ready(c)]
+        _low_missing = [c for c in zt if _lb_senti_tier(c) == 'low' and not _auction_ready(c)]
+        _total_n = mid_n + low_n
+        _ready_pct = 100.0 * _ready_n / _total_n if _total_n else 100.0
         out = {
             'ts': time.time(),
             'ready': False,
             'ready_detail': out['ready_detail'],
+            'ready_pct': _ready_pct,
             'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
             'mid_open_rate': None, 'mid_green_rate': None,
             'mid_yizi': out.get('mid_yizi', 0), 'mid_yizi_rate': None,
             'low_open_rate': None, 'low_yizi': out.get('low_yizi', 0),
-            'note': 'auction_data_not_ready ready=%.0f%%' % (100.0 * _ready_n / (mid_n + low_n) if (mid_n + low_n) else 100.0),
+            'missing': {'mid': _mid_missing[:10], 'low': _low_missing[:10]},
+            'note': 'auction_data_not_ready ready=%.0f%%' % _ready_pct,
         }
         st['auction'] = out
-        log.info('[lb-senti] auction not_ready mid=%d/%d low=%d/%d -> 不写 open/green/yizi 率'
-                 % (out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n))
+        log.info('[lb-senti] auction not_ready mid=%d/%d low=%d/%d ready=%.0f%% -> 不写 open/green/yizi 率; missing=mid:%s low:%s'
+                 % (out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n,
+                    _ready_pct, ','.join(_mid_missing[:5]), ','.join(_low_missing[:5])))
         return out
     out['ts'] = time.time()
     out['ready'] = True
@@ -4542,8 +4949,11 @@ def _exp_rt_status(code):
                     or (actual == 0.0 and (_op0 <= 0 or not _auction_ready(code)))):
                 return PM, "await_intraday_confirm"
             return CS, "auction_not_met(%.1f%%)" % actual    # 竞价初判未超预期 -> 放弃
-        if (_two_1m_break(code) or _limit_up_within_1m(code)) and not _below_vwap_confirm(code):
-            return CX, "intraday_exceed(%.1f%%)" % actual   # 分时确认超预期(两分钟上攻/一分钟冲涨停) -> 买
+        _t1 = _two_1m_break(code)
+        _t2 = _limit_up_within_1m(code)
+        if (_t1 or _t2) and not _below_vwap_confirm(code):
+            _src = 'two_1m' if _t1 else 'limit_1m'
+            return CX, "intraday_exceed_%s(%.1f%%)" % (_src, actual)   # 分时确认超预期(两分钟上攻/一分钟冲涨停) -> 买
         if _below_vwap_confirm(code):
             return CS, "below_vwap_weak"                    # 分时转弱 -> 放弃
         return PM, "observe_auction_exceed %.1f%%" % actual   # 竞价超预期初步确认 -> 观察，等分时
@@ -4556,8 +4966,10 @@ def _exp_rt_status(code):
         # 无分时超预期确认一律等待（2026-10-29 三笔 09:30:04-05 meet 首帧误发单根因）。
         if _below_vwap_confirm(code):
             return CS, "below_vwap_weak"
-        if _two_1m_break(code) or _limit_up_within_1m(code):
-            return CX, "meet_intraday_exceed"
+        _mt1 = _two_1m_break(code)
+        _mt2 = _limit_up_within_1m(code)
+        if _mt1 or _mt2:
+            return CX, "meet_intraday_exceed_%s" % ('two_1m' if _mt1 else 'limit_1m')
         return PM, "meet_wait_intraday_confirm"
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
@@ -4586,9 +4998,9 @@ def _attempt_expected_buy(context, code, direction=None):
     _s0 = (getattr(g, 'spot', None) or {}).get(code) or {}
     _px0 = float(_s0.get('last_px') or 0.0)
     _up0 = float(_s0.get('up_px') or 0.0)
-    _kind = 'board' if (_up0 > 0 and _px0 >= _up0 * 0.998) else 'other'   # v1.14 与 place_expected_order mode 同口径
+    _kind = 'board' if (_up0 > 0 and _px0 >= _up0 * 0.998) else 'exp_chase'   # v1.21 预期chase独立1个名额
     if not _buy_slot_ok(_kind):
-        return None   # v1.14 分类每日闸门：预期board计入打板、预期chase计入其它
+        return None   # v1.21 分类每日闸门：预期board计入打板、预期chase独立1个名额
     st, reason = _exp_rt_status(code)
     if st == PM and str(reason).startswith("observe"):
         eo = g.exp.setdefault(code, {})
@@ -4602,9 +5014,9 @@ def _attempt_expected_buy(context, code, direction=None):
         return True
     if st in (CX, CM):
         _exp_direction_log(code, dctx, 'allow')
-        note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s' % (
+        note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s ft_state=%s' % (
             st, reason, dctx.get('kind') or 'neutral', float(dctx.get('score') or 0.0),
-            dctx.get('reason') or '-')
+            dctx.get('reason') or '-', _ft_state_str(code))
         if not place_expected_order(context, code, note=note):
             return None   # 发单失败 -> 下次重试，不置 fired
         if st == CX and _dyn_unq_confirmed(code):
@@ -4921,18 +5333,45 @@ def _pool_exp_priority(code, direction=None):
     act = _first_zt_ms(code) or 1e18   # v0.37 毫秒归一（逐笔 ms 优先, 帧 ts 归一）
     return (-sc, act)
 
-# ---------- v1.14 每日买入分类闸门 ----------
+# ---------- v1.21 每日买入分类闸门 ----------
+# 打板类 2 个名额；其它每个策略各自 1 个名额、不共用（用户确认 2026-11-02）。
+_BUY_STRATEGY_KINDS = ('exp_chase', 'ma5', 'core', 'elastic_arb', 'elastic_top')
+_BUY_SLOT_LIST_KEYS = ('bought', 'bought_board') + tuple('bought_%s' % k for k in _BUY_STRATEGY_KINDS) + ('bought_other', 'legacy_other')
+
+
+def _new_daily():
+    # 新建当日买入状态；旧 bought_other/legacy_other 仅在迁移/未知 kind 兜底时出现
+    d = {'bought': [], 'bought_board': [], 'bought_kind': {}, 'sold': []}
+    for k in _BUY_STRATEGY_KINDS:
+        d['bought_' + k] = []
+    return d
+
+
+def _buy_slot_list_key(kind):
+    if kind == 'board':
+        return 'bought_board'
+    if kind in _BUY_STRATEGY_KINDS:
+        return 'bought_' + kind
+    return 'bought_other'
+
+
 def _buy_slot_limit(kind):
-    _key = 'daily_max_board_buy' if kind == 'board' else 'daily_max_other_buy'
-    return int(BLS.get(_key, 2 if kind == 'board' else 1) or 0)
+    if kind == 'board':
+        return int(BLS.get('daily_max_board_buy', 2) or 0)
+    lim = (BLS.get('daily_strategy_buy_limit') or {}).get(kind)
+    if lim is None:
+        lim = int(BLS.get('daily_max_other_buy', 1) or 1)   # 未知/旧口径兜底
+    return int(lim or 0)
+
 
 def _buy_slot_used(kind):
-    # 分类占用：打板类与其它类各自计数，互不占用
+    # 分类占用：打板类 2 个，其它每个策略各自 1 个，互不占用
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
         return False
-    _lst = _d.get('bought_board' if kind == 'board' else 'bought_other')
+    _lst = _d.get(_buy_slot_list_key(kind))
     return isinstance(_lst, list) and len(_lst) >= _buy_slot_limit(kind)
+
 
 def _buy_slot_ok(kind):
     # 分类上限 + 总闸门双重约束；未成交终态释放后对应分类名额恢复
@@ -4941,22 +5380,32 @@ def _buy_slot_ok(kind):
     _d = getattr(g, 'daily', None)
     return isinstance(_d, dict) and len(_d.get('bought') or []) < int(BLS.get('daily_max_buy', 3))
 
+
 def _buy_slot_add(sec, kind):
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
-        _d = {}; g.daily = _d
+        _d = _new_daily(); g.daily = _d
     _d.setdefault('bought', []).append(sec)
-    _d.setdefault('bought_board' if kind == 'board' else 'bought_other', []).append(sec)
+    _key = _buy_slot_list_key(kind)
+    _d.setdefault(_key, []).append(sec)
+    _d.setdefault('bought_kind', {})[sec] = kind
+    log.info('[slot] %s kind=%s used=%d/%d total=%d/%d' % (
+        _sn(sec), kind, len(_d.get(_key) or []), _buy_slot_limit(kind),
+        len(_d.get('bought') or []), int(BLS.get('daily_max_buy', 3))))
+
 
 def _buy_slot_rel(sec):
     # REJECTED/CANCELLED/重启对账释放：全量列表与分类列表同步移除（打板未成交不算占用）
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
         return
-    for _k in ('bought', 'bought_board', 'bought_other'):
+    for _k in _BUY_SLOT_LIST_KEYS:
         _lst = _d.get(_k)
         if isinstance(_lst, list) and sec in _lst:
             _lst.remove(sec)
+    _kd = _d.get('bought_kind')
+    if isinstance(_kd, dict):
+        _kd.pop(sec, None)
 
 def _try_expected_buys(context):
     # 预期买入：tick(3s) 与 handle_data(1m) 共用同一判定/去重，避免双触发
@@ -4984,7 +5433,7 @@ def _try_expected_buys(context):
 def _ma5_first_5d(sec):
     # 对齐 AXquant：5日内首次回踩 MA5 = 此前 4 个交易日盘中最低均未触及/跌破各自 MA5。
     # 数据不足(少于9根)保守返回 False（与 AXquant 一致）；缺 low 列时用 close 近似。
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 9:
         return False
     try:
@@ -5007,7 +5456,12 @@ def _ma5_first_5d(sec):
 def try_ma5_buy(context):
     if _min_age() > int(BLS.get('ma5_buy_window_min', 240)):
         return                       # 5日低吸窗口：10:30 前
-    if not _buy_slot_ok('other'):   # v1.14 5D低吸计入其它类（每日1次）
+    if not _buy_slot_ok('ma5'):     # v1.21 5D低吸独立1个名额
+        _skip_log('slot_skip', '__ma5__', 'ma5',
+                  '[slot-skip] kind=ma5 used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_ma5') or []),
+                     _buy_slot_limit('ma5'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     positions = context.portfolio.positions
     day = str(get_trading_day())
@@ -5016,7 +5470,7 @@ def try_ma5_buy(context):
     if not isinstance(getattr(g, 'ma5_touched', None), set):
         g.ma5_touched = set(getattr(g, 'ma5_touched', None) or [])
     if getattr(g, 'ma5_lifecycle_day', None) != day:
-        g.ma5_lifecycle_day = day; g.ma5_lows = {}
+        g.ma5_lifecycle_day = day; g.ma5_lows = {}; g.ma5_pending = set()
     if not isinstance(getattr(g, 'ma5_lows', None), dict):
         g.ma5_lows = {}
     for sec in _pool():
@@ -5024,22 +5478,35 @@ def try_ma5_buy(context):
             continue
         tags = _tags(sec)
         if BLS.get('ma5_core_only', True) and 'CORE' not in tags:
+            _skip_log('ma5_skip', sec, 'core_only',
+                      '[ma5-skip] %s 非CORE -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue   # 低吸仅对核心(CORE)标签股（对齐 AXquant）
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('ma5_skip', sec, 'no_px',
+                      '[ma5-skip] %s 现价缺失 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         second_low = _ma5_second_low(sec, px)
         if _mid_board_avoid(sec):
             _skip_log('mid_avoid', sec, 'ma5', '[mid-avoid] %s 连板中位股规避(ma5)' % _sn(sec)); continue
         if BLS.get('ma5_require_bs', False) and 'BS' not in tags:
+            _skip_log('ma5_skip', sec, 'bs_req',
+                      '[ma5-skip] %s 无BS标签 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue   # v0.69 默认不要求 BS；保留开关兼容旧口径
         if BLS.get('ma5_first_5d', False) and not _ma5_first_5d(sec):
+            _skip_log('ma5_skip', sec, 'first5d',
+                      '[ma5-skip] %s 非5日内首次回踩 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue   # 对齐 AXquant：只有 5日内首次回踩 MA5 才触发，防重复低吸
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs'] or not trade_open(sec):
+            _skip_log('ma5_skip', sec, 'cold_or_trade',
+                      '[ma5-skip] %s 冷却/不可交易 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         ma5 = _ensure_ma5(sec)
         if not ma5:
+            g.ma5_pending.add(sec)   # v1.21 日线未就绪待补评，不静默当“未触线”
+            _skip_log('ma5_skip', sec, 'ma5_na',
+                      '[ma5-skip] %s MA5日线未就绪 -> 待补评(ma5)' % _sn(sec), throttle_sec=30.0)
             continue
         if BLS.get('ma5_second_low_enabled', True):
             ref_px = second_low
@@ -5048,13 +5515,23 @@ def try_ma5_buy(context):
             ref_px = px
             ma5_ref = ma5
         if not ref_px or not ma5_ref:
+            _skip_log('ma5_skip', sec, 'no_ref',
+                      '[ma5-skip] %s 次低价/MA5基准缺失 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         band = abs(float(ref_px) - float(ma5_ref)) / float(ma5_ref)
+        if band > float(BLS.get('ma5_touch_band', 0.02)) + 1e-12:
+            _skip_log('ma5_skip', sec, 'band',
+                      '[ma5-skip] %s 未触线 band=%.2f%% ref=%.2f ma5ref=%.2f' %
+                      (_sn(sec), band * 100.0, ref_px, ma5_ref), throttle_sec=60.0)
         if band <= float(BLS.get('ma5_touch_band', 0.02)) + 1e-12:
             score = score_now(sec)
             if not score:
+                _skip_log('ma5_skip', sec, 'score_na',
+                      '[ma5-skip] %s 评分未就绪 -> 跳过(ma5)' % _sn(sec), throttle_sec=30.0)
                 continue   # v0.68 评分未就绪 -> 不评估买入
             if sec in g.ma5_touched:
+                _skip_log('ma5_skip', sec, 'touched',
+                      '[ma5-skip] %s 当日已评估触线 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
                 continue   # v0.69 当日首次触线后不再重复评估
             if score >= float(BLS.get('ma5_buy_score_min', 50.0)) and _buy_red_ok(sec):
                 note = ('ma_pullback px=%.2f low2=%.2f ref=%.2f ma5=%.2f ma5ref=%.2f '
@@ -5064,11 +5541,17 @@ def try_ma5_buy(context):
                 if place_order(context, sec, 'buy', note=note, mode='pullback',
                                ratio=float(BLS.get('ma5_buy_ratio', 0.10))):
                     g.ma5_touched.add(sec)
-                    _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+                    _buy_slot_add(sec, 'ma5'); g.buy_log[sec] = now
                     _save_state()
-                    if not _buy_slot_ok('other'):
+                    if not _buy_slot_ok('ma5'):
                         break
             else:
+                if score < float(BLS.get('ma5_buy_score_min', 50.0)):
+                    _skip_log('ma5_skip', sec, 'score',
+                      '[ma5-skip] %s 触线但评分不足 score=%.1f' % (_sn(sec), score), throttle_sec=60.0)
+                else:
+                    _skip_log('ma5_skip', sec, 'red',
+                      '[ma5-skip] %s 触线但红盘闸不达 red=%.2f' % (_sn(sec), _red_ratio(sec)), throttle_sec=60.0)
                 g.ma5_touched.add(sec)   # 首次进入MA5带但评分/风控不达标：当日不再追补
 
 
@@ -5077,7 +5560,12 @@ def try_core_buy(context):
     # 一字/封死涨停不排队；追高定价（封顶涨停/弹性10%上限）。tag CORE 已并入打分，本入口补门禁与执行。
     if not BLS.get('core_buy_enabled', True):
         return
-    if not _buy_slot_ok('other'):   # v1.14 核心票计入其它类（每日1次）
+    if not _buy_slot_ok('core'):    # v1.21 核心票独立1个名额
+        _skip_log('slot_skip', '__core__', 'core',
+                  '[slot-skip] kind=core used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_core') or []),
+                     _buy_slot_limit('core'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     if _min_age() > int(BLS.get('core_buy_window_min', 30)):
         return                       # 核心票买入窗口：10:00 前（其它类）
@@ -5106,9 +5594,9 @@ def try_core_buy(context):
             continue   # v0.68 评分未就绪 -> 不评估买入
         if score >= BLS['buy_score_min'] and _buy_red_ok(sec):
             if place_order(context, sec, 'buy', note='core_buy px=%.2f score=%.1f tags=%s' % (px, score, ','.join(_tags(sec))), mode='chase'):
-                _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+                _buy_slot_add(sec, 'core'); g.buy_log[sec] = now
                 _save_state()
-                if not _buy_slot_ok('other'):
+                if not _buy_slot_ok('core'):
                     break
 
 
@@ -5213,6 +5701,16 @@ def _first_zt_ms(sec):
         return 0
     lt = time.localtime(float(ts))
     return int(time.strftime('%Y%m%d%H%M%S', lt)) * 1000 + int(float(ts) % 1 * 1000)
+
+
+def _ft_state_str(sec):
+    # v1.18 预期买入审计：first_zt 的 src/ms/break_cnt/seal 快照（供复盘首帧失真与排单保护定位）
+    ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
+    if not ft:
+        return 'src:- ms:- bc:0 seal:0'
+    return 'src:%s ms:%s bc:%d seal:%.0f' % (
+        ft.get('src') or '-', ft.get('ms') or '-', int(ft.get('break_cnt') or 0),
+        float(ft.get('first_seal') or 0.0))
 
 
 def _board_first_zt(sec):
@@ -5486,7 +5984,12 @@ def _try_elastic_arb_buy(context):
         return
     if _min_age() > int(BLS.get('elastic_arb_window_minute', 20)):
         return                       # 仅开盘后 20 分钟内（09:30-09:50）
-    if not _buy_slot_ok('other'):   # v1.14 弹性套利计入其它类（每日1次）
+    if not _buy_slot_ok('elastic_arb'):   # v1.21 弹性 arb 独立1个名额
+        _skip_log('slot_skip', '__elastic_arb__', 'elastic_arb',
+                  '[slot-skip] kind=elastic_arb used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_arb') or []),
+                     _buy_slot_limit('elastic_arb'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     strong = _elastic_yizi_scan()
     if not strong:
@@ -5497,50 +6000,84 @@ def _try_elastic_arb_buy(context):
     for sec in _pool():
         if sec in positions:
             continue
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_arb'):
+            _skip_log('slot_skip', sec, 'elastic_arb',
+                      '[elastic-arb-skip] %s reason=slot total=%d/%d'
+                      % (_sn(sec), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         if not _is_elastic_eligible(sec):
+            _skip_log('elastic_arb_skip', sec, 'not_eligible',
+                      '[elastic-arb-skip] %s reason=not_eligible' % _sn(sec), throttle_sec=300.0)
             continue                 # v1.6 仅 20cm（300/301/688/689）+ 北交所（8/4/92）
         if not _lb_senti_gate_apply(sec, 'elastic'):
             continue                 # v0.78 B3 统一方向闸（弹性首板 low 恒放行，2 板候选切低位/冰点拦截）
         if not _elastic_in_strong_board(sec, strong):
+            _skip_log('elastic_arb_skip', sec, 'strong_board',
+                      '[elastic-arb-skip] %s reason=strong_board boards=%s'
+                      % (_sn(sec), ','.join(list(strong.keys())[:4])), throttle_sec=60.0)
             continue                 # 属于强板块
         if BLS.get('board_rank_enabled', True) and not _board_rank_top3(sec, rank_secs or [sec]):
+            _skip_log('elastic_arb_skip', sec, 'board_rank',
+                      '[elastic-arb-skip] %s reason=board_rank' % _sn(sec), throttle_sec=60.0)
             continue                 # 板块目标：强度前三（v0.23）
         if _is_one_word_open(sec):
+            _skip_log('elastic_arb_skip', sec, 'one_word',
+                      '[elastic-arb-skip] %s reason=one_word' % _sn(sec), throttle_sec=60.0)
             continue                 # 不追一字
         s = g.spot.get(sec) or {}
         pre = float(s.get('preclose_px') or 0.0)
         if pre <= 0:
+            _skip_log('elastic_arb_skip', sec, 'no_preclose',
+                      '[elastic-arb-skip] %s reason=no_preclose' % _sn(sec), throttle_sec=60.0)
             continue
         op = float(s.get('open_px') or 0.0)
         open_chg = ((op / pre - 1.0) * 100.0) if op > 0 else _auction_change(sec)
         if open_chg > _elastic_max_open_change(sec) + 1e-9:
+            _skip_log('elastic_arb_skip', sec, 'open_high',
+                      '[elastic-arb-skip] %s reason=open_high open=%.1f%% max=%.1f%%'
+                      % (_sn(sec), open_chg, _elastic_max_open_change(sec)), throttle_sec=60.0)
             continue                 # 大幅高开兑现
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('elastic_arb_skip', sec, 'no_px',
+                      '[elastic-arb-skip] %s reason=no_px' % _sn(sec), throttle_sec=60.0)
             continue
         chg = (px / pre - 1.0) * 100.0
         if chg < _elastic_min_change(sec) - 1e-9 or chg > _elastic_max_change(sec) + 1e-9:
+            _skip_log('elastic_arb_skip', sec, 'chg_range',
+                      '[elastic-arb-skip] %s reason=chg_range chg=%.1f%% min=%.1f%% max=%.1f%%'
+                      % (_sn(sec), chg, _elastic_min_change(sec), _elastic_max_change(sec)), throttle_sec=60.0)
             continue                 # 20cm 6~10% / 北交 8~15% 区间（防炸板）
         surge = _elastic_1m_surge(sec)
         if surge < float(BLS.get('elastic_arb_min_1m_surge', 3.0)):
+            _skip_log('elastic_arb_skip', sec, '1m_surge',
+                      '[elastic-arb-skip] %s reason=1m_surge surge=%.1f%% min=%.1f%%'
+                      % (_sn(sec), surge, float(BLS.get('elastic_arb_min_1m_surge', 3.0))), throttle_sec=60.0)
             continue                 # 1m 大阳线力度不足
         big = _l2_big_ratio(sec)
         cands.append((sec, px, chg, open_chg, surge, _elastic_big_bonus_pts(sec), big, bool(_l2_big_ok(sec))))
     cands.sort(key=lambda t: (-(t[5] + t[4]), -t[2]))   # v1.6 大单净量>=10% 进攻加分后按主动度排序
     for sec, px, chg, open_chg, surge, _big_bonus, big, big_ok in cands:
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_arb'):
+            _skip_log('slot_skip', sec, 'elastic_arb',
+                      '[elastic-arb-skip] %s reason=slot total=%d/%d'
+                      % (_sn(sec), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs'] or not trade_open(sec):
+            _skip_log('elastic_arb_skip', sec, 'cold_or_trade',
+                      '[elastic-arb-skip] %s reason=cold_or_trade' % _sn(sec), throttle_sec=60.0)
             continue
         if _block_sealed_buy(sec):
+            _skip_log('elastic_arb_skip', sec, 'sealed',
+                      '[elastic-arb-skip] %s reason=sealed' % _sn(sec), throttle_sec=60.0)
             continue
         limit = _order_limit(sec, 'buy', 'chase')
         if place_order(context, sec, 'buy', note='elastic_arb px=%.2f limit=%.2f chg=%.1f%% 1m=%.1f%% open=%.1f%% big=%s big_ok=%d boards=%s' % (
             px, limit or px, chg, surge, open_chg, _fmt_big_ratio(big), int(big_ok), ','.join(list(strong.keys())[:2])), mode='chase'):
-            _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+            _buy_slot_add(sec, 'elastic_arb'); g.buy_log[sec] = now
             _save_state()
 
 
@@ -5874,8 +6411,12 @@ def _new_top_board_scan():
     # v1.11 5日均值样本未就绪时 09:35 宽限内降级触发（avg5_pending_degrade），之后仍严格等样本。
     # 触发后持续跟踪（易主/09:50/买入 为止）；易主同样需连续 N 帧确认（防单帧抖动打断）。
     if not BLS.get('elastic_top_enabled', True):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'disabled',
+                  '[elastic-top-skip] 总开关关闭', throttle_sec=300.0)
         return None
     if _min_age() > int(BLS.get('elastic_top_window_minute', 20)):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'window',
+                  '[elastic-top-skip] 已过 %s 分钟窗口' % BLS.get('elastic_top_window_minute', 20), throttle_sec=300.0)
         return None
     et = getattr(g, 'elastic_top', None) or {'day': '', 'top': '', 'ts': 0.0, 'tracked': set(), 'trig': 0, 'done': False}
     g.elastic_top = et
@@ -5885,6 +6426,8 @@ def _new_top_board_scan():
         et.pop('stab', None)
     top, lead = _concept_board_rank_top1(_elastic_top_cand_src())   # v0.36e 概念口径（文件未加载回退 API）
     if not top:
+        _skip_log('elastic_top_scan', '__elastic_top__', 'no_top',
+                  '[elastic-top-scan] 无最强板块候选', throttle_sec=30.0)
         return None
     n_need = int(BLS.get('elastic_top_stable_frames', 2))
     lead_min = float(BLS.get('elastic_top_lead_min', 0.5))
@@ -5900,12 +6443,21 @@ def _new_top_board_scan():
     if stab['n'] < n_need:
         if et.get('top') and not et.get('done'):
             return et['top']                            # 易主未确认：旧板块跟踪不中断
+        _skip_log('elastic_top_scan', '__elastic_top__', 'stability',
+                  '[elastic-top-scan] 稳定帧不足 n=%d/%d top=%s lead=%.1f%%' %
+                  (stab['n'], n_need, top, lead), throttle_sec=30.0)
         return None
     st = _concept_board_strength(top)   # v0.36e 概念板块强度（合并快照）
     if st < float(BLS.get('elastic_top_min_strength', 2.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'strength',
+                  '[elastic-top-scan] 板块强度不足 st=%.1f%% < %s%%' %
+                  (st, BLS.get('elastic_top_min_strength', 2.0)), throttle_sec=30.0)
         return None
     open_g = _board_open_gain(top)
     if open_g < float(BLS.get('elastic_top_breakout_min_open', 1.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'open',
+                  '[elastic-top-scan] 开盘板块涨幅不足 open=%.1f%% < %s%%' %
+                  (open_g, BLS.get('elastic_top_breakout_min_open', 1.0)), throttle_sec=30.0)
         return None                                     # 开盘板块涨幅自身下限
     avg5 = _board_5d_strength(top)
     avg5_degraded = False
@@ -5913,14 +6465,23 @@ def _new_top_board_scan():
         # v1.11 5日均值样本未就绪：09:35 宽限内先按强度/开盘/领先降级触发，防首 5 分钟被日线续算卡住；
         # 超过宽限仍严格等待样本，防无历史数据全天误判。
         if _min_age() > float(BLS.get('elastic_top_avg5_grace_min', 5.0)):
+            _skip_log('elastic_top_scan', '__elastic_top__', 'avg5_na',
+                  '[elastic-top-scan] 5日均值未就绪且超过宽限', throttle_sec=30.0)
             return None
         avg5_degraded = True
     elif open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'boost',
+                  '[elastic-top-scan] 非新爆发 open=%.1f%% avg5=%.1f%% boost<%.1f%%' %
+                  (open_g, avg5, float(BLS.get('elastic_top_breakout_min_boost', 2.0))), throttle_sec=30.0)
         return None                                     # 未显著强于自身5日 -> 非新爆发
     if et.get('trig', 0) >= int(BLS.get('elastic_top_max_trigger_per_day', 2)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'trig_max',
+                  '[elastic-top-scan] 当日触发已达上限 %s' % BLS.get('elastic_top_max_trigger_per_day', 2), throttle_sec=300.0)
         return None
     et['top'] = top; et['ts'] = time.time(); et['done'] = False
     if top in (et.get('tracked') or set()):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'tracked',
+                  '[elastic-top-scan] %s 已跟踪过 -> 不再重复触发' % top, throttle_sec=300.0)
         return None
     et['tracked'].add(top); et['trig'] = et.get('trig', 0) + 1
     log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%s lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
@@ -5972,10 +6533,19 @@ def _elastic_top_candidates(top):
 def _try_elastic_top_buy(context):
     # v0.36 新最强板块弹性套利：第一时间跟踪最主动弹性标的，20cm 10%/北交 15% 涨幅前买入
     if not BLS.get('elastic_top_enabled', True):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'disabled',
+                  '[elastic-top-skip] 总开关关闭', throttle_sec=300.0)
         return
     if _min_age() > int(BLS.get('elastic_top_window_minute', 20)):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'window',
+                  '[elastic-top-skip] 已过 %s 分钟窗口' % BLS.get('elastic_top_window_minute', 20), throttle_sec=300.0)
         return                       # 09:50 前
-    if not _buy_slot_ok('other'):   # v1.14 弹性top计入其它类（每日1次）
+    if not _buy_slot_ok('elastic_top'):   # v1.21 弹性 top 独立1个名额
+        _skip_log('slot_skip', '__elastic_top__', 'elastic_top',
+                  '[slot-skip] kind=elastic_top used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_top') or []),
+                     _buy_slot_limit('elastic_top'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     top = _new_top_board_scan()
     if not top:
@@ -5983,46 +6553,79 @@ def _try_elastic_top_buy(context):
     positions = context.portfolio.positions
     for sec in _elastic_top_candidates(top):
         if sec in positions:
+            _skip_log('elastic_top_skip', sec, 'position',
+                      '[elastic-top-skip] %s 已在持仓 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         if sec in g.daily['bought']:
+            _skip_log('elastic_top_skip', sec, 'bought',
+                      '[elastic-top-skip] %s 当日已买 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                 # 当日已买（含其它策略）不再评估
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_top'):
+            _skip_log('slot_skip', sec, 'elastic_top',
+                      '[slot-skip] kind=elastic_top used=%d/%d total=%d/%d -> skip loop'
+                      % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_top') or []),
+                         _buy_slot_limit('elastic_top'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         if not trade_open(sec):
+            _skip_log('elastic_top_skip', sec, 'trade_closed',
+                      '[elastic-top-skip] %s 不可交易 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         if not _lb_senti_gate_apply(sec, 'elastic'):
+            _skip_log('elastic_top_skip', sec, 'direction_gate',
+                      '[elastic-top-skip] %s 情绪方向闸拦截 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                 # v0.78 B3 统一方向闸（弹性首板 low 恒放行，2 板候选切低位/冰点拦截）
         if _is_one_word_open(sec):
+            _skip_log('elastic_top_skip', sec, 'one_word',
+                      '[elastic-top-skip] %s 一字板 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                 # 不追一字
         if _block_sealed_buy(sec):
+            _skip_log('elastic_top_skip', sec, 'sealed',
+                      '[elastic-top-skip] %s 封死涨停 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                 # 封死不排队
         if _mid_board_avoid(sec):
+            _skip_log('elastic_top_skip', sec, 'mid_avoid',
+                      '[elastic-top-skip] %s 连板中位股规避 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         s = g.spot.get(sec) or {}
         pre = float(s.get('preclose_px') or 0.0)
         if pre <= 0:
+            _skip_log('elastic_top_skip', sec, 'no_preclose',
+                      '[elastic-top-skip] %s 前收缺失 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('elastic_top_skip', sec, 'no_px',
+                      '[elastic-top-skip] %s 现价缺失 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         chg = (px / pre - 1.0) * 100.0
         if chg <= 0 or chg >= _elastic_top_buy_before(sec):
+            _skip_log('elastic_top_skip', sec, 'chg_range',
+                      '[elastic-top-skip] %s 涨幅越界 chg=%.1f%% before=%.1f%%' %
+                      (_sn(sec), chg, _elastic_top_buy_before(sec)), throttle_sec=60.0)
             continue                 # 20cm 10% / 北交 15% 前买入
         op = float(s.get('open_px') or 0.0)
         open_chg = ((op / pre - 1.0) * 100.0) if op > 0 else _auction_change(sec)
         if open_chg > _elastic_max_open_change(sec) + 1e-9:
+            _skip_log('elastic_top_skip', sec, 'open_high',
+                      '[elastic-top-skip] %s 高开过大 open=%.1f%%' % (_sn(sec), open_chg), throttle_sec=60.0)
             continue                 # 防大幅高开兑现
         surge = _elastic_1m_surge(sec)
         if surge < float(BLS.get('elastic_top_min_1m_surge', 2.0)):
+            _skip_log('elastic_top_skip', sec, '1m_surge',
+                      '[elastic-top-skip] %s 1m 大阳线不足 surge=%.1f%% < %s%%' %
+                      (_sn(sec), surge, BLS.get('elastic_top_min_1m_surge', 2.0)), throttle_sec=60.0)
             continue                 # 最主动要求
         big = _l2_big_ratio(sec)
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
+            _skip_log('elastic_top_skip', sec, 'cold',
+                      '[elastic-top-skip] %s 冷却中 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         limit = _order_limit(sec, 'buy', 'chase')
         if place_order(context, sec, 'buy', note='elastic_top board=%s px=%.2f limit=%.2f chg=%.1f%% 1m=%.1f%% big=%s big_ok=%d' % (
             top, px, limit or px, chg, surge, _fmt_big_ratio(big), int(_l2_big_ok(sec))), mode='chase'):
-            _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+            _buy_slot_add(sec, 'elastic_top'); g.buy_log[sec] = now
             et = getattr(g, 'elastic_top', None)
             if et:
                 et['done'] = True        # 本轮跟踪结束（易主/09:50/买入 三终止条件）
@@ -6082,33 +6685,57 @@ def _role_tolerance(sec):
 
 
 # ================= 卖出（P1绿开>P3止损>P5/P6分数） =================
+def _sold_today_fully(sec):
+    # v1.18 当日卖出是否已全部成交（用于从桥持仓视图过滤，减少 [pos-stale] 噪音）：
+    # 仅当无在途卖单或卖单 FILLED 才视为已卖完；PARTIAL 残留不回退，避免漏卖剩余仓位。
+    try:
+        pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
+        if str(pp.get('side') or '') != 'sell':
+            return True
+        st = str(pp.get('status') or '').upper()
+        if st in ('FILLED', 'CANCELLED', 'REJECTED'):
+            return True
+        if st == 'PARTIAL':
+            return int(pp.get('filled') or 0) >= int(pp.get('qty') or 0)
+        return False
+    except Exception:
+        return False
+
+
 def _sellable_source():
     # 持仓量/成本来源：优先 get_positions()（规范键 .XSHG + amount/enable_amount/cost_basis, docs/06）；
     # 兜底 context.portfolio.positions（实盘原始键 .SS 且字段名随柜台而异）。
+    # v1.18 当日已全部成交的卖出票从视图过滤（防桥残留回填导致 [sell-skip]/[pos-stale] 刷屏）。
     try:
         p = get_positions() or {}
     except Exception:
         p = {}
-    return p if isinstance(p, dict) and p else {}
+    if not (isinstance(p, dict) and p):
+        return {}
+    try:
+        if BLS.get('sell_source_filter_sold', True):
+            sold = set((getattr(g, 'daily', None) or {}).get('sold') or [])
+            if sold:
+                out = {}
+                for k, v in p.items():
+                    nk = _norm_sec(k)
+                    if nk not in sold or not _sold_today_fully(nk):
+                        out[k] = v
+                p = out
+    except Exception:
+        pass
+    return p
 
 _SEL_FIELDS_AVAIL = ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
                      'real_enable_amount', 'm_nCanUseVolume', 'm_nPREnableVolume',
                      'can_use_volume', 'enable_volume', 'sellable_volume')
 _SEL_FIELDS_TOTAL = ('current_amount', 'amount', 'hold_amount', 'holding_amount', 'm_nVolume', 'volume')
 
-def _sellable_detail(sec, positions):
-    # v1.8 可卖数量明细：(qty, key, avail_present, total_present)。
-    # 可卖类字段优先（A股T+1：当日买入 enable=0 正确返回 0，不回退总量）；
-    # 兼容 QMT 桥 m_nCanUseVolume/m_nPREnableVolume/m_nVolume（m_nVolume 扣冻结量），供 [sell-skip] 定位链路。
+def _sellable_total(sec, positions):
+    # v1.20 总量字段明细：(qty, key, present)。m_nVolume 扣冻结量，供 enable 回填审计。
     p = positions.get(sec)
-    for key in _SEL_FIELDS_AVAIL:
-        try:
-            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
-            if v is None:
-                continue
-            return max(int(float(v) or 0), 0), key, True, False
-        except Exception:
-            continue
+    if p is None:
+        return 0, '', False
     for key in _SEL_FIELDS_TOTAL:
         try:
             v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
@@ -6121,15 +6748,124 @@ def _sellable_detail(sec, positions):
                     qty = max(qty - max(int(float(fv) or 0), 0), 0)
                 except Exception:
                     pass
-            return qty, key, False, True
+            return qty, key, True
         except Exception:
             continue
+    return 0, '', False
+
+def _sellable_detail(sec, positions):
+    # v1.8 可卖数量明细：(qty, key, avail_present, total_present)。
+    # 可卖类字段优先（A股T+1：当日买入 enable=0 正确返回 0，不回退总量）；
+    # 兼容 QMT 桥 m_nCanUseVolume/m_nPREnableVolume/m_nVolume（m_nVolume 扣冻结量），供 [sell-skip] 定位链路。
+    p = positions.get(sec)
+    for key in _SEL_FIELDS_AVAIL:
+        try:
+            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
+            if v is None:
+                continue
+            qty = max(int(float(v) or 0), 0)
+            _tq, _tk, _tok = _sellable_total(sec, positions)   # v1.22 总量字段存在性一并上报（amt0 审计用）
+            return qty, key, True, _tok
+        except Exception:
+            continue
+    tq, tk, ok = _sellable_total(sec, positions)
+    if ok:
+        return tq, tk, False, True
     if p is not None:
         _audit_pos_fields(sec, p)
     return 0, '', False, False
 
+def _sell_avail_backfill_log(sec, qty, avail_key, kind):
+    # v1.20 可卖回填审计（60s/股节流）：桥 enable_amount 未回填时按总量兜底的依据留痕
+    try:
+        gl = getattr(g, 'sell_avail_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.sell_avail_log = gl
+        now = time.time()
+        if now - float(gl.get(sec) or 0.0) < 60.0:
+            return
+        gl[sec] = now
+        log.info('[sell-avail] %s 回填 qty=%d src=%s kind=%s' % (_sn(sec), qty, avail_key, kind))
+    except Exception:
+        pass
+
+
+def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0):
+    # v1.22 桥持仓 amount=0 审计：可卖字段存在但总量缺失/为 0 时打印明细，不回填可卖（不虚构）
+    try:
+        if not BLS.get('sell_avail_amt0_warn_only', True):
+            return
+        gl = getattr(g, 'sell_avail_amt0_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.sell_avail_amt0_log = gl
+        now = time.time()
+        if now - float(gl.get(sec) or 0.0) < 60.0:
+            return
+        gl[sec] = now
+        _bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
+        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
+            _sn(sec), avail_key or '-', int(bool(avail_present)), int(bool(total_present)),
+            total_key or '-', int(total_qty or 0), _bq))
+    except Exception:
+        pass
+
+
+def _sellable_backfill_detail(sec, positions):
+    # v1.20 可卖回填：(qty, key, avail_present, total_present)。
+    # 桥/PTrade 持仓成交后 enable_amount 常缺回填 -> 非当日买入按总量兜底，恢复卖出保护；
+    # 当日买入默认 T+1 严格（enable=0 不回填），需账户支持 T+0 才可放开。
+    qty, key, avail_present, total_present = _sellable_detail(sec, positions)
+    if qty > 0 or not avail_present or not BLS.get('sell_avail_backfill_enabled', True):
+        return qty, key, avail_present, total_present
+    tq, tk, ok = _sellable_total(sec, positions)
+    if not ok or tq <= 0:
+        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq)
+        return qty, key, avail_present, total_present
+    _bought = str(sec) in ((getattr(g, 'daily', None) or {}).get('bought') or [])
+    if _bought and BLS.get('sell_avail_t1_strict', True):
+        return qty, key, avail_present, total_present   # T+1 当日买入不回填
+    _sell_avail_backfill_log(sec, tq, tk, 't0' if _bought else 'prev')
+    return tq, 'enable_backfill', True, True
+
 def _sellable(sec, positions):
-    return _sellable_detail(sec, positions)[0]
+    return _sellable_backfill_detail(sec, positions)[0]
+
+def _p6_weak_reset(sec):
+    # v1.20 P6 评分恢复/离开弱分区 -> 清空两帧计数
+    try:
+        w = getattr(g, 'p6_weak', None)
+        if isinstance(w, dict):
+            w.pop(sec, None)
+    except Exception:
+        pass
+
+def _p6_weak_step(sec, sc):
+    # v1.20 P6 两帧确认：连续弱分（间隔<=p6_confirm_win_sec）才返回 trigger=True；
+    # 超窗重新计数，触发后清计数（保留后续再次减半能力）。返回 (cnt, trigger, note)。
+    try:
+        w = getattr(g, 'p6_weak', None)
+        if not isinstance(w, dict):
+            w = {}; g.p6_weak = w
+        rec = w.get(sec)
+        now = time.time()
+        if rec and now - float(rec.get('ts') or 0) > float(BLS.get('p6_confirm_win_sec', 30.0) or 30.0):
+            rec = None
+        cnt = (int(rec.get('cnt') or 0) + 1) if rec else 1
+        w[sec] = {'cnt': cnt, 'ts': now, 'score': float(sc)}
+        if cnt >= int(BLS.get('p6_confirm_frames', 2) or 2):
+            w.pop(sec, None)
+            try:
+                _save_state()
+            except Exception:
+                pass
+            return cnt, True, '[p6-confirm] %s score=%.1f cnt=%d -> sell' % (_sn(sec), sc, cnt)
+        try:
+            _save_state()
+        except Exception:
+            pass
+        return cnt, False, '[p6-confirm] %s score=%.1f cnt=%d -> hold' % (_sn(sec), sc, cnt)
+    except Exception:
+        return 1, False, '[p6-confirm] %s state error -> hold' % (_sn(sec))
 
 def _limit_down_price(sec):
     # 跌停地板价 = 前收 x (1 - 板块跌停幅)，供核卖限价保证下跌成交（无前收返回 None）
@@ -6220,12 +6956,15 @@ def _sell_inflight(sec):
 
 def _retry_sell_blocked(sec):
     # v1.15 卖单重投前可卖量校验：桥可卖0/不可用 -> 停止重投，防止连续废单刷屏
+    # v1.20 在途卖单优先拦截（防止 enable 回填后对冻结份额重复重投）
     try:
         pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
         if str(pp.get('side') or '') != 'sell':
             return False
         if str(pp.get('status') or '').upper() == 'FILLED':
             return False
+        if _sell_inflight(sec):
+            return True
         _pos = _sellable_source() or {}
         _q = _sellable(sec, _pos)
         if _q <= 0:
@@ -6291,6 +7030,8 @@ def _audit_sell_skip(sec, why, now=None):
             cnt = {}; g.sell_skip_cnt = cnt
         cnt[sec] = int(cnt.get(sec) or 0) + 1
         hb = float(BLS.get('sell_skip_heartbeat_sec', 60.0) or 60.0)
+        if 't1=1' in str(why):
+            hb = float(BLS.get('sell_skip_heartbeat_t1_sec', 300.0) or 300.0)   # v1.18 当日买入 T+1 降频
         if now - float(gs.get(sec) or 0) < hb:
             return
         gs[sec] = now
@@ -6423,9 +7164,11 @@ def sell_manager(context):
         amt = _sellable(_raw, positions)
         if amt <= 0:
             _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
+            _tq0, _tk0, _tok0 = _sellable_total(_raw, positions)   # v1.22 amt0 审计带实际总量字段/数值
             _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
-            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total=%d t1=%s)' % (
-                _raw, _k0 or '-', int(_av0), int(_tv0), _bought_today))
+            _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(_raw) or 0)
+            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
+                _raw, _k0 or '-', int(_av0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
             continue
         now = time.time()
         if _sell_inflight(sec):            # 订单/成交回报驱动的去重：有未终态卖单在途则跳过(防叠单)
@@ -6454,6 +7197,9 @@ def sell_manager(context):
             _p7c = _p7c_check(sec, amt)
             if _p7c:
                 _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
+            _p7d = _p7d_check(sec, amt)
+            if _p7d and sec not in (getattr(g, 'p7d_sold', None) or set()):
+                _do_sell(context, sec, _p7d[1], _p7d[0]); _mark_p7(sec, 'p7d'); continue
         # v0.65 P8 中高位兑现指导（docs/43）：高位分歧/切低位 + 中位股晋级失败 -> 减半兑现
         _p8 = _lb_senti_cut_hold(sec)
         if _p8:
@@ -6484,8 +7230,15 @@ def sell_manager(context):
         if sc is None:
             continue   # v0.68 评分未就绪 -> 跳过 P5/P6（防数据真空误卖）
         if sc < BLS['score_sell_clear'] * rp['score_clear_adj']:
+            _p6_weak_reset(sec)
             _do_sell(context, sec, amt, 'P5_score_clear score=%.1f' % sc)
         elif sc < BLS['score_sell_half'] * rp['score_half_adj']:
+            if BLS.get('p6_two_frame_enabled', True):
+                _cnt, _trig, _note = _p6_weak_step(sec, sc)
+                log.info(_note)
+                if not _trig:
+                    continue
+            _p6_weak_reset(sec)
             half = int(amt * float(BLS.get('sell_half_ratio', 0.5)))
             qty = int(half // 100) * 100
             if qty < 1:
@@ -6493,6 +7246,8 @@ def sell_manager(context):
             if qty > amt:
                 qty = amt
             _do_sell(context, sec, qty, 'P6_score_half score=%.1f' % sc)
+        else:
+            _p6_weak_reset(sec)
 
 
 
@@ -6531,16 +7286,30 @@ def tick_sell_manager(context):
                     _half = int(amt * float(BLS.get('break2_half_ratio', 0.5)))
                     _half = int(_half // 100) * 100
                     _do_sell(context, sec, _half if _half >= 100 else amt,
-                             'TICK_break2_half_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                             'TICK_break2_half_sell break_cnt=%d held=%.0fs' % (_bc, now - _break_held_ts(ft, now)), mode='sell_break')
                     _mark_sold_event(sec, 'break2')
                     continue
             else:
                 if sec not in (getattr(g, 'break_sold', None) or set()):
-                    _do_sell(context, sec, amt, 'TICK_break_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                    _do_sell(context, sec, amt, 'TICK_break_sell break_cnt=%d held=%.0fs' % (_bc, now - _break_held_ts(ft, now)), mode='sell_break')
                     _mark_sold_event(sec, 'break')
                     continue
         # \u5c01\u5355\u5927\u51cf\u5356\u51fa\uff1a\u5c01\u5355<=\u9996\u5c01*seal_fail_ratio \u6216\u59d4\u6258\u7b14\u6570\u8870\u7aed\uff08seal_low \u9996\u89e6\u53d1\uff0c\u9632\u70b8\u677f\u63d0\u524d\u8d70\uff09
         if BLS.get('seal_low_sell_enabled', True) and ft.get('seal_low'):
+            if getattr(g, 'seal_batch_unhealthy', False):
+                log.info('[seal-low-guard] %s 本帧 L2 整批缺失 -> SEAL_LOW 跳过卖出，等待恢复' % _sn(sec))
+                continue
+            _cts = ft.get('seal_low_confirm_ts') or 0.0
+            _cnf = float(BLS.get('seal_low_confirm_sec', 6.0) or 0.0)
+            _fast = bool(ft.get('seal_low_fast') or False)
+            if _fast:
+                log.info('[seal-low-guard] %s SEAL_LOW_FAST 1帧确认 -> 立即卖出' % _sn(sec))
+            elif _cnf > 0 and (time.time() - _cts) < _cnf:
+                _skip_log('seal', sec, 'confirm_wait',
+                          '[seal-low-guard] %s SEAL_LOW 单帧待确认 age=%.0fs < %.0fs -> 不卖' % (
+                              _sn(sec), time.time() - _cts, _cnf),
+                          throttle_sec=3.0)
+                continue
             if sec not in (getattr(g, 'seal_sold', None) or set()):
                 _do_sell(context, sec, amt,
                          'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)),
@@ -6570,6 +7339,9 @@ def tick_sell_manager(context):
             _p7c = _p7c_check(sec, amt)
             if _p7c:
                 _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
+            _p7d = _p7d_check(sec, amt)
+            if _p7d and sec not in (getattr(g, 'p7d_sold', None) or set()):
+                _do_sell(context, sec, _p7d[1], _p7d[0]); _mark_p7(sec, 'p7d'); continue
         # v0.65 P8 中高位兑现指导（docs/43）：高位分歧/切低位 + 中位股晋级失败 -> 减半兑现（tick 3s 兜底）
         _p8 = _lb_senti_cut_hold(sec)
         if _p8:
@@ -6596,14 +7368,21 @@ def tick_sell_manager(context):
                 if st4 in (PS, CS):
                     _do_sell(context, sec, amt, 'P4_exp_miss_tick ' + st4); continue
         # P5/P6 评分：hist1d 数据缺失/预算降级 -> 跳过（防降级误触发），1m 兜底
-        if _hist_1d(sec) is None:
+        if _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0) is None:
             continue
         sc = score_now(sec)
         if sc is None:
             continue   # v0.68 评分未就绪 -> 跳过 P5/P6（防数据真空误卖）
         if sc < BLS['score_sell_clear'] * rp['score_clear_adj']:
+            _p6_weak_reset(sec)
             _do_sell(context, sec, amt, 'P5_score_clear_tick score=%.1f' % sc)
         elif sc < BLS['score_sell_half'] * rp['score_half_adj']:
+            if BLS.get('p6_two_frame_enabled', True):
+                _cnt, _trig, _note = _p6_weak_step(sec, sc)
+                log.info(_note)
+                if not _trig:
+                    continue
+            _p6_weak_reset(sec)
             half = int(amt * float(BLS.get('sell_half_ratio', 0.5)))
             qty = int(half // 100) * 100
             if qty < 1:
@@ -6611,6 +7390,8 @@ def tick_sell_manager(context):
             if qty > amt:
                 qty = amt
             _do_sell(context, sec, qty, 'P6_score_half_tick score=%.1f' % sc)
+        else:
+            _p6_weak_reset(sec)
 
 
 def _mark_sold_event(sec, kind):
@@ -6729,7 +7510,7 @@ def _p7a_check(sec, amt):
         return None
     if _sealed_now(sec):
         return None
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 2:
         return None
     vols = list(df['volume'])
@@ -6827,10 +7608,38 @@ def _p7c_check(sec, amt):
     return ('P7c_passive_sweep b1 px=%.2f tripx=%.2f' % (px, tripx), half)
 
 
+def _p7d_check(sec, amt):
+    # v1.19 P7d 核心冲高偏离（docs/33 扩展）：核心(CORE=连板>=3) + 非唯一身位 + 冲高逼近涨停未封板
+    # + 现价偏离分时均价过远 -> 减半兑现，防冲高回落无溢价。
+    if not BLS.get('p7d_sell_enabled', True):
+        return None
+    if _limitup_days(sec) < 3:
+        return None                      # CORE 口径与 _tags 一致，不调 100 日新高减负
+    if _unique_stand(sec):
+        return None                      # 唯一性龙头不执行
+    if _sealed_now(sec) or _today_zt(sec):
+        return None                      # 已封板/涨停不卖
+    s = g.spot.get(sec) or {}
+    px = last_px(sec) or 0.0
+    up = float(s.get('up_px') or 0.0)
+    vwap = float(s.get('wavg_px') or 0.0)
+    if not (px > 0 and up > 0 and vwap > 0):
+        return None                      # 数据缺失保守不卖
+    if px < up * (1.0 - float(BLS.get('p7d_limit_gap', 0.04) or 0.04)):
+        return None                      # 未进入冲高区
+    if px < vwap * (1.0 + float(BLS.get('p7d_vwap_dev_min', 3.0) or 3.0) / 100.0):
+        return None                      # 偏离分时均价不足
+    half = int(amt * float(BLS.get('p7d_half_ratio', 0.5) or 0.5))
+    half = int(half // 100) * 100
+    qty = half if half >= 100 else amt
+    return ('P7d_core_surge_dev px=%.2f up=%.2f vwap=%.2f dev=%.1f%%' % (
+        px, up, vwap, (px / vwap - 1.0) * 100.0), qty)
+
+
 def _mark_p7(sec, kind):
     # v0.59 P7a/P7b 事件卖出首触发标记（跨重启持久化，防同日重启后重复卖）
     try:
-        key = 'p7a_sold' if kind == 'p7a' else 'p7b_sold'
+        key = 'p7a_sold' if kind == 'p7a' else ('p7b_sold' if kind == 'p7b' else 'p7d_sold')
         st = getattr(g, key, None)
         if not isinstance(st, set):
             st = set(); setattr(g, key, st)
@@ -7595,9 +8404,40 @@ def _tx_frame_zt_ms(sec, frame_data):
         return None
 
 
+def _break_held_ts(ft, now=None):
+    # v1.22 反复炸板 held 基准：优先最近一次破板时间 last_break_ts，首破 break_ts 仅兜底
+    try:
+        now = now or time.time()
+        ft = ft or {}
+        return float(ft.get('last_break_ts') or ft.get('break_ts') or now)
+    except Exception:
+        return now
+
+
+def _firstzt_rebreak_log(sec):
+    # v1.22 反复炸板/回封日志节流：同票 firstzt_rebreak_log_sec 内只打一次，不抑制状态翻转
+    try:
+        gl = getattr(g, 'firstzt_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.firstzt_log_ts = gl
+        now = time.time()
+        sec_sec = float(BLS.get('firstzt_rebreak_log_sec', 30.0) or 30.0)
+        if now - float(gl.get(sec) or 0.0) < sec_sec:
+            return False
+        gl[sec] = now
+        return True
+    except Exception:
+        return True
+
+
 def tick_data(context, data):
     # 仅交易，9:30-14:59 每 3s 一次。L2 涨停首笔成交感知 + 封单/破板节奏。
     # 只采集状态与 [firstzt] 日志，下单仍走 1m handle_data（采集/决策解耦）。
+    try:
+        g.gear_invalid_cnt = 0
+        g.gear_total_cnt = 0
+    except Exception:
+        pass
     if not BLS.get('tick_enabled', True):
         return
     _secs = _tick_targets()
@@ -7639,6 +8479,13 @@ def tick_data(context, data):
             if last <= 0 or u <= 0:
                 continue
             seal, bids = _seal_metrics(sec)
+            _book_ok = _seal_book_ok(sec)
+            try:
+                g.gear_total_cnt = int(getattr(g, 'gear_total_cnt', 0) or 0) + 1
+                if not _book_ok:
+                    g.gear_invalid_cnt = int(getattr(g, 'gear_invalid_cnt', 0) or 0) + 1
+            except Exception:
+                pass
             ft = g.first_zt.get(sec)
             if ft is None:
                 vol = _snap_vol(s)
@@ -7686,22 +8533,24 @@ def tick_data(context, data):
             if last < u - 1e-9:                 # 破板
                 if not ft.get('break'):
                     ft['break'] = True; ft['break_ts'] = time.time()
+                    ft['last_break_ts'] = time.time()   # v1.22 反复炸板：最近破板时间戳每次翻转更新
                     ft['break_cnt'] = int(ft.get('break_cnt') or 0) + 1
-                    log.info('[firstzt] %s price=%.2f -> BREAK#%d seal=%.0f held=%.0fs' % (_sn(sec), last, int(ft.get('break_cnt') or 0), seal, time.time() - ft.get('ts', time.time())))
+                    if _firstzt_rebreak_log(sec):
+                        log.info('[firstzt] %s price=%.2f -> BREAK#%d seal=%.0f held=%.0fs' % (_sn(sec), last, int(ft.get('break_cnt') or 0), seal, time.time() - ft.get('ts', time.time())))
                 continue
             if ft.get('break') and last >= u - 1e-9 and seal >= float(BLS.get('firstzt_min_seal', 0.0)):
                 ft['break'] = False
+                ft['last_reboard_ts'] = time.time()   # v1.22 最近回封时间戳每次翻转更新
                 if not ft.get('reboard_ts'):
                     ft['reboard_ts'] = time.time()
-                log.info('[firstzt] %s 回封 reboard_ts=%.0f break_cnt=%d seal=%.0f' % (_sn(sec), float(ft.get('reboard_ts') or 0), int(ft.get('break_cnt') or 0), seal))
+                if _firstzt_rebreak_log(sec):
+                    log.info('[firstzt] %s 回封 reboard_ts=%.0f break_cnt=%d seal=%.0f' % (_sn(sec), float(ft.get('reboard_ts') or 0), int(ft.get('break_cnt') or 0), seal))
             fs = ft.get('first_seal') or 0.0
             _sfr = float(BLS.get('seal_fail_ratio', 0.333))
             if _unique_stand(sec):   # v0.49 唯一身位连板更容忍（后排助攻/人气龙头）
                 _sfr = float(BLS.get('seal_fail_ratio_unique', 0.25))    # 封单衰竭（相对首封）
-            if fs > 0 and seal < fs * _sfr:
-                if not ft.get('seal_low'):
-                    ft['seal_low'] = True
-                    log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW' % (_sn(sec), seal, fs, seal / fs, bids))
+            _update_seal_low_state(ft, sec, last, u, seal, bids, _book_ok, fs, _sfr,
+                                   float(BLS.get('seal_low_fast_ratio', 0.15) or 0.0))
             try:
                 _board_queue_cancel(sec, seal, bids)   # v1.6 打板未成交排单：封单衰减撤单
             except Exception as _e:
@@ -7709,6 +8558,14 @@ def tick_data(context, data):
         except Exception:
             continue
     # v0.26 tick 级卖出：3s 帧末（炸板/封单大减/急卖；first_zt 状态已在本帧采集）
+    try:
+        _unhealthy, _tot, _inv, _ratio = _gear_batch_health()
+        g.seal_batch_unhealthy = _unhealthy
+        if _unhealthy:
+            log.info('[gear-na] 本帧 L2 十档缺失 %d/%d 占比=%.0f%% -> 整批不健康，跳过 SEAL_LOW 卖出' % (_inv, _tot, _ratio * 100.0))
+            _reset_seal_low_confirm_on_batch_bad()
+    except Exception as _e:
+        _warn('gear batch health fail: %r' % _e)
     try:
         tick_sell_manager(context)
     except Exception as e:
@@ -7767,6 +8624,7 @@ def auction_pre_confirm(context):
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))   # v0.52 竞价终态已成交大单播种
     except Exception:
         pass
+    _hist1d_prewarm('09:25')   # v1.16 核心/预期票日线预暖
     for code in list(get_positions()):
         g.exp.setdefault(code, {})
         g.exp[code]['auction_status'] = _eval_auction(code)[0]
@@ -7803,9 +8661,37 @@ def _after_open_state_sync():
             len(g.first_zt or {}), len(g.l2_big or {}), len(g.lb_senti or {})))
         return 'keep'
     g.exp_day = today
+    g.hist_prio_cache = {}; g.hist_na_pending = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
+    g.hist_recover_once = {}; g.firstzt_log_ts = {}; g.bought_qty = {}   # v1.22 aop 重置同步清恢复日志去重/炸板日志节流/买入成交累计
     log.info('[aop-reset] 首日/跨日重置盘中状态 first_zt=0 l2_big=0')
     return 'reset'
+
+
+def lb_senti_auction_retry(context):
+    # v1.16 09:26 竞价情绪补拉：09:25 未就绪票再补一轮，09:31 仅异常兜底
+    try:
+        if not BLS.get('lb_senti_auction_retry_enabled', True):
+            return
+        _set_now(context)
+        st = _lb_senti_state()
+        a = st.get('auction') or {}
+        if a.get('ready'):
+            return
+        _got, _missing = _fill_zt_spot()
+        if _got:
+            out = _lb_senti_auction() or {}
+            _rd = out.get('ready_detail') or {}
+            _mn = int(out.get('mid_n') or 0); _ln = int(out.get('low_n') or 0)
+            _mr = int(_rd.get('mid') or 0); _lr = int(_rd.get('low') or 0)
+            _pct = 100.0 * (_mr + _lr) / (_mn + _ln) if (_mn + _ln) else 100.0
+            log.info('[lb-senti] auction retry 09:26 got=%d ready=%s ready_pct=%.0f%% missing=%s'
+                     % (_got, bool(out.get('ready')), _pct, ','.join(_missing[:10])))
+        else:
+            log.info('[lb-senti] auction retry 09:26 got=0 ready=%s missing=%d'
+                     % (a.get('ready'), len(_missing or [])))
+    except Exception as e:
+        _warn('lb_senti auction retry fail: %r' % e)
 
 
 def after_open_probe(context):
@@ -7826,6 +8712,7 @@ def after_open_probe(context):
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))   # v0.52 09:31 兜底重播种（覆盖重置窗口）
     except Exception:
         pass
+    _hist1d_prewarm('09:31')   # v1.16 09:31 核心日线补暖
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})
         au, _r = _eval_auction(sec)
@@ -7999,8 +8886,8 @@ def _size_total(context):
 
 
 def _calc_buy_qty(context, sec, price, ratio):
-    # 买入量(100股整手)：期望金额=min(现金×比例, 单支上限, 现金)；单支上限=总资产×single_stock_cap-已持市值
-    # AXquant _calc_buy_volume：期望金额=min(总资产×比, 现金, 仓位余量, 单支上限)；本实现替代硬编码 0.3
+    # 买入量(整手)：期望金额=min(总资产×比例, 单支上限, 现金)；单支上限=总资产×single_stock_cap-已持市值
+    # v1.17 口径修正：与 AXquant _calc_buy_volume 对齐（此前误用现金×比例，持仓时低于总资产预算）
     if price is None or price <= 0:
         return 0
     try:
@@ -8021,15 +8908,39 @@ def _calc_buy_qty(context, sec, price, ratio):
     if cap <= 0:
         return 0
     try:
-        budget = min(cash * float(ratio), cap, cash)
+        budget = min(total * float(ratio), cap, cash)
     except Exception:
         return 0
     if budget <= 0:
         return 0
-    lot = price * 100
+    lot_step = int(BLS.get('buy_lot_step', 100) or 100)
+    lot = price * lot_step
     if lot <= 0:
         return 0
-    return int(budget / lot) * 100
+    qty = int(budget / lot) * lot_step
+    try:
+        g.qty_calc_last = {'sec': sec, 'price': price, 'cash': cash, 'total': total,
+                           'held_mv': held_mv, 'cap': cap, 'budget': budget,
+                           'ratio': ratio, 'lot': lot, 'qty': qty}
+    except Exception:
+        pass
+    return qty
+
+
+def _qty_calc_log(context, sec, tag='order'):
+    # v1.18 发单前 [qty-calc] 审计（cash/total/held_mv/cap/budget/lot/qty），按票+tag 节流防刷屏
+    try:
+        d = getattr(g, 'qty_calc_last', None)
+        if not isinstance(d, dict) or d.get('sec') != sec:
+            return
+        _skip_log('qty_calc', sec, tag,
+                  '[qty-calc] %s %s cash=%.2f total=%.2f held_mv=%.2f cap=%.2f budget=%.2f lot=%.2f qty=%d' % (
+                      tag, _sn(sec), float(d.get('cash') or 0), float(d.get('total') or 0),
+                      float(d.get('held_mv') or 0), float(d.get('cap') or 0),
+                      float(d.get('budget') or 0), float(d.get('lot') or 0), int(d.get('qty') or 0)),
+                  throttle_sec=30.0)
+    except Exception:
+        pass
 
 
 def _rt_lag_info(sec):
@@ -8263,14 +9174,17 @@ def _buy_commit_rel(sec, qty, px):
 
 def _release_buy_slot(sec):
     # v0.64 买单 REJECTED/CANCELLED：释放当日买入名额（防占坑）；buy_log 冷却保留防信号风暴
-    # v1.14 全量/打板/其它分类列表同步释放（打板未成交不算占用）
+    # v1.21 全量/打板/各策略分类列表同步释放（打板未成交不算占用）
     try:
         _db = getattr(g, 'daily', None)
         if isinstance(_db, dict):
-            for _k in ('bought', 'bought_board', 'bought_other'):
+            for _k in _BUY_SLOT_LIST_KEYS:
                 _lst = _db.get(_k)
                 if isinstance(_lst, list) and sec in _lst:
                     _lst.remove(sec)
+            _kd = _db.get('bought_kind')
+            if isinstance(_kd, dict):
+                _kd.pop(sec, None)
         if isinstance(getattr(g, 'exp_fired', None), set):
             g.exp_fired.discard(sec)
         log.info('[buy-slot] %s 释放当日买入名额(REJECTED/CANCELLED)' % _sn(sec))
@@ -8280,13 +9194,20 @@ def _release_buy_slot(sec):
 
 
 def _reconcile_buy_slot_lists(_db, _keep):
-    # v1.14 重启对账同步分类列表：只保留真实持仓/已成交买单位
+    # v1.21 重启对账同步分类列表：只保留真实持仓/已成交买单位
     try:
         _keep_set = set(_keep)
-        for _k in ('bought_board', 'bought_other'):
+        for _k in _BUY_SLOT_LIST_KEYS:
+            if _k == 'bought':
+                continue
             _lst = _db.get(_k)
             if isinstance(_lst, list):
                 _db[_k] = [x for x in _lst if x in _keep_set]
+        _kd = _db.get('bought_kind')
+        if isinstance(_kd, dict):
+            for _c in list(_kd):
+                if _c not in _keep_set:
+                    _kd.pop(_c, None)
     except Exception:
         pass
 
@@ -8538,8 +9459,10 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
                 log.info('[sim-min-lot] %s buy qty 0->%d (SIM 最小一手兜底)' % (_sn(sec), qty))
             else:
                 _skip_log('place_order', sec, 'qty0', 'place_order skip(qty<=0) %s' % _sn(sec)); return False
-        if not _buy_pos_ok(context, sec, qty, limit):
-            return False   # v0.30 情绪总仓位上限（冰点40%/回暖80%，连续回暖递减）
+        qty = _buy_pos_cap_qty(context, sec, qty, limit)
+        if qty <= 0:
+            return False   # v0.30 情绪总仓位上限（冰点40%/回暖80%，连续回暖递减；v1.17 超限缩量/skip 参数化）
+        _qty_calc_log(context, sec, 'order')
     else:
         limit = _order_limit(sec, side, mode)
         if qty is None:
@@ -8554,11 +9477,14 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         amt = qty if side == 'buy' else -qty   # v1.10 PTrade order(amount) 正=买/负=卖
         ent = order(sec, amt, limit_price=limit) if limit else order(sec, amt)
         _sb, _sbc = _seal_metrics(sec)   # v1.6 打板排单封单基准（封单衰减撤单用）
+        _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
-                          'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}
+                          'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
+                          'break_cnt_at_send': _bc_send}   # v1.18 在途 break 保护基准
         if side == 'buy':
             _buy_commit_add(sec, qty, limit or px)   # v0.64 记入在途买单承诺（资金实时扣减）
-        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, amt, limit, ent, note, _lag))
+        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s ft_state=%s %s %s' % (
+            _sn(sec), side, qty, amt, limit, ent, _ft_state_str(sec) if side == 'buy' else '-', note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
         return True
     except Exception as e:
@@ -8591,6 +9517,15 @@ def place_expected_order(context, sec, note=''):
         return False   # 一字/封死涨停：不排队买入（v0.15 对齐 AXquant limit_up_sealed_no_queue）
     # 定价：冲板/一字 -> 打板(涨停价排队)；两分钟上攻(非涨停) -> 追高(现价上浮封顶涨停价)
     mode = 'board' if (up and px and px >= up * 0.998) else 'chase'
+    if mode == 'board' and BLS.get('exp_board_queue_gate', True):
+        _ok, _r = _exp_board_gate(sec)
+        if not _ok:
+            _bc = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0)
+            _skip_log('exp_board', sec, _r,
+                      '[exp-board-gate] %s break_cnt=%d 未回封/封单不足(%s) -> 等回封后重评' % (
+                          _sn(sec), _bc, _r),
+                      throttle_sec=5.0)
+            return False   # v1.18 不置 exp_fired，回封后重新评估
     limit = _order_limit(sec, 'buy', mode)
     _log_order_limit(sec, limit)   # v1.12 限价来源审计
     p_for_size = limit or px
@@ -8602,22 +9537,28 @@ def place_expected_order(context, sec, note=''):
             log.info('[sim-min-lot] %s exp buy qty 0->%d (SIM 最小一手兜底)' % (_sn(sec), qty))
         else:
             _skip_log('exp_order', sec, 'qty0', 'exp order skip(qty<=0) %s' % _sn(sec)); return False
-    if not _buy_pos_ok(context, sec, qty, limit):
-        return False   # v0.30 情绪总仓位上限
+    qty = _buy_pos_cap_qty(context, sec, qty, limit)
+    if qty <= 0:
+        return False   # v0.30 情绪总仓位上限（v1.17 超限缩量/skip 参数化）
+    _qty_calc_log(context, sec, 'exp-order')
     if BLS.get('EXPECT_ORDER', False):
         try:
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             _sb, _sbc = _seal_metrics(sec)   # v1.6 一字/打板排单封单基准（封单衰减撤单用）
+            _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
-                              'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}   # v0.64 字段与 place_order 对齐
+                              'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
+                              'break_cnt_at_send': _bc_send}   # v1.18 字段与 place_order 对齐 + break 保护基准
             _buy_commit_add(sec, qty, limit or px)   # v0.64 记入在途买单承诺
-            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s ready=%s %s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, rd, note, _lag))
+            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s ready=%s ft_state=%s %s %s (EXPECT_ORDER=True)' % (
+                _sn(sec), qty, limit, ent, rd, _ft_state_str(sec), note, _lag))
             _signal(sec, 'BUY', qty, limit, mode, note, ent=ent, status='SENT')
             return True
         except Exception as e:
             log.error('exp order fail %s: %r' % (_sn(sec), e))
             return False
-    log.info('[exp-order] %s buy qty=%s limit=%s ready=%s %s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, rd, note, _lag))
+    log.info('[exp-order] %s buy qty=%s limit=%s ready=%s ft_state=%s %s %s (EXPECT_ORDER=False)' % (
+        _sn(sec), qty, limit, rd, _ft_state_str(sec), note, _lag))
     _signal(sec, 'BUY', qty, limit, mode, note, ent='', status='SIM')
     return True
 
@@ -8714,6 +9655,10 @@ def on_trade_response(context, trade_list):
                         p['status'] = 'FILLED'
                     else:
                         p['status'] = 'PARTIAL'
+                    _bq = getattr(g, 'bought_qty', None)
+                    if not isinstance(_bq, dict):
+                        _bq = {}; g.bought_qty = _bq
+                    _bq[code] = int(_bq.get(code, 0) or 0) + qty   # v1.22 当日买入成交累计（桥 enable 未回填审计基准）
                     _buy_commit_rel(code, qty, float(p.get('limit') or 0.0))   # 按成交额释放承诺
                 log.info('on_trade_response %s qty=%s raw_side=%s pend_side=%s eff=%s' % (
                     _sn(code), qty, side, _ps, _eff))
@@ -8740,6 +9685,9 @@ def load_state():
         _d.setdefault('bought', [])
         _d.setdefault('bought_board', [])
         _d.setdefault('bought_other', [])
+        for _k in _BUY_STRATEGY_KINDS:
+            _d.setdefault('bought_' + _k, [])
+        _d.setdefault('bought_kind', {})
         g.daily = _d
         g.exp_fired = set(st.get('exp_fired') or [])
         g.state_day = st.get('day')
@@ -8781,6 +9729,8 @@ def load_state():
             g.p7b_sold = set(st.get('p7b_sold') or [])
             g.p7c_part = dict(st.get('p7c_part') or {})
             g.p7c_sold = set(st.get('p7c_sold') or [])
+            g.p7d_sold = set(st.get('p7d_sold') or [])
+            g.p6_weak = dict(st.get('p6_weak') or {})   # v1.20 同日重启恢复 P6 两帧计数
             g.pending = {k: dict(v) for k, v in (st.get('pending') or {}).items()}   # v0.64 同日重启恢复在途委托
             g.buy_commit = dict(st.get('buy_commit') or {})   # v0.64 同日重启恢复买入承诺
             g.lb_senti = dict(st.get('lb_senti') or {})   # v0.65 同日重启恢复连板盘中情绪动态
@@ -8788,6 +9738,9 @@ def load_state():
             g.ma5_touched = set(st.get('ma5_touched') or [])   # v0.69 同日重启恢复当日首触去重
             g.ma5_lifecycle_day = st.get('ma5_lifecycle_day')
             g.ma5_lows = {k: list(v or [])[:2] for k, v in (st.get('ma5_lows') or {}).items()}
+            g.ma5_pending = set(st.get('ma5_pending') or [])   # v1.21 MA5 未就绪待补评
+            g.bought_qty = dict(st.get('bought_qty') or {})   # v1.22 当日买入成交累计跨重启恢复
+            g.hist_recover_once = dict(st.get('hist_recover_once') or {})   # v1.22 恢复日志去重跨重启恢复
         else:
             g.auction_c = {}   # v1.3 跨日不再沿用内存旧值（防进程跨日残留）
             g.first_zt = {}    # v1.3 跨日强制清空，由当日 tick/重建队列重新建立
@@ -8802,15 +9755,21 @@ def load_state():
             g.lb_senti = {}       # v0.65 跨日清空连板盘中情绪动态
             g.ma5_touch_day = None; g.ma5_touched = set()   # v0.69 跨日清空低吸首触去重
             g.ma5_lifecycle_day = None; g.ma5_lows = {}     # v0.70 跨日清空次低价状态
+            g.ma5_pending = set()                            # v1.21 跨日清空 MA5 待补评
+            g.p6_weak = {}       # v1.20 跨日清空 P6 两帧计数
             g.exp_day = None   # v0.53 跨日：首帧日切正常触发
             g.exp_file = {}      # v1.5 跨日强制清空预期文件池
+            g.bought_qty = {}    # v1.22 跨日清空买入成交累计
+            g.hist_recover_once = {}   # v1.22 跨日清空恢复日志去重
     except Exception:
         g.buy_log = {}; g.sold_log = {}
-        g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}; g.state_day = None
+        g.daily = _new_daily(); g.state_day = None
         g.exp_fired = set(); g.ma5_touch_day = None; g.ma5_touched = set()
-        g.ma5_lifecycle_day = None; g.ma5_lows = {}
+        g.ma5_lifecycle_day = None; g.ma5_lows = {}; g.ma5_pending = set()
+        g.p6_weak = {}          # v1.20 异常分支同样清空 P6 两帧计数
         g.auction_c = {}; g.first_zt = {}   # v1.3 异常分支不保留内存旧行情/首触（防毒状态固化）
         g.exp_file = {}                      # v1.5 异常分支同样清空预期文件池
+        g.bought_qty = {}; g.hist_recover_once = {}   # v1.22 异常分支同样清空
 
 
 def _save_state():
@@ -8842,13 +9801,18 @@ def _save_state():
                          'p7b_sold': sorted(getattr(g, 'p7b_sold', None) or []),
                          'p7c_part': dict(getattr(g, 'p7c_part', None) or {}),
                          'p7c_sold': sorted(getattr(g, 'p7c_sold', None) or []),
+                         'p7d_sold': sorted(getattr(g, 'p7d_sold', None) or []),
+                         'p6_weak': dict(getattr(g, 'p6_weak', None) or {}),   # v1.20 P6 两帧计数
                          'pending': {k: dict(v) for k, v in (getattr(g, 'pending', None) or {}).items()},   # v0.64 在途委托持久化
                          'buy_commit': dict(getattr(g, 'buy_commit', None) or {}),
                          'lb_senti': dict(getattr(g, 'lb_senti', None) or {}),
                          'ma5_touch_day': getattr(g, 'ma5_touch_day', None),
                          'ma5_touched': sorted(getattr(g, 'ma5_touched', None) or []),
                          'ma5_lifecycle_day': getattr(g, 'ma5_lifecycle_day', None),
-                         'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {})}, f, protocol=2)
+                         'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {}),
+                         'ma5_pending': sorted(getattr(g, 'ma5_pending', None) or []),
+                         'bought_qty': dict(getattr(g, 'bought_qty', None) or {}),   # v1.22 当日买入成交累计持久化
+                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {})}, f, protocol=2)   # v1.22 恢复日志去重持久化
     except Exception as e:
         _warn('save_state fail %r' % e)
 
@@ -8879,6 +9843,8 @@ def after_trading_end(context, data):
             log.info('[l2-big-sum] 当日买入/卖出大单(买-卖=净, 元): %s' % ' | '.join(_parts))
     except Exception:
         pass
-    log.info('buysell_core end bought=%s board=%d other=%d sold=%s' % (
+    _strategy_used = ' '.join('%s=%d/%d' % (
+        k, len(g.daily.get('bought_' + k) or []), _buy_slot_limit(k)) for k in _BUY_STRATEGY_KINDS)
+    log.info('buysell_core end bought=%s board=%d total=%d %s sold=%s' % (
         _snl(g.daily.get('bought')), len(g.daily.get('bought_board') or []),
-        len(g.daily.get('bought_other') or []), _snl(g.daily.get('sold'))))
+        len(g.daily.get('bought') or []), _strategy_used, _snl(g.daily.get('sold'))))

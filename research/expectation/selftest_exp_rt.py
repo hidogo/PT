@@ -130,7 +130,7 @@ ok('T5 restart restores exp_fired', '600005.XSHG' in ns['g'].exp_fired)
 
 # T6 日切清空
 ns = fresh(); ns['load_state'] = lambda: None; ns['_save_state'] = lambda: None
-ns['_load_expectation'] = lambda *a, **k: 0; ns['_load_selfwatch'] = lambda: 0; ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None
+ns['_load_expectation'] = lambda *a, **k: 0; ns['_load_selfwatch'] = lambda: 0; ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec, prio=0: None
 ns['get_trading_day'] = lambda: datetime.date(2026,10,16)
 ns['g'].state_day = '2026-10-15'; ns['g'].daily = {'bought': ['600009.XSHG'], 'sold': []}; ns['g'].exp_fired = {'600009.XSHG'}; ns['g'].spot = {}
 ns['before_trading_start'](ns['_CTX'], None)
@@ -334,7 +334,7 @@ ok('T17 missing bench -> await (not CS, not buy)', st == ns['PM'])
 ns = fresh()
 ns['g'].exp_file['600073.XSHG'] = {'side':'buy','entry_type':'normal','expected_status':'pending_exceed','has_yesterday_open':False,'yesterday_open_pct':0.0,'has_expected_auction':True,'expected_auction_change_pct':5.0}
 ns['g'].spot['600073.XSHG'] = {'last_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
-ns['_hist_1d'] = lambda sec: {'open':[8.0,8.5,9.6,10.0,9.4], 'close':[8.0,10.0,9.0,9.8,9.6]}  # open[-1]=9.4, close[-2]=9.8 -> -4.08%
+ns['_hist_1d'] = lambda sec, prio=0: {'open':[8.0,8.5,9.6,10.0,9.4], 'close':[8.0,10.0,9.0,9.8,9.6]}  # open[-1]=9.4, close[-2]=9.8 -> -4.08%
 ns['_auction_change'] = lambda c: 2.0
 _y, _h = ns['_yesterday_open_chg']('600073.XSHG')
 ok('T18 cloud 昨开折算 -4.08%%(open[-1]/close[-2])', _h and abs(_y - (-4.0816)) < 0.01)
@@ -345,7 +345,7 @@ ok('T18 负基也判高开 PX(2> -4.08)', _sta == ns['PX'])
 ns = fresh()
 ns['g'].exp_file['600074.XSHG'] = {'side':'buy','entry_type':'normal','expected_status':'pending_exceed','has_expected_auction':False,'expected_auction_change_pct':0.0}
 ns['g'].spot['600074.XSHG'] = {'last_px':10.0,'preclose_px':10.0,'up_px':12.0,'wavg_px':10.0,'trade_status':'OPEN'}
-ns['_hist_1d'] = lambda sec: {'open':[8.0,8.5,9.6,10.0,10.5], 'close':[8.0,10.0,9.0,9.5,10.5]}  # open[-1]=10.5, close[-2]=9.5 -> 10.526%
+ns['_hist_1d'] = lambda sec, prio=0: {'open':[8.0,8.5,9.6,10.0,10.5], 'close':[8.0,10.0,9.0,9.5,10.5]}  # open[-1]=10.5, close[-2]=9.5 -> 10.526%
 ns['_auction_change'] = lambda c: 9.0   # 9 < 10.526 -> 未达标 PM
 _bm, _bh = ns['_auction_benchmark']('600074.XSHG')
 ok('T19 cloud bench derived ~10.526%%(open[-1]/close[-2])', _bh and abs(_bm - (10.5/9.5 - 1.0) * 100.0) < 0.01)
@@ -420,7 +420,7 @@ ok('T22 单支上限(已持20000)->cap10000 -> qty 1000', q2 == 1000)
 
 ns = fresh(); po = ns['_CTX'].portfolio; po.cash = 50000.0; po.positions = {}; po.total_value = 200000.0
 q3 = ns['_calc_buy_qty'](ns['_CTX'], '600001.XSHG', 10.0, 0.30)
-ok('T22 total_value优先 cash*0.3=15000 -> qty 1500', q3 == 1500)
+ok('T22 总资产*0.3=60000 -> 现金封顶 50000 -> qty 5000', q3 == 5000)
 
 ns = fresh(); po = ns['_CTX'].portfolio; po.cash = 100000.0; po.positions = {}
 q4 = ns['_calc_buy_qty'](ns['_CTX'], '600001.XSHG', 10.0, 0.10)
@@ -433,7 +433,7 @@ ok('T22 red_ratio 无成员=0.5中性', abs(ns['_red_ratio']('600001.XSHG') - 0.
 
 ns = fresh(); ns['g'].spot['600002.XSHG'] = {'vol_ratio': 2.5}
 ok('T22 vol_ratio 快照2.5', abs(ns['_volume_ratio']('600002.XSHG') - 2.5) < 1e-9)
-ns = fresh(); ns['g'].spot['600003.XSHG'] = {}; ns['_hist_1d'] = lambda sec: None
+ns = fresh(); ns['g'].spot['600003.XSHG'] = {}; ns['_hist_1d'] = lambda sec, prio=0: None
 ok('T22 vol_ratio 无数据回退1.0', abs(ns['_volume_ratio']('600003.XSHG') - 1.0) < 1e-9)
 
 # T23 卖出仓位：可卖 enable_amount + P6 半仓整手
@@ -701,7 +701,7 @@ class _FakeDF:
 
 ns = fresh()
 ns['g'].last_ma5 = {}
-ns['_hist_1d'] = lambda sec: _FakeDF(
+ns['_hist_1d'] = lambda sec, prio=0: _FakeDF(
     [1,2,3,4,5,6,7,8,9,10],
     index=[datetime.date(2026,10,1) + datetime.timedelta(days=i) for i in range(9)] + [datetime.date(2026,10,15)])
 ns['last_px'] = lambda sec: 11.0
@@ -712,7 +712,7 @@ ok('T30 同帧价格变化 -> 动态MA5实时变化', abs(ns['_ensure_ma5']('600
 
 ns = fresh()
 ns['g'].last_ma5 = {}
-ns['_hist_1d'] = lambda sec: _FakeDF(
+ns['_hist_1d'] = lambda sec, prio=0: _FakeDF(
     [1,2,3,4,5,6,7,8,9,10],
     index=[datetime.date(2026,10,7) + datetime.timedelta(days=i) for i in range(9)] + [datetime.date(2026,10,16)])
 ns['last_px'] = lambda sec: 10.0
@@ -720,7 +720,7 @@ ok('T30 末日为今日时剔除未完成日线', abs(ns['_ensure_ma5']('600001.
 
 ns = fresh()
 ns['g'].last_ma5 = {}
-ns['_hist_1d'] = lambda sec: _FakeDF(
+ns['_hist_1d'] = lambda sec, prio=0: _FakeDF(
     [9.91,10.90,11.99,13.19,14.51],
     index=[datetime.date(2026,10,16),datetime.date(2026,10,19),datetime.date(2026,10,20),
            datetime.date(2026,10,21),datetime.date(2026,10,22)])
@@ -1861,6 +1861,7 @@ ok('T67 显式关闭 cap=None -> 放行', ns['_buy_pos_ok'](ns['_ctx'], '600001.
 
 ns = fresh()
 ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['BLS']['pos_cap_over_behavior'] = 'skip'   # v1.17 超限行为参数化：本用例验证整单拒绝语义
 ns['g'].sentiment = {'ice': True, 'ice_streak': 1, 'warm_days': 0, 'phase': 'ice', 'divergence': False}
 ns['_red_ratio'] = lambda sec: 0.50
 ns['_ctx'].portfolio.cash = 50000.0
@@ -1874,6 +1875,7 @@ ok('T67 冰点 40% 限内放行(30k+20k)/130k=0.385<=0.40',
 
 ns = fresh()
 ns['BLS']['sentiment_pos_cap_enabled'] = True
+ns['BLS']['pos_cap_over_behavior'] = 'skip'   # v1.17 超限行为参数化：本用例验证整单拒绝语义
 ns['g'].sentiment = {'ice': False, 'ice_streak': 0, 'warm_days': 1, 'phase': 'warm', 'divergence': False}
 ns['_ctx'].portfolio.cash = 50000.0
 ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_value=150000.0)}
@@ -1884,11 +1886,11 @@ ns['_ctx'].portfolio.positions = {'600001.XSHG': types.SimpleNamespace(market_va
 ok('T67 回暖 80% 限内放行(60k+50k)/160k=0.69<=0.80',
    ns['_buy_pos_ok'](ns['_ctx'], '600002.XSHG', 5000, 10.0) is True)
 
-# 5) 两买入入口静态包含 _buy_pos_ok 闸门（place_order 买分支 / place_expected_order）
+# 5) 两买入入口静态包含 _buy_pos_cap_qty 闸门（place_order 买分支 / place_expected_order）
 import re
 src67 = io.open(SRC, encoding='utf-8').read()
-gates = re.findall(r'_buy_pos_ok\(context, sec, qty, limit\)', src67)
-ok('T67 两买入路径均接 _buy_pos_ok 闸门', len(gates) >= 2)
+gates = re.findall(r'_buy_pos_cap_qty\(context, sec, qty, limit\)', src67)
+ok('T67 两买入路径均接 _buy_pos_cap_qty 闸门', len(gates) >= 2)
 
 
 # --- T67b 情绪档位列：sentiment CSV 带 emotion/emotion_basis 读入，旧列仍兼容 ---
@@ -1934,7 +1936,7 @@ def _bts_setup(state_day, today):
     n['_load_sentiment'] = lambda: None
     n['_load_selfwatch'] = lambda: None
     n['_sync_pool_static'] = lambda: None
-    n['_hist_1d'] = lambda sec: None
+    n['_hist_1d'] = lambda sec, prio=0: None
     n['get_trading_day'] = lambda: datetime.date.fromisoformat(today)
     gg = n['g']
     gg.state_day = state_day
@@ -2719,7 +2721,7 @@ ok('T88 actual=0 & open present -> CS', st2 == ns2['CS'] and reason2.startswith(
 ns = fresh(); ns['load_state'] = lambda: None; ns['_save_state'] = lambda: None
 ns['_load_expectation'] = lambda *a, **k: 0; ns['_load_selfwatch'] = lambda: 0; ns['_load_sentiment'] = lambda: 0
 ns['_load_zt_lianban'] = lambda: 0; ns['_load_boards'] = lambda: 0
-ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec: None; ns['_board_probe'] = lambda: None
+ns['_sync_pool_static'] = lambda: None; ns['_hist_1d'] = lambda sec, prio=0: None; ns['_board_probe'] = lambda: None
 ns['get_trading_day'] = lambda: datetime.date(2026, 10, 16)
 ns['_yesterday_open_chg'] = lambda sec: (2.0, True)
 g = ns['g']
@@ -3006,7 +3008,7 @@ for c in ('603278.XSHG', '603081.XSHG'):
     g.spot[c] = {'preclose_px': 10.0, 'last_px': 11.0, 'up_px': 11.0}
 g.first_zt = {'603081.XSHG': {'ts': time.time(), 'ms': 20261022093500000, 'first_seal': 80000.0, 'break': False}}
 _calls96 = {'hist': 0, 'blocks': 0}
-ns['_hist_1d'] = lambda sec: _calls96.__setitem__('hist', _calls96['hist'] + 1) or None
+ns['_hist_1d'] = lambda sec, prio=0: _calls96.__setitem__('hist', _calls96['hist'] + 1) or None
 ns['_boards_of'] = lambda sec: _calls96.__setitem__('blocks', _calls96['blocks'] + 1) or []
 g.zt_dyn_cache = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}
 fm96 = ns['_dyn_theme_ferment']()
@@ -4009,7 +4011,7 @@ def _tick_sell_ns(entry_type='normal', auction_status=None, intraday_status=None
     _ns['_hold_exp_init'] = lambda sec, force=False: None
     _ns['_eval_auction'] = lambda sec: (_ns['CM'], ['x'])
     _ns['_eval_intraday'] = lambda sec, auction_status: ((intraday_status if intraday_status else _ns['CM']), ['x'])
-    _ns['_hist_1d'] = lambda sec: object()
+    _ns['_hist_1d'] = lambda sec, prio=0: object()
     _ns['score_now'] = lambda sec: (score if score is not None else 40.0)
     _out = []
     def _ds(c, sec, qty, note, urgent=False, mode=None):
@@ -4076,7 +4078,7 @@ def _p2e_ns(ac_map=None, est='pending_meet', side='hold', confirm=None, zt=None,
     n['score_now'] = lambda sec: 80.0
     n['_eval_intraday'] = lambda sec, au: (n['CM'], ['mock'])
     n['_eval_auction'] = lambda sec: (n['CM'], ['mock'])
-    n['_hist_1d'] = lambda sec: None
+    n['_hist_1d'] = lambda sec, prio=0: None
     n['_save_state'] = lambda *a, **k: None
     _out = []
     n['place_order'] = lambda c, sec, side, qty=None, note='', mode='chase': _out.append((sec, side, qty, note))
@@ -4172,7 +4174,7 @@ def _p7_ns(board_cnt=2, unique=False, hist_vol=None, snap_vol=None, sealed=False
     g.spot['600200.XSHG'] = {'last_px': 10.8, 'preclose_px': 10.0, 'up_px': 12.0,
                              'wavg_px': 10.5, 'trade_status': 'OPEN', 'volume': snap_vol or 0.0}
     n['_sealed_now'] = lambda sec: sealed
-    n['_hist_1d'] = lambda sec: _FakeDF(hist_vol if hist_vol is not None else [100.0, 90.0])
+    n['_hist_1d'] = lambda sec, prio=0: _FakeDF(hist_vol if hist_vol is not None else [100.0, 90.0])
     n['_snap_vol'] = lambda s: snap_vol if snap_vol is not None else 0.0
     n['_unique_stand'] = lambda sec: unique
     n['_hold_stand'] = lambda sec: stand or {'ts': 0.0, 'role': 'outside', 'active': active, 'board': 'strong'}
@@ -5257,7 +5259,7 @@ ns = _meet_ns('600013.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 1
 ns['_two_1m_break'] = lambda c: True
 ns['_limit_up_within_1m'] = lambda c: False
 st, reason = ns['_exp_rt_status']('600013.XSHG')
-ok('T137e meet 两1m强势 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed')
+ok('T137e meet 两1m强势 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed_two_1m')
 r = ns['_attempt_expected_buy'](ns['_ctx'], '600013.XSHG')
 ok('T137e meet 两1m强势触发买入', r is True and '600013.XSHG' in ns['g'].daily['bought'])
 
@@ -5267,7 +5269,7 @@ ns = _meet_ns('600014.XSHG', {'last_px': 10.9, 'open_px': 10.0, 'preclose_px': 1
 ns['_two_1m_break'] = lambda c: False
 ns['_limit_up_within_1m'] = lambda c: True
 st, reason = ns['_exp_rt_status']('600014.XSHG')
-ok('T137f meet 1分钟触板 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed')
+ok('T137f meet 1分钟触板 -> CX', st == ns['CX'] and reason == 'meet_intraday_exceed_limit_1m')
 
 # T137g v1.11 meet/未标注：分时破 VWAP -> CS 放弃
 ns = _meet_ns('600015.XSHG', {'last_px': 10.0, 'open_px': 10.0, 'preclose_px': 10.0,
@@ -5449,7 +5451,7 @@ g.zt_lianban = {'600001.XSHG': {'board_cnt': 1}, '600002.XSHG': {'board_cnt': 1}
 g.spot = {'600001.XSHG': {'open_px': 11.0, 'preclose_px': 10.0, 'last_px': 11.0},
           '600002.XSHG': {'last_px': 11.0}}
 ns['_get_snapshot_many'] = lambda secs, n: {'600002.XSHG': {'open_px': 11.0, 'preclose_px': 10.0, 'last_px': 11.0}}
-got = ns['_fill_zt_spot']()
+got, missing = ns['_fill_zt_spot']()
 ok('T147 缺 open/preclose 重拉补全', got == 1 and float(g.spot['600002.XSHG']['open_px']) == 11.0
    and float(g.spot['600002.XSHG']['preclose_px']) == 10.0)
 ok('T147 已完整票不重拉', g.spot['600001.XSHG'].get('total_bidqty') is None)
@@ -5476,7 +5478,7 @@ ok('T148 v1.11 1m 就绪但无分时确认不买', r2 is None and '600007.XSHG' 
 ns2['_two_1m_break'] = lambda c: True
 ns2['_limit_up_within_1m'] = lambda c: False
 st3, reason3 = ns2['_exp_rt_status']('600007.XSHG')
-ok('T148b 1m 就绪 + 两1m强势 -> CX', st3 == ns2['CX'] and reason3 == 'meet_intraday_exceed')
+ok('T148b 1m 就绪 + 两1m强势 -> CX', st3 == ns2['CX'] and reason3 == 'meet_intraday_exceed_two_1m')
 r3 = ns2['_attempt_expected_buy'](ns2['_ctx'], '600007.XSHG')
 ok('T148b 分时超预期确认触发买入', r3 is True and '600007.XSHG' in ns2['g'].daily['bought'])
 
@@ -5596,16 +5598,18 @@ ok('T157 卖2低于现价回退 pct', lp3 == 10.08 and ns['g'].order_limit_src =
 ok('T157 board 仍挂涨停价 src=board', ns['_order_limit']('600100.XSHG', 'buy', 'board') == 12.0
    and ns['g'].order_limit_src == 'board')
 
-# --- T158 情绪仓位闸门拦截计数（pos_cap_skips） ---
+# --- T158 情绪仓位闸门：超限缩量（默认 shrink）/ 整单拒绝（skip） ---
 ns = fresh()
 ns['g'].spot['600101.XSHG'] = {'last_px': 10.0, 'preclose_px': 10.0, 'up_px': 11.0, 'trade_status': 'OPEN'}
 ns['_sentiment_pos_cap'] = lambda ctx, sec: 0.1
 ns['_size_cash'] = lambda ctx: 10000.0
 ns['_pos_value'] = lambda p, sec: 0.0
-ok('T158 pos-cap 超限拦截并计数', ns['_buy_pos_ok'](ns['_ctx'], '600101.XSHG', 1000, 10.0) is False
+ok('T158 超限默认缩量到剩余额度(1000股->100股)', ns['_buy_pos_cap_qty'](ns['_ctx'], '600101.XSHG', 1000, 10.0) == 100
+   and ns['g'].pos_cap_shrinks == 1)
+ns['BLS']['pos_cap_over_behavior'] = 'skip'
+ok('T158 skip 模式整单拒绝并计数', ns['_buy_pos_cap_qty'](ns['_ctx'], '600101.XSHG', 1000, 10.0) == 0
    and ns['g'].pos_cap_skips == 1)
-ok('T158 再次拦截计数累计', ns['_buy_pos_ok'](ns['_ctx'], '600101.XSHG', 1000, 10.0) is False
-   and ns['g'].pos_cap_skips == 2)
+ok('T158 兼容布尔入口 skip 返回 False', ns['_buy_pos_ok'](ns['_ctx'], '600101.XSHG', 1000, 10.0) is False)
 
 # --- T159 [sell-skip] 60s 心跳 + 窗口计数 ---
 ns = fresh()

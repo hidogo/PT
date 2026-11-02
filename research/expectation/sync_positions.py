@@ -66,10 +66,35 @@ def _get(pos, name, default=0.0):
             return default
 
 
+_AVAIL_ALIASES = ("enable_amount", "available_amount", "sellable_amount",
+                  "m_nCanUseVolume", "m_nPREnableVolume", "can_use_volume",
+                  "enable_volume", "sellable_volume")
+
+
 def _record(pos) -> dict:
     raw = str(_get(pos, "symbol", "") or "")
     amount = int(_get(pos, "amount", 0) or 0)
     enable = int(_get(pos, "enable_amount", 0) or 0)
+    src = "enable_amount"
+    found_alias = False
+    for key in _AVAIL_ALIASES[1:]:
+        v = _get(pos, key, None)   # 缺省 None：缺字段必须跳过，0.0 会误吞真实可卖字段
+        if v is None:
+            continue
+        found_alias = True
+        try:
+            ev = int(float(v) or 0)
+        except Exception:
+            continue
+        if ev != enable:
+            enable = ev
+            src = key
+    if found_alias and src != "enable_amount":
+        code0 = _norm_symbol(raw)
+        print("[sync-pos] code=%s amount=%d enable=%d src=%s enable_amount=%d" % (
+            code0, amount, enable, src, int(_get(pos, "enable_amount", 0) or 0)))
+    if amount > 0 and enable <= 0:
+        src = "api_zero"   # v1.20 桥/API 未回填可卖：保留 0 但标记来源，供消费端识别并回填
     return {
         "code": _norm_symbol(raw),
         "symbol": raw,
@@ -77,6 +102,7 @@ def _record(pos) -> dict:
         "amount": amount,
         "volume": amount,
         "enable_amount": enable,
+        "enable_src": src,
         "cost": float(_get(pos, "cost_basis", 0.0) or 0.0),
         "last": float(_get(pos, "last_sale_price", 0.0) or 0.0),
         "market_value": float(_get(pos, "market_value", 0.0) or 0.0),
@@ -269,10 +295,14 @@ def _parse_export_csv(path: str):
         if a is None:
             a = {"code": code, "symbol": sym, "name": name, "amount": 0,
                  "enable_amount": 0, "cost": 0.0, "last": 0.0,
-                 "market_value": 0.0, "cost_amt": 0.0}
+                 "market_value": 0.0, "cost_amt": 0.0, "enable_src": ""}
             agg[code] = a
         a["amount"] += amount
-        a["enable_amount"] += enable
+        if i_enable < 0:
+            a["enable_amount"] = a["amount"]   # v1.20 导出缺“可用数量”列：按总量回填，不把缺失当 0
+            a["enable_src"] = "export_backfill"
+        else:
+            a["enable_amount"] += enable
         a["market_value"] += mv
         if cost > 0:
             a["cost_amt"] += cost * amount
@@ -317,6 +347,52 @@ def _fallback_export_positions(td: str):
     return [], ""
 
 
+def _merge_api_csv(api_records, csv_records):
+    """v1.22 API 持仓 amount=0 但导出 CSV 有量时以 CSV 为准（防桥/API 未回填误判空仓）。"""
+    if not csv_records:
+        return api_records
+    csv_by_code = {r.get("code"): r for r in csv_records if (r.get("amount") or 0) > 0}
+    out = []
+    for r in api_records:
+        code = r.get("code") or ""
+        if (r.get("amount") or 0) <= 0 and code in csv_by_code:
+            cr = csv_by_code[code]
+            nr = dict(cr)
+            nr["raw_code"] = r.get("raw_code", nr.get("symbol", ""))
+            nr["enable_src"] = "export_csv_override"
+            out.append(nr)
+            print("[sync-pos] code=%s API amount=%d enable=%d -> CSV amount=%d enable=%d (override)" % (
+                code, int(r.get("amount") or 0), int(r.get("enable_amount") or 0),
+                int(cr.get("amount") or 0), int(cr.get("enable_amount") or 0)))
+        else:
+            out.append(r)
+    return out
+
+
+def _keep_prev_on_amount_lost(records, prev_payload):
+    """v1.22 新源与 CSV 均无持仓但昨日有量：保留旧记录并告警，不静默覆盖成空仓。"""
+    prev_by_code = {r.get("code"): r for r in (prev_payload.get("positions") or [])
+                    if (r.get("amount") or 0) > 0}
+    cur_by_code = {r.get("code"): r for r in records}
+    out = list(records)
+    kept = []
+    for code, pr in prev_by_code.items():
+        cr = cur_by_code.get(code)
+        if cr and (cr.get("amount") or 0) > 0:
+            continue
+        nr = dict(pr)
+        nr["stale_keep"] = True
+        nr["enable_src"] = "stale_keep_amount_lost"
+        out.append(nr)
+        kept.append(code)
+        print("[sync-pos] amount_lost code=%s prev_amount=%d API与CSV均无持仓 -> 保留旧记录(stale_keep)" % (
+            code, int(pr.get("amount") or 0)))
+    if kept:
+        print("[sync-pos] 因 amount_lost 保留 %d 条旧持仓：%s，请人工核对" % (
+            len(kept), ",".join(kept)), file=sys.stderr)
+    return out
+
+
 def run_sync(date: str = "", out: str = "", api_dir: str = API_DIR):
     """连接 PTrade 客户端拉全部持仓并写本地 JSON，返回 (payload, out_path)。
 
@@ -327,7 +403,10 @@ def run_sync(date: str = "", out: str = "", api_dir: str = API_DIR):
     records, portfolio = _api_fetch_bounded(api_dir)
     source = "ptrade_quant_api"
     export_path = ""
-    if not records:
+    if records:
+        csv_records, export_path = _fallback_export_positions(td)
+        records = _merge_api_csv(records, csv_records)
+    else:
         records, export_path = _fallback_export_positions(td)
         if export_path:
             source = "ptrade_export_fallback"
@@ -338,6 +417,18 @@ def run_sync(date: str = "", out: str = "", api_dir: str = API_DIR):
 
     out_path = out or os.path.join(DEFAULT_OUT, "positions_%s.json" % td)
     _ensure_parent(out_path)
+    prev_payload = None
+    if os.path.isfile(out_path):
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                prev_payload = json.load(f) or {}
+        except Exception:
+            prev_payload = None
+    if records and prev_payload and (prev_payload.get("positions") or []):
+        records = _keep_prev_on_amount_lost(records, prev_payload)
+    if not records and prev_payload and (prev_payload.get("positions") or []):
+        print("[sync] API 空且无导出回退，已有持仓文件非空 -> 保留旧文件，不覆盖真实持仓", file=sys.stderr)
+        return prev_payload, out_path
     payload = {
         "trade_date": td,
         "source": source,

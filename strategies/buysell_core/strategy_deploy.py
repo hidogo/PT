@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.15"                                                        
+STRATEGY_VERSION = "v1.23"                                                        
 
 def _warn(msg):
                                                                  
@@ -46,9 +46,15 @@ BLS = {
     'ma5_first_5d': False,                                                
     'ma5_buy_score_min': 50.0,                                            
     'ma5_buy_ratio': 0.10,                              
-    'cold_secs': 60, 'daily_max_buy': 3,                                           
+    'cold_secs': 60, 'daily_max_buy': 3,                                            
     'daily_max_board_buy': 2,                                                
-    'daily_max_other_buy': 1,                                              
+    'daily_strategy_buy_limit': {                                           
+        'exp_chase': 1,                           
+        'ma5': 1,                          
+        'core': 1,                         
+        'elastic_arb': 1,                     
+        'elastic_top': 1,                        
+    },
                                                                    
     'EXPECT_ORDER': True,                                    
     'tick_exp_enabled': True,                                    
@@ -75,6 +81,10 @@ BLS = {
     'first_zt_rebuild_heartbeat_sec': 60.0,                                           
     'first_zt_rebuild_timeout_min': 30.0,                                         
     'first_zt_rebuild_max_attempts': 8,                                        
+    'hist1d_restart_warm_enabled': True,                         
+    'hist1d_restart_warm_cap': 40,                                                               
+    'score_recover_dedup_enabled': True,                                                        
+    'firstzt_rebreak_log_sec': 30.0,                                         
     'restart_rebuild_1m_enabled': True,                                                 
     'sim_cash_base': 0.0,                                                               
     'sim_min_lot': 100,                                                                   
@@ -100,6 +110,11 @@ BLS = {
     'sell_retry_max': 3,                                                       
     'sell_retry_pause_sec': 600.0,                               
     'sell_skip_heartbeat_sec': 60.0,                                         
+    'sell_skip_heartbeat_t1_sec': 300.0,                                            
+    'sell_source_filter_sold': True,                                                           
+    'sell_avail_backfill_enabled': True,                                             
+    'sell_avail_t1_strict': True,                                                      
+    'sell_avail_amt0_warn_only': True,                                          
     'order_no_reply_timeout': 90.0,                                              
     'order_reconcile_interval_sec': 60.0,                          
     'board_cancel_warn_sec': 300.0,                        
@@ -107,6 +122,9 @@ BLS = {
     'seal_fail_ratio': 0.333,                              
     'board_queue_cancel_seal_ratio': 0.333,                                                        
     'board_queue_cancel_bid_ratio': 0.5,                                                          
+    'board_queue_cancel_break_enabled': True,                                          
+    'exp_board_queue_gate': True,                                                 
+    'exp_board_queue_max_sec': 600.0,                                                          
     'firstzt_min_seal': 200000.0,                           
     'firstzt_min_bids': 5,                              
                                   
@@ -132,6 +150,13 @@ BLS = {
     'p7c_surge_min': 1.5,                                            
     'p7c_batch_cold_secs': 10.0,                                                 
     'p7c_active_threshold': 0.5,                                    
+    'p7d_sell_enabled': True,                                                      
+    'p7d_limit_gap': 0.04,                                               
+    'p7d_vwap_dev_min': 3.0,                                               
+    'p7d_half_ratio': 0.5,                         
+    'p6_two_frame_enabled': True,                                        
+    'p6_confirm_frames': 2,                            
+    'p6_confirm_win_sec': 30.0,                                
     'hold_stand_cache_sec': 15.0,                          
     'hold_stand_log_sec': 60.0,                             
                                     
@@ -150,6 +175,7 @@ BLS = {
     'p2e_auction_drop_min': -2.0,                                         
     'p2e_confirm_at': '09:24:45',                                     
     'single_stock_cap': 0.30,                                                               
+    'buy_lot_step': 100,                                                 
     'ordinary_buy_ratio': 0.10,                                                                  
     'board_buy_budget_ratio': 0.20,                                                    
     'red_gate_enabled': False,                                                                
@@ -159,6 +185,7 @@ BLS = {
     'sentiment_warm_min': 0.45,                
     'sentiment_ice_ratio': 0.40,                              
     'sentiment_pos_cap_enabled': True,                                                             
+    'pos_cap_over_behavior': 'shrink',                                                
     'ice_pos_pct': 0.40,                        
     'warm_pos_pct': 0.80,                       
     'warm_taper_start': 3,                                        
@@ -255,6 +282,9 @@ BLS = {
     'frame_gear_limit': 15,                                  
     'frame_m1_limit': 20,                                                         
     'frame_hist1d_limit': 10,                                 
+    'frame_hist1d_limit_fast': 24,                                                                
+    'frame_hist1d_prio_limit': 12,                                
+    'frame_hist1d_prio_limit_fast': 40,                               
     'frame_board_limit': 6,                                                              
     'frame_blocks_limit': 10,                                              
     'frame_bcode_limit': 20,                               
@@ -290,11 +320,19 @@ BLS = {
     'tick_sell_enabled': True,                    
     'break_sell_enabled': True,                                    
     'seal_low_sell_enabled': True,                                      
+    'seal_low_confirm_sec': 6.0,                                              
+    'seal_low_fast_ratio': 0.15,                                                   
+    'seal_low_batch_invalid_ratio': 0.3,                                                 
+    'seal_low_batch_invalid_min': 5,                                      
     'sealed_fresh_secs': 5.0,                                    
     'sealed_offerqty_enabled': True,                                                  
                       
     'score_base': 40,
     'score_recover_probe_cap': 20,                                               
+    'score_recover_probe_cap_fast': 40,                                   
+    'hist1d_prewarm_enabled': True,                                
+    'hist1d_core_ttl': 180.0,                                                     
+    'lb_senti_auction_retry_enabled': True,                         
     'vwap_penalty_per_30s': 1.0, 'vwap_daily_limit': 12,
                                                                  
     'sell_policy': {
@@ -593,15 +631,18 @@ class DataHub(object):
 
 def _source_limit(source, prio=0):
                                                                                   
-    if prio:
-        return float(BLS.get('frame_%s_prio_limit' % source,
-                             BLS.get('frame_%s_limit' % source, 1e9)))
     fast = False
     try:
         if _min_age() <= int(BLS.get('board_rank_fast_until_minute', 30)):
             fast = True
     except Exception:
         pass
+    if prio:
+        k = 'frame_%s_prio_limit_fast' % source
+        if fast and k in BLS and BLS[k]:
+            return float(BLS[k])                                      
+        return float(BLS.get('frame_%s_prio_limit' % source,
+                             BLS.get('frame_%s_limit' % source, 1e9)))
     if fast:
         k = 'frame_%s_limit_fast' % source
         if k in BLS and BLS[k]:
@@ -624,11 +665,12 @@ def _get_ds():
 def initialize(context):
     set_universe(BLS['universe'])
     g.buy_log = {}; g.sold_log = {}
-    g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}
+    g.daily = _new_daily()
     g.state_day = None                            
     g.spot = {}; g.last_ma5 = {}
     g.ma5_touch_day = None; g.ma5_touched = set()                       
     g.ma5_lifecycle_day = None; g.ma5_lows = {}                       
+    g.ma5_pending = set()                                                
     _get_ds()                                            
     g.one_word_open = set()                          
     g.one_word_marked_open = False                             
@@ -670,7 +712,11 @@ def initialize(context):
     g.restart_rebuild_hb_ts = 0.0                                 
     g.skip_log_ts = {}                                                    
     g.score_na_pending = {}                                                       
+    g.hist_recover_once = {}                                                       
+    g.firstzt_log_ts = {}                                         
+    g.bought_qty = {}                                                            
     g.pos_cap_skips = 0                                                   
+    g.pos_cap_shrinks = 0                                                   
     g.sell_skip_cnt = {}                                             
     g.order_limit_src = ''                                                                   
     g.last_save_ts = 0.0                                 
@@ -702,6 +748,8 @@ def initialize(context):
     g.lb_senti = {}                                             
     g.lb_senti_cache = {}                                
     g.exp_file = {}                                  
+    g.hist_prio_cache = {}                                     
+    g.hist_na_pending = {}                                  
     g.exp_fired = set()                                      
     g.pending = {}                                 
     g.buy_commit = {}                                            
@@ -709,9 +757,12 @@ def initialize(context):
     g.p7b_sold = set()                                       
     g.p7c_part = {}                                                    
     g.p7c_sold = set()                                
+    g.p7d_sold = set()                                      
+    g.p6_weak = {}                                                              
     g.hold_stand_cache = {}                               
     g.hold_stand_log = {}                                
     run_daily(context, auction_pre_confirm, time='09:25')
+    run_daily(context, lb_senti_auction_retry, time='09:26')                    
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, lb_senti_t100_freeze, time='10:00')                                  
     run_daily(context, mid_probe, time='11:00')
@@ -727,13 +778,17 @@ def before_trading_start(context, data):
     if getattr(g, 'state_day', None) == _today:
         _restart_same_day = True
                                            
-        g.daily = {'bought': [x for x in (g.daily.get('bought') or [])],
-                   'bought_board': [x for x in (g.daily.get('bought_board') or [])],
-                   'bought_other': [x for x in (g.daily.get('bought_other') or [])],
-                   'sold': []}
+        _old_daily = dict(g.daily or {})
+        g.daily = _new_daily()
+        for _k in ('bought', 'bought_board', 'bought_exp_chase', 'bought_ma5',
+                   'bought_core', 'bought_elastic_arb', 'bought_elastic_top',
+                   'bought_other', 'legacy_other'):
+            g.daily[_k] = [x for x in (_old_daily.get(_k) or [])]
+        g.daily['bought_kind'] = dict(_old_daily.get('bought_kind') or {})
+        g.daily['sold'] = []
         log.info('before_trading_start restore same-day daily=%s (restart)' % (_snl(g.daily.get('bought')),))
     else:
-        g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}
+        g.daily = _new_daily()
         g.exp_fired = set()               
         g.buy_commit = {}                 
                                                                
@@ -795,6 +850,7 @@ def before_trading_start(context, data):
             _mark_one_word_open()                               
             _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])), pages=int(BLS.get('l2_tickdir_pages_restart', 10)))                                              
             _rebuild_first_zt_queue()                                                          
+            _hist1d_restart_warm('restart')                                                 
         except Exception:
             pass
     for sec in list(dict.fromkeys(BLS['universe'] + list(get_positions()))):
@@ -808,10 +864,12 @@ def _maybe_roll_day():
         return False
     g.exp_day = day
     g.ma5_touch_day = day; g.ma5_touched = set()
-    g.ma5_lifecycle_day = day; g.ma5_lows = {}
+    g.ma5_lifecycle_day = day; g.ma5_lows = {}; g.ma5_pending = set()
+    g.hist_prio_cache = {}; g.hist_na_pending = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
     g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0                         
-    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}                                         
+    g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.pos_cap_shrinks = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}                                         
+    g.hist_recover_once = {}; g.firstzt_log_ts = {}; g.bought_qty = {}                                   
     return True
 
 def _budget_log():
@@ -927,14 +985,112 @@ def handle_data(context, data):
     except Exception as e:
         _warn('lb_senti(1m) fail: %r' % e)
 
-def _hist_1d(sec):
+def _hist_1d(sec, prio=0):
                                           
     try:
         dh = _get_ds()
-        return dh.cached('hist1d', sec, 60.0,
-                         lambda: get_price(sec, start_date=None, end_date=None, count=120, frequency='1d'), budget='hist1d')
+        ttl = float(BLS.get('hist1d_core_ttl', 180.0) or 180.0) if prio == 1 else 60.0
+        return dh.cached('hist1d', sec, ttl,
+                         lambda: get_price(sec, start_date=None, end_date=None, count=120, frequency='1d'),
+                         budget='hist1d', prio=prio)
     except Exception:
         return None
+
+def _hist_prio_set():
+                                                        
+    try:
+        tok = int(time.time() / 5.0)
+        c = getattr(g, 'hist_prio_cache', None)
+        if isinstance(c, dict) and c.get('tok') == tok:
+            return c.get('set') or set()
+        pos = set(get_positions())
+        buy = set(c for c, en in (getattr(g, 'exp_file', {}) or {}).items()
+                  if str((en or {}).get('side') or '') == 'buy')
+        core = set(c for c, rec in (getattr(g, 'zt_lianban', {}) or {}).items()
+                   if int((rec or {}).get('board_cnt') or 0) >= 3)
+        s = pos | buy | core
+        g.hist_prio_cache = {'tok': tok, 'set': s}
+        return s
+    except Exception:
+        return set()
+
+def _is_hist_priority(sec):
+                                                          
+    try:
+        return str(sec or '') in _hist_prio_set()
+    except Exception:
+        return False
+
+def _hist_na_pending_add(sec):
+                                        
+    try:
+        hp = getattr(g, 'hist_na_pending', None)
+        if not isinstance(hp, dict):
+            hp = {}; g.hist_na_pending = hp
+        hp[sec] = time.time()
+        _skip_log('hist_na', sec, 'hist1d_na', '[hist-na] %s hist1d 缺失 -> 待重评' % _sn(sec))
+    except Exception:
+        pass
+
+def _hist1d_prewarm(tag='09:25'):
+                                                
+    try:
+        if not BLS.get('hist1d_prewarm_enabled', True):
+            return 0
+        codes = list(dict.fromkeys([x for x in (_pool() + list(get_positions())
+                                                + list((getattr(g, 'exp_file', {}) or {}).keys())
+                                                + list((getattr(g, 'zt_lianban', {}) or {}).keys()))
+                                    if x and _is_hist_priority(x)]))
+        ok = 0
+        ok_codes = []
+        miss = []
+        for sec in codes:
+            if _hist_1d(sec, prio=1) is not None:
+                ok += 1
+                ok_codes.append(sec)
+                _ma5_base4(sec)                                           
+            else:
+                miss.append(sec)
+        prev_ok = set(getattr(g, 'hist1d_prewarm_prev_ok', None) or [])
+        regressed = sorted(set(miss) & prev_ok)
+        for sec in miss:
+            _hist_na_pending_add(sec)                                           
+        g.hist1d_prewarm_prev_ok = set(ok_codes)
+        log.info('[hist1d-prewarm] %s core=%d ok=%d miss=%d regress_from_prev=%d miss_sample=%s' % (
+            tag, len(codes), ok, len(miss), len(regressed), _snl(miss[:10])))
+        return ok
+    except Exception:
+        return 0
+
+def _hist1d_restart_warm(tag='restart'):
+                                                             
+    try:
+        if not BLS.get('hist1d_restart_warm_enabled', True):
+            return 0
+        codes = list(dict.fromkeys([x for x in (
+            list(get_positions())
+            + [c for c, en in (getattr(g, 'exp_file', {}) or {}).items()
+               if str((en or {}).get('side') or '') == 'buy']
+            + [c for c, rec in (getattr(g, 'zt_lianban', {}) or {}).items()
+               if int((rec or {}).get('board_cnt') or 0) >= 3])
+            if x]))
+        cap = max(1, int(BLS.get('hist1d_restart_warm_cap', 40) or 40))
+        ok = 0
+        miss = []
+        for sec in codes[:cap]:
+            if _hist_1d(sec, prio=1) is not None:
+                ok += 1
+                _ma5_base4(sec)
+            else:
+                miss.append(sec)
+        overflow = codes[cap:]
+        for sec in miss + overflow:
+            _hist_na_pending_add(sec)
+        log.info('[hist1d-restart-warm] %s core=%d ok=%d miss=%d overflow=%d miss_sample=%s' % (
+            tag, len(codes), ok, len(miss), len(overflow), _snl((miss + overflow)[:10])))
+        return ok
+    except Exception:
+        return 0
 
 def _date_key(v):
                                                    
@@ -960,7 +1116,7 @@ def _ma5_base4(sec):
     rec = cache.get(sec)
     if isinstance(rec, dict) and rec.get('day') == day:
         return float(rec.get('base4') or 0.0)
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None:
         return None
     try:
@@ -1094,39 +1250,103 @@ def _score_na_log(sec, why):
         pass
 
 def _score_na_pending_add(sec):
-                                  
+                                              
     try:
         sp = getattr(g, 'score_na_pending', None)
         if not isinstance(sp, dict):
             sp = {}; g.score_na_pending = sp
-        sp[sec] = time.time()
+        sp[sec] = {'ts': time.time(), 'prio': 1 if _is_hist_priority(sec) else 0}
+    except Exception:
+        pass
+
+def _hist_recover_logged(tag, sec):
+                                                                  
+    try:
+        if not BLS.get('score_recover_dedup_enabled', True):
+            return False
+        d = getattr(g, 'hist_recover_once', None)
+        if not isinstance(d, dict):
+            d = {}; g.hist_recover_once = d
+        key = '%s|%s|%s' % (tag, str(get_trading_day()), sec)
+        if key in d:
+            return True
+        d[key] = time.time()
+        return False
+    except Exception:
+        return False
+
+def _ma5_pending_probe():
+                                                             
+    try:
+        pending = getattr(g, 'ma5_pending', None)
+        if not isinstance(pending, set):
+            pending = set(pending or []); g.ma5_pending = pending
+        if not pending:
+            return
+        cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
+        jobs = sorted(pending, key=lambda x: (0 if _is_hist_priority(x) else 1, x))
+        for sec in jobs[:cap]:
+            base4 = _ma5_base4(sec)
+            if base4 is None:
+                continue
+            pending.discard(sec)
+            if not _hist_recover_logged('ma5', sec):
+                log.info('[ma5-recover] %s MA5 日线恢复 base4=%.2f' % (_sn(sec), base4))
     except Exception:
         pass
 
 def _score_recover_probe():
-                                                                   
+                                                                  
     try:
-        pending = getattr(g, 'score_na_pending', None)
-        if not isinstance(pending, dict) or not pending:
-            return
         now = time.time()
-        cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
-        for sec in list(pending.keys())[:cap]:
-            if now - float(pending.get(sec) or 0) < 30.0:
+        if not _lb_senti_t100_passed():
+            cap = max(1, int(BLS.get('score_recover_probe_cap_fast', 40) or 40))
+        else:
+            cap = max(1, int(BLS.get('score_recover_probe_cap', 20) or 20))
+        pending = getattr(g, 'score_na_pending', None)
+        if not isinstance(pending, dict):
+            pending = {}; g.score_na_pending = pending
+        hist_pending = getattr(g, 'hist_na_pending', None)
+        if not isinstance(hist_pending, dict):
+            hist_pending = {}; g.hist_na_pending = hist_pending
+        jobs = []
+        for sec, v in list(pending.items()):
+            if isinstance(v, dict):
+                ts = float(v.get('ts') or 0.0)
+                prio = int(v.get('prio') or 0)
+            else:
+                ts = float(v or 0.0); prio = 0
+            jobs.append((sec, ts, prio, 'board'))
+        for sec, ts in list(hist_pending.items()):
+            jobs.append((sec, float(ts or 0.0), 1 if _is_hist_priority(sec) else 0, 'hist'))
+        jobs.sort(key=lambda x: (-x[2], x[1]))
+        for sec, ts, prio, why in jobs[:cap]:
+            if now - ts < 30.0:
                 continue
-            if not _spot_ready(sec):
-                continue
-            try:
-                _b_ready = _board_strength_info(sec)[1]
-            except Exception:
-                _b_ready = False
-            if not _b_ready:
-                continue
+            if why == 'hist':
+                if _hist_1d(sec, prio=1) is None:                               
+                    continue
+                if _is_100day_high(sec) is None:
+                    continue
+                hist_pending.pop(sec, None)
+            else:
+                if not _spot_ready(sec):
+                    continue
+                try:
+                    _b_ready = _board_strength_info(sec)[1]
+                except Exception:
+                    _b_ready = False
+                if not _b_ready:
+                    continue
             sc = score_now(sec)
             if sc is None:
                 continue
-            pending.pop(sec, None)
-            log.info('[score-recover] %s 评分恢复 score=%.1f (data_na 曾跳过)' % (_sn(sec), sc))
+            if why == 'board':
+                pending.pop(sec, None)
+            _why = 'hist1d 恢复' if why == 'hist' else 'data_na 曾跳过'
+            if not _hist_recover_logged('score', sec):
+                log.info('[score-recover] %s 评分恢复 score=%.1f prio=%d (%s)' % (_sn(sec), sc, prio, _why))
+        _ma5_pending_probe()                           
     except Exception:
         pass
 
@@ -1167,7 +1387,7 @@ def _static_bonus(sec):
         b += BONUS['touched_limit_up_early']
     if _volume_ratio(sec) < 0.6:
         b += BONUS['volume_ratio_shrink']
-    if _is_100day_high(sec):
+    if _is_100day_high(sec) is True:
         b += BONUS['is_100day_high']
     b += _board_bonus(sec)
     tags = _tags(sec)
@@ -1226,7 +1446,7 @@ def _tags(sec):
     tags = []
     if lb >= 2:
         tags.append('LB')
-    if _is_100day_high(sec):
+    if _is_100day_high(sec) is True:
         tags.append('BS')
     if lb >= 3:
         tags.append('CORE')
@@ -1277,19 +1497,64 @@ def _mid_board_avoid(sec):
         cnt = int(zt.get('board_cnt') or 0)
         if 2 <= cnt <= 5:
             if zt.get('unique_high'):
+                _mid_allow_log(sec, 'unique_high')
                 return False
             if _dyn_theme_leader(sec):
+                _mid_allow_log(sec, 'dyn_leader')
                 return False
             return True
     return False
 
+def _mid_allow_log(sec, why):
+                                                                            
+    try:
+        zt = (getattr(g, 'zt_lianban', {}) or {}).get(sec) or {}
+        en = g.exp_file.get(sec) or {}
+        dl = _dyn_theme_leader(sec)
+        fm = _dyn_theme_ferment()
+        front = ''
+        for nm in _new_themes_of(sec):
+            d = fm.get(nm) or {}
+            if d.get('front') == sec:
+                front = nm
+                break
+        _skip_log('mid_allow', sec, why,
+                  '[mid-allow] %s role=%s board=%d unique_high=%s dyn_leader=%s new_front=%s' % (
+                      _sn(sec), en.get('role_detail') or '-', int(zt.get('board_cnt') or 0),
+                      zt.get('unique_high') or '-', dl, front or '-'),
+                  throttle_sec=300.0)
+    except Exception:
+        pass
+
 def _is_100day_high(sec):
-    df = _hist_1d(sec)
+                                             
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 2:
-        return False
-    closes = list(df['close'])
-    now = closes[-1]
-    return now >= max(closes[:-1]) * 0.9999
+        _hist_na_pending_add(sec)
+        return None
+    try:
+        closes = [float(x) for x in list(df['close'])]
+    except Exception:
+        _hist_na_pending_add(sec)
+        return None
+    day = str(get_trading_day())
+    last_is_today = False
+    try:
+        last_is_today = (_date_key(df.index[-1]) == day)
+    except Exception:
+        pass
+    completed = closes[:-1] if last_is_today else closes
+    if not completed:
+        _hist_na_pending_add(sec)
+        return None
+    now = last_px(sec)
+    if not now or now <= 0:
+        return None
+    try:
+        return float(now) >= max(completed) * 0.9999
+    except Exception:
+        _hist_na_pending_add(sec)
+        return None
 
 def _volume_ratio(sec):
                                                                 
@@ -1300,7 +1565,7 @@ def _volume_ratio(sec):
             return vr
     except Exception:
         pass
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 6:
         return 1.0
     vols = list(df['volume'])
@@ -1415,6 +1680,16 @@ def _gear(sec):
     except Exception:
         return {}
 
+def _seal_book_ok(sec):
+                                                                            
+    gp = _gear(sec)
+    if not isinstance(gp, dict):
+        return False
+    bg = gp.get('bid_grp')
+    if not isinstance(bg, dict) or not bg:
+        return False
+    return True
+
 def _seal_metrics(sec):
                                                    
     try:
@@ -1426,6 +1701,75 @@ def _seal_metrics(sec):
     except Exception:
         return 0.0, 0
 
+def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_ratio=0.15):
+                                            
+    if fs > 0 and book_ok and seal < fs * sfr:
+        fast = float(fast_ratio or 0.0) > 0.0 and seal < fs * float(fast_ratio)
+        if fast:
+            if not ft.get('seal_low_fast'):
+                ft['seal_low_fast'] = True
+                ft['seal_low_fast_ts'] = time.time()
+                log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW_FAST(1帧确认)' % (_sn(sec), seal, fs, seal / fs, bids))
+            if not ft.get('seal_low'):
+                ft['seal_low'] = True
+                ft['seal_low_confirm_ts'] = time.time()
+        elif not ft.get('seal_low'):
+            ft['seal_low'] = True
+            ft['seal_low_confirm_ts'] = time.time()
+            log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW(待确认)' % (_sn(sec), seal, fs, seal / fs, bids))
+    elif ft.get('seal_low'):
+        if (book_ok and seal >= fs * sfr) or (last >= u - 1e-9 and not ft.get('break')):
+            ft['seal_low'] = False
+            ft['seal_low_fast'] = False
+            ft.pop('seal_low_fast_ts', None)
+            ft.pop('seal_low_confirm_ts', None)
+            log.info('[seal-low-guard] %s 封单恢复(seal=%.0f ratio=%.2f)或仍封死 -> 撤销 SEAL_LOW' % (_sn(sec), seal, (seal / fs if fs else 0.0)))
+
+def _gear_batch_health():
+                                                                
+    try:
+        _tot = int(getattr(g, 'gear_total_cnt', 0) or 0)
+        _inv = int(getattr(g, 'gear_invalid_cnt', 0) or 0)
+        _ratio = (float(_inv) / float(_tot)) if _tot > 0 else 0.0
+        _min_n = int(BLS.get('seal_low_batch_invalid_min', 5) or 0)
+        _min_r = float(BLS.get('seal_low_batch_invalid_ratio', 0.3) or 0.0)
+        _bad = bool(_inv >= _min_n and _ratio >= _min_r)
+        return _bad, _tot, _inv, _ratio
+    except Exception:
+        return False, 0, 0, 0.0
+
+def _reset_seal_low_confirm_on_batch_bad():
+                                        
+    try:
+        for _sec0, _ft0 in (getattr(g, 'first_zt', None) or {}).items():
+            if _ft0.get('seal_low'):
+                _ft0['seal_low_confirm_ts'] = time.time()
+                _ft0.pop('seal_low_fast_ts', None)
+    except Exception:
+        pass
+
+def _exp_board_gate(sec):
+                                                          
+    try:
+        ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
+        bc = int(ft.get('break_cnt') or 0)
+        if bc <= 0:
+            return True, ''
+        if ft.get('break'):
+            return False, 'break_open'
+        s0 = g.spot.get(sec) or {}
+        px = float(s0.get('last_px') or 0.0)
+        up = float(s0.get('up_px') or 0.0)
+        if px <= 0 or up <= 0 or px < up * 0.998:
+            return False, 'not_at_limit'
+        seal, _bids = _seal_metrics(sec)
+        seal_min = float(BLS.get('reboard_seal_min', 200000.0) or 0.0)
+        if seal_min > 0 and seal > 0 and seal < seal_min:
+            return False, 'seal_low'
+        return True, ''
+    except Exception:
+        return False, 'gate_error'
+
 def _board_queue_cancel(sec, seal, bids):
                                             
     try:
@@ -1434,11 +1778,23 @@ def _board_queue_cancel(sec, seal, bids):
             return False
         if str(pp.get('status') or '') in ('CANCELLED', 'REJECTED', 'FILLED'):
             return False
+        break_fail = False
+        _cancel_reason = 'seal_decay'
+        if BLS.get('board_queue_cancel_break_enabled', True):
+            bc_send = int(pp.get('break_cnt_at_send') or 0)
+            bc_now = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0)
+            age = time.time() - float(pp.get('ts') or 0)
+            max_sec = float(BLS.get('exp_board_queue_max_sec', 600.0) or 600.0)
+            if bc_now > bc_send and (max_sec <= 0 or age <= max_sec):
+                _ok, _r = _exp_board_gate(sec)
+                if not _ok:
+                    break_fail = True
+                    _cancel_reason = 'break(%s)' % _r
         base = float(pp.get('seal_base') or 0.0) or 0.0
         if base <= 0:
             ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
             base = float(ft.get('first_seal') or 0.0) or 0.0
-        if base <= 0:
+        if base <= 0 and not break_fail:
             return False                        
         ratio = float(BLS.get('board_queue_cancel_seal_ratio', 0.333) or 0.333)
         try:
@@ -1448,7 +1804,7 @@ def _board_queue_cancel(sec, seal, bids):
             pass
         bbase = int(pp.get('seal_bid_base') or 0)
         bid_fail = bbase > 0 and bids < bbase * float(BLS.get('board_queue_cancel_bid_ratio', 0.5) or 0.5)
-        if seal > 0 and not bid_fail and seal / base > ratio:
+        if not break_fail and seal > 0 and not bid_fail and seal / base > ratio:
             return False
         ent = str(pp.get('no') or '')
         if not ent:
@@ -1473,8 +1829,8 @@ def _board_queue_cancel(sec, seal, bids):
             pp['status'] = st
             pp['cancel_ts'] = time.time()
             _buy_commit_rel(sec, int(pp.get('qty') or 0), float(pp.get('limit') or 0.0))
-            log.info('[board-cancel-ok] %s 撤单确认终态=%s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 释放名额/承诺' % (
-                _sn(sec), st, seal, base, (seal / base if base > 0 else 0.0), bids, bbase))
+            log.info('[board-cancel-ok] %s 撤单确认终态=%s reason=%s seal=%.0f base=%.0f ratio=%.2f bids=%d bbase=%d -> 释放名额/承诺' % (
+                _sn(sec), st, _cancel_reason, seal, base, (seal / base if base > 0 else 0.0), bids, bbase))
             _release_buy_slot(sec)
             pp.pop('cancel_pending', None)
             return True
@@ -1918,7 +2274,7 @@ def _broken_now(sec):
 
 def _auction_beat_history(sec):
                                          
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 21:
         return False
     opens = list(df['open']); closes = list(df['close'])
@@ -2449,25 +2805,46 @@ def _sentiment_pos_cap(context, sec):
                 s.get('phase') or '-', s.get('emotion') or '-', note))
     return cap
 
-def _buy_pos_ok(context, sec, qty, limit):
-                                                        
+def _buy_pos_cap_qty(context, sec, qty, limit):
+                              
     cap = _sentiment_pos_cap(context, sec)
     if cap is None:
-        return True
+        return qty
     pos = getattr(getattr(context, 'portfolio', None), 'positions', {}) or {}
     pv = sum(_pos_value(p, sec) for p in pos.values())
     cash = _size_cash(context)                                            
     total = cash + pv
     if total <= 0:
-        return True
-    add = qty * (limit or last_px(sec) or 0.0)
+        return qty
+    price = limit or last_px(sec) or 0.0
+    if price <= 0:
+        return qty
+    lot = int(BLS.get('buy_lot_step', 100) or 100)
+    add = qty * price
     ratio = (pv + add) / total
-    if ratio > cap:
-        g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1               
-        log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> skip total=%d'
-                 % (_sn(sec), qty, add, ratio, cap, g.pos_cap_skips))
-        return False
-    return True
+    if ratio <= cap:
+        return qty
+    behavior = str(BLS.get('pos_cap_over_behavior', 'shrink') or 'shrink').lower()
+    if behavior == 'shrink':
+        allowed = max(0.0, cap * total - pv)
+        shrink_qty = int(allowed / (price * lot)) * lot
+        if shrink_qty < lot:
+            g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1              
+            log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> shrink<%d skip total=%d'
+                     % (_sn(sec), qty, add, ratio, cap, lot, g.pos_cap_skips))
+            return 0
+        g.pos_cap_shrinks = int(getattr(g, 'pos_cap_shrinks', 0) or 0) + 1
+        log.info('[pos-cap] %s qty=%d -> %d add=%.0f pos_ratio=%.2f > cap=%.2f -> shrink total=%d'
+                 % (_sn(sec), qty, shrink_qty, add, ratio, cap, g.pos_cap_shrinks))
+        return shrink_qty
+    g.pos_cap_skips = int(getattr(g, 'pos_cap_skips', 0) or 0) + 1               
+    log.info('[pos-cap] %s qty=%d add=%.0f pos_ratio=%.2f > cap=%.2f -> skip total=%d'
+             % (_sn(sec), qty, add, ratio, cap, g.pos_cap_skips))
+    return 0
+
+def _buy_pos_ok(context, sec, qty, limit):
+                                                 
+    return _buy_pos_cap_qty(context, sec, qty, limit) > 0
 
 def _set_now(context):
     g.now_dt = getattr(getattr(context, 'blotter', None), 'current_dt', None) or None
@@ -3432,7 +3809,7 @@ def _fill_zt_spot():
 
     _need = [sec for sec in zt if _incomplete(sec)]
     if not _need:
-        return 0
+        return 0, []
     try:
         _sn = _get_snapshot_many(_need, len(_need)) or {}
         _got = 0
@@ -3452,9 +3829,9 @@ def _fill_zt_spot():
                 _got += 1
         if _got:
             log.info('[lb-senti] auction 全池补快照 got=%d/%d' % (_got, len(_need)))
-        return _got
+        return _got, [sec for sec in _need if _incomplete(sec)]
     except Exception:
-        return 0
+        return 0, _need
 
 def _lb_senti_auction():
                                                                           
@@ -3515,27 +3892,36 @@ def _lb_senti_auction():
             'ready_detail': {'mid': mid_ready, 'low': low_ready},
         }, ready, mid_n, high_n, low_n
 
-    _fill_zt_spot()
+    _got, _missing = _fill_zt_spot()
     out, ready, mid_n, high_n, low_n = _stats()
     if not ready:
-        _got = _fill_zt_spot()
-        if _got:
+        _got2, _missing2 = _fill_zt_spot()
+        if _missing2:
+            _missing = _missing2
+        if _got2:
             out, ready, mid_n, high_n, low_n = _stats()
     if not ready:
         _ready_n = out['ready_detail']['mid'] + out['ready_detail']['low']
+        _mid_missing = [c for c in zt if _lb_senti_tier(c) == 'mid' and not _auction_ready(c)]
+        _low_missing = [c for c in zt if _lb_senti_tier(c) == 'low' and not _auction_ready(c)]
+        _total_n = mid_n + low_n
+        _ready_pct = 100.0 * _ready_n / _total_n if _total_n else 100.0
         out = {
             'ts': time.time(),
             'ready': False,
             'ready_detail': out['ready_detail'],
+            'ready_pct': _ready_pct,
             'mid_n': mid_n, 'high_n': high_n, 'low_n': low_n,
             'mid_open_rate': None, 'mid_green_rate': None,
             'mid_yizi': out.get('mid_yizi', 0), 'mid_yizi_rate': None,
             'low_open_rate': None, 'low_yizi': out.get('low_yizi', 0),
-            'note': 'auction_data_not_ready ready=%.0f%%' % (100.0 * _ready_n / (mid_n + low_n) if (mid_n + low_n) else 100.0),
+            'missing': {'mid': _mid_missing[:10], 'low': _low_missing[:10]},
+            'note': 'auction_data_not_ready ready=%.0f%%' % _ready_pct,
         }
         st['auction'] = out
-        log.info('[lb-senti] auction not_ready mid=%d/%d low=%d/%d -> 不写 open/green/yizi 率'
-                 % (out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n))
+        log.info('[lb-senti] auction not_ready mid=%d/%d low=%d/%d ready=%.0f%% -> 不写 open/green/yizi 率; missing=mid:%s low:%s'
+                 % (out['ready_detail']['mid'], mid_n, out['ready_detail']['low'], low_n,
+                    _ready_pct, ','.join(_mid_missing[:5]), ','.join(_low_missing[:5])))
         return out
     out['ts'] = time.time()
     out['ready'] = True
@@ -4255,8 +4641,11 @@ def _exp_rt_status(code):
                     or (actual == 0.0 and (_op0 <= 0 or not _auction_ready(code)))):
                 return PM, "await_intraday_confirm"
             return CS, "auction_not_met(%.1f%%)" % actual                    
-        if (_two_1m_break(code) or _limit_up_within_1m(code)) and not _below_vwap_confirm(code):
-            return CX, "intraday_exceed(%.1f%%)" % actual                               
+        _t1 = _two_1m_break(code)
+        _t2 = _limit_up_within_1m(code)
+        if (_t1 or _t2) and not _below_vwap_confirm(code):
+            _src = 'two_1m' if _t1 else 'limit_1m'
+            return CX, "intraday_exceed_%s(%.1f%%)" % (_src, actual)                               
         if _below_vwap_confirm(code):
             return CS, "below_vwap_weak"                                
         return PM, "observe_auction_exceed %.1f%%" % actual                        
@@ -4268,8 +4657,10 @@ def _exp_rt_status(code):
                                                                 
         if _below_vwap_confirm(code):
             return CS, "below_vwap_weak"
-        if _two_1m_break(code) or _limit_up_within_1m(code):
-            return CX, "meet_intraday_exceed"
+        _mt1 = _two_1m_break(code)
+        _mt2 = _limit_up_within_1m(code)
+        if _mt1 or _mt2:
+            return CX, "meet_intraday_exceed_%s" % ('two_1m' if _mt1 else 'limit_1m')
         return PM, "meet_wait_intraday_confirm"
     st = _eval_intraday(code, au)[0]
     return st, "intraday"
@@ -4298,9 +4689,9 @@ def _attempt_expected_buy(context, code, direction=None):
     _s0 = (getattr(g, 'spot', None) or {}).get(code) or {}
     _px0 = float(_s0.get('last_px') or 0.0)
     _up0 = float(_s0.get('up_px') or 0.0)
-    _kind = 'board' if (_up0 > 0 and _px0 >= _up0 * 0.998) else 'other'                                          
+    _kind = 'board' if (_up0 > 0 and _px0 >= _up0 * 0.998) else 'exp_chase'                        
     if not _buy_slot_ok(_kind):
-        return None                                         
+        return None                                           
     st, reason = _exp_rt_status(code)
     if st == PM and str(reason).startswith("observe"):
         eo = g.exp.setdefault(code, {})
@@ -4314,9 +4705,9 @@ def _attempt_expected_buy(context, code, direction=None):
         return True
     if st in (CX, CM):
         _exp_direction_log(code, dctx, 'allow')
-        note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s' % (
+        note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s ft_state=%s' % (
             st, reason, dctx.get('kind') or 'neutral', float(dctx.get('score') or 0.0),
-            dctx.get('reason') or '-')
+            dctx.get('reason') or '-', _ft_state_str(code))
         if not place_expected_order(context, code, note=note):
             return None                          
         if st == CX and _dyn_unq_confirmed(code):
@@ -4621,16 +5012,37 @@ def _pool_exp_priority(code, direction=None):
     act = _first_zt_ms(code) or 1e18                                  
     return (-sc, act)
 
+_BUY_STRATEGY_KINDS = ('exp_chase', 'ma5', 'core', 'elastic_arb', 'elastic_top')
+_BUY_SLOT_LIST_KEYS = ('bought', 'bought_board') + tuple('bought_%s' % k for k in _BUY_STRATEGY_KINDS) + ('bought_other', 'legacy_other')
+
+def _new_daily():
+                                                             
+    d = {'bought': [], 'bought_board': [], 'bought_kind': {}, 'sold': []}
+    for k in _BUY_STRATEGY_KINDS:
+        d['bought_' + k] = []
+    return d
+
+def _buy_slot_list_key(kind):
+    if kind == 'board':
+        return 'bought_board'
+    if kind in _BUY_STRATEGY_KINDS:
+        return 'bought_' + kind
+    return 'bought_other'
+
 def _buy_slot_limit(kind):
-    _key = 'daily_max_board_buy' if kind == 'board' else 'daily_max_other_buy'
-    return int(BLS.get(_key, 2 if kind == 'board' else 1) or 0)
+    if kind == 'board':
+        return int(BLS.get('daily_max_board_buy', 2) or 0)
+    lim = (BLS.get('daily_strategy_buy_limit') or {}).get(kind)
+    if lim is None:
+        lim = int(BLS.get('daily_max_other_buy', 1) or 1)             
+    return int(lim or 0)
 
 def _buy_slot_used(kind):
-                           
+                                    
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
         return False
-    _lst = _d.get('bought_board' if kind == 'board' else 'bought_other')
+    _lst = _d.get(_buy_slot_list_key(kind))
     return isinstance(_lst, list) and len(_lst) >= _buy_slot_limit(kind)
 
 def _buy_slot_ok(kind):
@@ -4643,19 +5055,27 @@ def _buy_slot_ok(kind):
 def _buy_slot_add(sec, kind):
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
-        _d = {}; g.daily = _d
+        _d = _new_daily(); g.daily = _d
     _d.setdefault('bought', []).append(sec)
-    _d.setdefault('bought_board' if kind == 'board' else 'bought_other', []).append(sec)
+    _key = _buy_slot_list_key(kind)
+    _d.setdefault(_key, []).append(sec)
+    _d.setdefault('bought_kind', {})[sec] = kind
+    log.info('[slot] %s kind=%s used=%d/%d total=%d/%d' % (
+        _sn(sec), kind, len(_d.get(_key) or []), _buy_slot_limit(kind),
+        len(_d.get('bought') or []), int(BLS.get('daily_max_buy', 3))))
 
 def _buy_slot_rel(sec):
                                                         
     _d = getattr(g, 'daily', None)
     if not isinstance(_d, dict):
         return
-    for _k in ('bought', 'bought_board', 'bought_other'):
+    for _k in _BUY_SLOT_LIST_KEYS:
         _lst = _d.get(_k)
         if isinstance(_lst, list) and sec in _lst:
             _lst.remove(sec)
+    _kd = _d.get('bought_kind')
+    if isinstance(_kd, dict):
+        _kd.pop(sec, None)
 
 def _try_expected_buys(context):
                                                      
@@ -4681,7 +5101,7 @@ def _try_expected_buys(context):
 
 def _ma5_first_5d(sec):
                                                           
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 9:
         return False
     try:
@@ -4704,7 +5124,12 @@ def _ma5_first_5d(sec):
 def try_ma5_buy(context):
     if _min_age() > int(BLS.get('ma5_buy_window_min', 240)):
         return                                       
-    if not _buy_slot_ok('other'):                          
+    if not _buy_slot_ok('ma5'):                       
+        _skip_log('slot_skip', '__ma5__', 'ma5',
+                  '[slot-skip] kind=ma5 used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_ma5') or []),
+                     _buy_slot_limit('ma5'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     positions = context.portfolio.positions
     day = str(get_trading_day())
@@ -4713,7 +5138,7 @@ def try_ma5_buy(context):
     if not isinstance(getattr(g, 'ma5_touched', None), set):
         g.ma5_touched = set(getattr(g, 'ma5_touched', None) or [])
     if getattr(g, 'ma5_lifecycle_day', None) != day:
-        g.ma5_lifecycle_day = day; g.ma5_lows = {}
+        g.ma5_lifecycle_day = day; g.ma5_lows = {}; g.ma5_pending = set()
     if not isinstance(getattr(g, 'ma5_lows', None), dict):
         g.ma5_lows = {}
     for sec in _pool():
@@ -4721,22 +5146,35 @@ def try_ma5_buy(context):
             continue
         tags = _tags(sec)
         if BLS.get('ma5_core_only', True) and 'CORE' not in tags:
+            _skip_log('ma5_skip', sec, 'core_only',
+                      '[ma5-skip] %s 非CORE -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue                                
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('ma5_skip', sec, 'no_px',
+                      '[ma5-skip] %s 现价缺失 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         second_low = _ma5_second_low(sec, px)
         if _mid_board_avoid(sec):
             _skip_log('mid_avoid', sec, 'ma5', '[mid-avoid] %s 连板中位股规避(ma5)' % _sn(sec)); continue
         if BLS.get('ma5_require_bs', False) and 'BS' not in tags:
+            _skip_log('ma5_skip', sec, 'bs_req',
+                      '[ma5-skip] %s 无BS标签 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue                             
         if BLS.get('ma5_first_5d', False) and not _ma5_first_5d(sec):
+            _skip_log('ma5_skip', sec, 'first5d',
+                      '[ma5-skip] %s 非5日内首次回踩 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue                                        
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs'] or not trade_open(sec):
+            _skip_log('ma5_skip', sec, 'cold_or_trade',
+                      '[ma5-skip] %s 冷却/不可交易 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         ma5 = _ensure_ma5(sec)
         if not ma5:
+            g.ma5_pending.add(sec)                             
+            _skip_log('ma5_skip', sec, 'ma5_na',
+                      '[ma5-skip] %s MA5日线未就绪 -> 待补评(ma5)' % _sn(sec), throttle_sec=30.0)
             continue
         if BLS.get('ma5_second_low_enabled', True):
             ref_px = second_low
@@ -4745,13 +5183,23 @@ def try_ma5_buy(context):
             ref_px = px
             ma5_ref = ma5
         if not ref_px or not ma5_ref:
+            _skip_log('ma5_skip', sec, 'no_ref',
+                      '[ma5-skip] %s 次低价/MA5基准缺失 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
             continue
         band = abs(float(ref_px) - float(ma5_ref)) / float(ma5_ref)
+        if band > float(BLS.get('ma5_touch_band', 0.02)) + 1e-12:
+            _skip_log('ma5_skip', sec, 'band',
+                      '[ma5-skip] %s 未触线 band=%.2f%% ref=%.2f ma5ref=%.2f' %
+                      (_sn(sec), band * 100.0, ref_px, ma5_ref), throttle_sec=60.0)
         if band <= float(BLS.get('ma5_touch_band', 0.02)) + 1e-12:
             score = score_now(sec)
             if not score:
+                _skip_log('ma5_skip', sec, 'score_na',
+                      '[ma5-skip] %s 评分未就绪 -> 跳过(ma5)' % _sn(sec), throttle_sec=30.0)
                 continue                         
             if sec in g.ma5_touched:
+                _skip_log('ma5_skip', sec, 'touched',
+                      '[ma5-skip] %s 当日已评估触线 -> 跳过(ma5)' % _sn(sec), throttle_sec=60.0)
                 continue                        
             if score >= float(BLS.get('ma5_buy_score_min', 50.0)) and _buy_red_ok(sec):
                 note = ('ma_pullback px=%.2f low2=%.2f ref=%.2f ma5=%.2f ma5ref=%.2f '
@@ -4761,18 +5209,29 @@ def try_ma5_buy(context):
                 if place_order(context, sec, 'buy', note=note, mode='pullback',
                                ratio=float(BLS.get('ma5_buy_ratio', 0.10))):
                     g.ma5_touched.add(sec)
-                    _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+                    _buy_slot_add(sec, 'ma5'); g.buy_log[sec] = now
                     _save_state()
-                    if not _buy_slot_ok('other'):
+                    if not _buy_slot_ok('ma5'):
                         break
             else:
+                if score < float(BLS.get('ma5_buy_score_min', 50.0)):
+                    _skip_log('ma5_skip', sec, 'score',
+                      '[ma5-skip] %s 触线但评分不足 score=%.1f' % (_sn(sec), score), throttle_sec=60.0)
+                else:
+                    _skip_log('ma5_skip', sec, 'red',
+                      '[ma5-skip] %s 触线但红盘闸不达 red=%.2f' % (_sn(sec), _red_ratio(sec)), throttle_sec=60.0)
                 g.ma5_touched.add(sec)                             
 
 def try_core_buy(context):
                                                                                  
     if not BLS.get('core_buy_enabled', True):
         return
-    if not _buy_slot_ok('other'):                         
+    if not _buy_slot_ok('core'):                     
+        _skip_log('slot_skip', '__core__', 'core',
+                  '[slot-skip] kind=core used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_core') or []),
+                     _buy_slot_limit('core'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     if _min_age() > int(BLS.get('core_buy_window_min', 30)):
         return                                             
@@ -4801,9 +5260,9 @@ def try_core_buy(context):
             continue                         
         if score >= BLS['buy_score_min'] and _buy_red_ok(sec):
             if place_order(context, sec, 'buy', note='core_buy px=%.2f score=%.1f tags=%s' % (px, score, ','.join(_tags(sec))), mode='chase'):
-                _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+                _buy_slot_add(sec, 'core'); g.buy_log[sec] = now
                 _save_state()
-                if not _buy_slot_ok('other'):
+                if not _buy_slot_ok('core'):
                     break
 
 def _sector_chg(sec):
@@ -4900,6 +5359,15 @@ def _first_zt_ms(sec):
         return 0
     lt = time.localtime(float(ts))
     return int(time.strftime('%Y%m%d%H%M%S', lt)) * 1000 + int(float(ts) % 1 * 1000)
+
+def _ft_state_str(sec):
+                                                                      
+    ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
+    if not ft:
+        return 'src:- ms:- bc:0 seal:0'
+    return 'src:%s ms:%s bc:%d seal:%.0f' % (
+        ft.get('src') or '-', ft.get('ms') or '-', int(ft.get('break_cnt') or 0),
+        float(ft.get('first_seal') or 0.0))
 
 def _board_first_zt(sec):
                                                  
@@ -5156,7 +5624,12 @@ def _try_elastic_arb_buy(context):
         return
     if _min_age() > int(BLS.get('elastic_arb_window_minute', 20)):
         return                                                 
-    if not _buy_slot_ok('other'):                          
+    if not _buy_slot_ok('elastic_arb'):                        
+        _skip_log('slot_skip', '__elastic_arb__', 'elastic_arb',
+                  '[slot-skip] kind=elastic_arb used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_arb') or []),
+                     _buy_slot_limit('elastic_arb'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     strong = _elastic_yizi_scan()
     if not strong:
@@ -5167,50 +5640,84 @@ def _try_elastic_arb_buy(context):
     for sec in _pool():
         if sec in positions:
             continue
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_arb'):
+            _skip_log('slot_skip', sec, 'elastic_arb',
+                      '[elastic-arb-skip] %s reason=slot total=%d/%d'
+                      % (_sn(sec), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         if not _is_elastic_eligible(sec):
+            _skip_log('elastic_arb_skip', sec, 'not_eligible',
+                      '[elastic-arb-skip] %s reason=not_eligible' % _sn(sec), throttle_sec=300.0)
             continue                                                            
         if not _lb_senti_gate_apply(sec, 'elastic'):
             continue                                                             
         if not _elastic_in_strong_board(sec, strong):
+            _skip_log('elastic_arb_skip', sec, 'strong_board',
+                      '[elastic-arb-skip] %s reason=strong_board boards=%s'
+                      % (_sn(sec), ','.join(list(strong.keys())[:4])), throttle_sec=60.0)
             continue                        
         if BLS.get('board_rank_enabled', True) and not _board_rank_top3(sec, rank_secs or [sec]):
+            _skip_log('elastic_arb_skip', sec, 'board_rank',
+                      '[elastic-arb-skip] %s reason=board_rank' % _sn(sec), throttle_sec=60.0)
             continue                                   
         if _is_one_word_open(sec):
+            _skip_log('elastic_arb_skip', sec, 'one_word',
+                      '[elastic-arb-skip] %s reason=one_word' % _sn(sec), throttle_sec=60.0)
             continue                       
         s = g.spot.get(sec) or {}
         pre = float(s.get('preclose_px') or 0.0)
         if pre <= 0:
+            _skip_log('elastic_arb_skip', sec, 'no_preclose',
+                      '[elastic-arb-skip] %s reason=no_preclose' % _sn(sec), throttle_sec=60.0)
             continue
         op = float(s.get('open_px') or 0.0)
         open_chg = ((op / pre - 1.0) * 100.0) if op > 0 else _auction_change(sec)
         if open_chg > _elastic_max_open_change(sec) + 1e-9:
+            _skip_log('elastic_arb_skip', sec, 'open_high',
+                      '[elastic-arb-skip] %s reason=open_high open=%.1f%% max=%.1f%%'
+                      % (_sn(sec), open_chg, _elastic_max_open_change(sec)), throttle_sec=60.0)
             continue                         
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('elastic_arb_skip', sec, 'no_px',
+                      '[elastic-arb-skip] %s reason=no_px' % _sn(sec), throttle_sec=60.0)
             continue
         chg = (px / pre - 1.0) * 100.0
         if chg < _elastic_min_change(sec) - 1e-9 or chg > _elastic_max_change(sec) + 1e-9:
+            _skip_log('elastic_arb_skip', sec, 'chg_range',
+                      '[elastic-arb-skip] %s reason=chg_range chg=%.1f%% min=%.1f%% max=%.1f%%'
+                      % (_sn(sec), chg, _elastic_min_change(sec), _elastic_max_change(sec)), throttle_sec=60.0)
             continue                                                
         surge = _elastic_1m_surge(sec)
         if surge < float(BLS.get('elastic_arb_min_1m_surge', 3.0)):
+            _skip_log('elastic_arb_skip', sec, '1m_surge',
+                      '[elastic-arb-skip] %s reason=1m_surge surge=%.1f%% min=%.1f%%'
+                      % (_sn(sec), surge, float(BLS.get('elastic_arb_min_1m_surge', 3.0))), throttle_sec=60.0)
             continue                             
         big = _l2_big_ratio(sec)
         cands.append((sec, px, chg, open_chg, surge, _elastic_big_bonus_pts(sec), big, bool(_l2_big_ok(sec))))
     cands.sort(key=lambda t: (-(t[5] + t[4]), -t[2]))                               
     for sec, px, chg, open_chg, surge, _big_bonus, big, big_ok in cands:
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_arb'):
+            _skip_log('slot_skip', sec, 'elastic_arb',
+                      '[elastic-arb-skip] %s reason=slot total=%d/%d'
+                      % (_sn(sec), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs'] or not trade_open(sec):
+            _skip_log('elastic_arb_skip', sec, 'cold_or_trade',
+                      '[elastic-arb-skip] %s reason=cold_or_trade' % _sn(sec), throttle_sec=60.0)
             continue
         if _block_sealed_buy(sec):
+            _skip_log('elastic_arb_skip', sec, 'sealed',
+                      '[elastic-arb-skip] %s reason=sealed' % _sn(sec), throttle_sec=60.0)
             continue
         limit = _order_limit(sec, 'buy', 'chase')
         if place_order(context, sec, 'buy', note='elastic_arb px=%.2f limit=%.2f chg=%.1f%% 1m=%.1f%% open=%.1f%% big=%s big_ok=%d boards=%s' % (
             px, limit or px, chg, surge, open_chg, _fmt_big_ratio(big), int(big_ok), ','.join(list(strong.keys())[:2])), mode='chase'):
-            _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+            _buy_slot_add(sec, 'elastic_arb'); g.buy_log[sec] = now
             _save_state()
 
 def _board_probe():
@@ -5513,8 +6020,12 @@ def _board_5d_strength(board_code):
 def _new_top_board_scan():
                                                      
     if not BLS.get('elastic_top_enabled', True):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'disabled',
+                  '[elastic-top-skip] 总开关关闭', throttle_sec=300.0)
         return None
     if _min_age() > int(BLS.get('elastic_top_window_minute', 20)):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'window',
+                  '[elastic-top-skip] 已过 %s 分钟窗口' % BLS.get('elastic_top_window_minute', 20), throttle_sec=300.0)
         return None
     et = getattr(g, 'elastic_top', None) or {'day': '', 'top': '', 'ts': 0.0, 'tracked': set(), 'trig': 0, 'done': False}
     g.elastic_top = et
@@ -5524,6 +6035,8 @@ def _new_top_board_scan():
         et.pop('stab', None)
     top, lead = _concept_board_rank_top1(_elastic_top_cand_src())                             
     if not top:
+        _skip_log('elastic_top_scan', '__elastic_top__', 'no_top',
+                  '[elastic-top-scan] 无最强板块候选', throttle_sec=30.0)
         return None
     n_need = int(BLS.get('elastic_top_stable_frames', 2))
     lead_min = float(BLS.get('elastic_top_lead_min', 0.5))
@@ -5539,26 +6052,44 @@ def _new_top_board_scan():
     if stab['n'] < n_need:
         if et.get('top') and not et.get('done'):
             return et['top']                                            
+        _skip_log('elastic_top_scan', '__elastic_top__', 'stability',
+                  '[elastic-top-scan] 稳定帧不足 n=%d/%d top=%s lead=%.1f%%' %
+                  (stab['n'], n_need, top, lead), throttle_sec=30.0)
         return None
     st = _concept_board_strength(top)                        
     if st < float(BLS.get('elastic_top_min_strength', 2.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'strength',
+                  '[elastic-top-scan] 板块强度不足 st=%.1f%% < %s%%' %
+                  (st, BLS.get('elastic_top_min_strength', 2.0)), throttle_sec=30.0)
         return None
     open_g = _board_open_gain(top)
     if open_g < float(BLS.get('elastic_top_breakout_min_open', 1.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'open',
+                  '[elastic-top-scan] 开盘板块涨幅不足 open=%.1f%% < %s%%' %
+                  (open_g, BLS.get('elastic_top_breakout_min_open', 1.0)), throttle_sec=30.0)
         return None                                                 
     avg5 = _board_5d_strength(top)
     avg5_degraded = False
     if avg5 is None:
                                                                  
         if _min_age() > float(BLS.get('elastic_top_avg5_grace_min', 5.0)):
+            _skip_log('elastic_top_scan', '__elastic_top__', 'avg5_na',
+                  '[elastic-top-scan] 5日均值未就绪且超过宽限', throttle_sec=30.0)
             return None
         avg5_degraded = True
     elif open_g < avg5 + float(BLS.get('elastic_top_breakout_min_boost', 2.0)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'boost',
+                  '[elastic-top-scan] 非新爆发 open=%.1f%% avg5=%.1f%% boost<%.1f%%' %
+                  (open_g, avg5, float(BLS.get('elastic_top_breakout_min_boost', 2.0))), throttle_sec=30.0)
         return None                                                        
     if et.get('trig', 0) >= int(BLS.get('elastic_top_max_trigger_per_day', 2)):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'trig_max',
+                  '[elastic-top-scan] 当日触发已达上限 %s' % BLS.get('elastic_top_max_trigger_per_day', 2), throttle_sec=300.0)
         return None
     et['top'] = top; et['ts'] = time.time(); et['done'] = False
     if top in (et.get('tracked') or set()):
+        _skip_log('elastic_top_scan', '__elastic_top__', 'tracked',
+                  '[elastic-top-scan] %s 已跟踪过 -> 不再重复触发' % top, throttle_sec=300.0)
         return None
     et['tracked'].add(top); et['trig'] = et.get('trig', 0) + 1
     log.info('[elastic] new_top_board %s strength=%.1f%% open=%.1f%% avg5=%s lead=%.1f%% -> 启动弹性跟踪(最主动20cm/北交,10%%/15%%前买)' % (
@@ -5606,10 +6137,19 @@ def _elastic_top_candidates(top):
 def _try_elastic_top_buy(context):
                                                          
     if not BLS.get('elastic_top_enabled', True):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'disabled',
+                  '[elastic-top-skip] 总开关关闭', throttle_sec=300.0)
         return
     if _min_age() > int(BLS.get('elastic_top_window_minute', 20)):
+        _skip_log('elastic_top_skip', '__elastic_top__', 'window',
+                  '[elastic-top-skip] 已过 %s 分钟窗口' % BLS.get('elastic_top_window_minute', 20), throttle_sec=300.0)
         return                                
-    if not _buy_slot_ok('other'):                           
+    if not _buy_slot_ok('elastic_top'):                        
+        _skip_log('slot_skip', '__elastic_top__', 'elastic_top',
+                  '[slot-skip] kind=elastic_top used=%d/%d total=%d/%d -> skip entry'
+                  % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_top') or []),
+                     _buy_slot_limit('elastic_top'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                     int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
         return
     top = _new_top_board_scan()
     if not top:
@@ -5617,46 +6157,79 @@ def _try_elastic_top_buy(context):
     positions = context.portfolio.positions
     for sec in _elastic_top_candidates(top):
         if sec in positions:
+            _skip_log('elastic_top_skip', sec, 'position',
+                      '[elastic-top-skip] %s 已在持仓 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         if sec in g.daily['bought']:
+            _skip_log('elastic_top_skip', sec, 'bought',
+                      '[elastic-top-skip] %s 当日已买 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                                  
-        if not _buy_slot_ok('other'):
+        if not _buy_slot_ok('elastic_top'):
+            _skip_log('slot_skip', sec, 'elastic_top',
+                      '[slot-skip] kind=elastic_top used=%d/%d total=%d/%d -> skip loop'
+                      % (len((getattr(g, 'daily', None) or {}).get('bought_elastic_top') or []),
+                         _buy_slot_limit('elastic_top'), len((getattr(g, 'daily', None) or {}).get('bought') or []),
+                         int(BLS.get('daily_max_buy', 3))), throttle_sec=60.0)
             return
         if not trade_open(sec):
+            _skip_log('elastic_top_skip', sec, 'trade_closed',
+                      '[elastic-top-skip] %s 不可交易 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         if not _lb_senti_gate_apply(sec, 'elastic'):
+            _skip_log('elastic_top_skip', sec, 'direction_gate',
+                      '[elastic-top-skip] %s 情绪方向闸拦截 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                                                             
         if _is_one_word_open(sec):
+            _skip_log('elastic_top_skip', sec, 'one_word',
+                      '[elastic-top-skip] %s 一字板 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                       
         if _block_sealed_buy(sec):
+            _skip_log('elastic_top_skip', sec, 'sealed',
+                      '[elastic-top-skip] %s 封死涨停 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue                        
         if _mid_board_avoid(sec):
+            _skip_log('elastic_top_skip', sec, 'mid_avoid',
+                      '[elastic-top-skip] %s 连板中位股规避 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         s = g.spot.get(sec) or {}
         pre = float(s.get('preclose_px') or 0.0)
         if pre <= 0:
+            _skip_log('elastic_top_skip', sec, 'no_preclose',
+                      '[elastic-top-skip] %s 前收缺失 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         px = last_px(sec)
         if not px or px <= 0:
+            _skip_log('elastic_top_skip', sec, 'no_px',
+                      '[elastic-top-skip] %s 现价缺失 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         chg = (px / pre - 1.0) * 100.0
         if chg <= 0 or chg >= _elastic_top_buy_before(sec):
+            _skip_log('elastic_top_skip', sec, 'chg_range',
+                      '[elastic-top-skip] %s 涨幅越界 chg=%.1f%% before=%.1f%%' %
+                      (_sn(sec), chg, _elastic_top_buy_before(sec)), throttle_sec=60.0)
             continue                                        
         op = float(s.get('open_px') or 0.0)
         open_chg = ((op / pre - 1.0) * 100.0) if op > 0 else _auction_change(sec)
         if open_chg > _elastic_max_open_change(sec) + 1e-9:
+            _skip_log('elastic_top_skip', sec, 'open_high',
+                      '[elastic-top-skip] %s 高开过大 open=%.1f%%' % (_sn(sec), open_chg), throttle_sec=60.0)
             continue                          
         surge = _elastic_1m_surge(sec)
         if surge < float(BLS.get('elastic_top_min_1m_surge', 2.0)):
+            _skip_log('elastic_top_skip', sec, '1m_surge',
+                      '[elastic-top-skip] %s 1m 大阳线不足 surge=%.1f%% < %s%%' %
+                      (_sn(sec), surge, BLS.get('elastic_top_min_1m_surge', 2.0)), throttle_sec=60.0)
             continue                        
         big = _l2_big_ratio(sec)
         now = time.time()
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
+            _skip_log('elastic_top_skip', sec, 'cold',
+                      '[elastic-top-skip] %s 冷却中 -> 跳过' % _sn(sec), throttle_sec=60.0)
             continue
         limit = _order_limit(sec, 'buy', 'chase')
         if place_order(context, sec, 'buy', note='elastic_top board=%s px=%.2f limit=%.2f chg=%.1f%% 1m=%.1f%% big=%s big_ok=%d' % (
             top, px, limit or px, chg, surge, _fmt_big_ratio(big), int(_l2_big_ok(sec))), mode='chase'):
-            _buy_slot_add(sec, 'other'); g.buy_log[sec] = now
+            _buy_slot_add(sec, 'elastic_top'); g.buy_log[sec] = now
             et = getattr(g, 'elastic_top', None)
             if et:
                 et['done'] = True                                   
@@ -5707,30 +6280,53 @@ def _role_tolerance(sec):
                     'score_half_adj': float(rp.get('score_half_adj') or 1.0)}
     return rp
 
+def _sold_today_fully(sec):
+                                                      
+    try:
+        pp = (getattr(g, 'pending', None) or {}).get(sec) or {}
+        if str(pp.get('side') or '') != 'sell':
+            return True
+        st = str(pp.get('status') or '').upper()
+        if st in ('FILLED', 'CANCELLED', 'REJECTED'):
+            return True
+        if st == 'PARTIAL':
+            return int(pp.get('filled') or 0) >= int(pp.get('qty') or 0)
+        return False
+    except Exception:
+        return False
+
 def _sellable_source():
                                                                                         
     try:
         p = get_positions() or {}
     except Exception:
         p = {}
-    return p if isinstance(p, dict) and p else {}
+    if not (isinstance(p, dict) and p):
+        return {}
+    try:
+        if BLS.get('sell_source_filter_sold', True):
+            sold = set((getattr(g, 'daily', None) or {}).get('sold') or [])
+            if sold:
+                out = {}
+                for k, v in p.items():
+                    nk = _norm_sec(k)
+                    if nk not in sold or not _sold_today_fully(nk):
+                        out[k] = v
+                p = out
+    except Exception:
+        pass
+    return p
 
 _SEL_FIELDS_AVAIL = ('enable_amount', 'available_amount', 'sellable_amount', 'closeable_amount',
                      'real_enable_amount', 'm_nCanUseVolume', 'm_nPREnableVolume',
                      'can_use_volume', 'enable_volume', 'sellable_volume')
 _SEL_FIELDS_TOTAL = ('current_amount', 'amount', 'hold_amount', 'holding_amount', 'm_nVolume', 'volume')
 
-def _sellable_detail(sec, positions):
-                                                           
+def _sellable_total(sec, positions):
+                                                                    
     p = positions.get(sec)
-    for key in _SEL_FIELDS_AVAIL:
-        try:
-            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
-            if v is None:
-                continue
-            return max(int(float(v) or 0), 0), key, True, False
-        except Exception:
-            continue
+    if p is None:
+        return 0, '', False
     for key in _SEL_FIELDS_TOTAL:
         try:
             v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
@@ -5743,15 +6339,117 @@ def _sellable_detail(sec, positions):
                     qty = max(qty - max(int(float(fv) or 0), 0), 0)
                 except Exception:
                     pass
-            return qty, key, False, True
+            return qty, key, True
         except Exception:
             continue
+    return 0, '', False
+
+def _sellable_detail(sec, positions):
+                                                           
+    p = positions.get(sec)
+    for key in _SEL_FIELDS_AVAIL:
+        try:
+            v = p.get(key) if isinstance(p, dict) else getattr(p, key, None)
+            if v is None:
+                continue
+            qty = max(int(float(v) or 0), 0)
+            _tq, _tk, _tok = _sellable_total(sec, positions)                                
+            return qty, key, True, _tok
+        except Exception:
+            continue
+    tq, tk, ok = _sellable_total(sec, positions)
+    if ok:
+        return tq, tk, False, True
     if p is not None:
         _audit_pos_fields(sec, p)
     return 0, '', False, False
 
+def _sell_avail_backfill_log(sec, qty, avail_key, kind):
+                                                          
+    try:
+        gl = getattr(g, 'sell_avail_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.sell_avail_log = gl
+        now = time.time()
+        if now - float(gl.get(sec) or 0.0) < 60.0:
+            return
+        gl[sec] = now
+        log.info('[sell-avail] %s 回填 qty=%d src=%s kind=%s' % (_sn(sec), qty, avail_key, kind))
+    except Exception:
+        pass
+
+def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0):
+                                                            
+    try:
+        if not BLS.get('sell_avail_amt0_warn_only', True):
+            return
+        gl = getattr(g, 'sell_avail_amt0_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.sell_avail_amt0_log = gl
+        now = time.time()
+        if now - float(gl.get(sec) or 0.0) < 60.0:
+            return
+        gl[sec] = now
+        _bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
+        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
+            _sn(sec), avail_key or '-', int(bool(avail_present)), int(bool(total_present)),
+            total_key or '-', int(total_qty or 0), _bq))
+    except Exception:
+        pass
+
+def _sellable_backfill_detail(sec, positions):
+                                                          
+    qty, key, avail_present, total_present = _sellable_detail(sec, positions)
+    if qty > 0 or not avail_present or not BLS.get('sell_avail_backfill_enabled', True):
+        return qty, key, avail_present, total_present
+    tq, tk, ok = _sellable_total(sec, positions)
+    if not ok or tq <= 0:
+        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq)
+        return qty, key, avail_present, total_present
+    _bought = str(sec) in ((getattr(g, 'daily', None) or {}).get('bought') or [])
+    if _bought and BLS.get('sell_avail_t1_strict', True):
+        return qty, key, avail_present, total_present                
+    _sell_avail_backfill_log(sec, tq, tk, 't0' if _bought else 'prev')
+    return tq, 'enable_backfill', True, True
+
 def _sellable(sec, positions):
-    return _sellable_detail(sec, positions)[0]
+    return _sellable_backfill_detail(sec, positions)[0]
+
+def _p6_weak_reset(sec):
+                                   
+    try:
+        w = getattr(g, 'p6_weak', None)
+        if isinstance(w, dict):
+            w.pop(sec, None)
+    except Exception:
+        pass
+
+def _p6_weak_step(sec, sc):
+                                                                 
+    try:
+        w = getattr(g, 'p6_weak', None)
+        if not isinstance(w, dict):
+            w = {}; g.p6_weak = w
+        rec = w.get(sec)
+        now = time.time()
+        if rec and now - float(rec.get('ts') or 0) > float(BLS.get('p6_confirm_win_sec', 30.0) or 30.0):
+            rec = None
+        cnt = (int(rec.get('cnt') or 0) + 1) if rec else 1
+        w[sec] = {'cnt': cnt, 'ts': now, 'score': float(sc)}
+        if cnt >= int(BLS.get('p6_confirm_frames', 2) or 2):
+            w.pop(sec, None)
+            try:
+                _save_state()
+            except Exception:
+                pass
+            return cnt, True, '[p6-confirm] %s score=%.1f cnt=%d -> sell' % (_sn(sec), sc, cnt)
+        try:
+            _save_state()
+        except Exception:
+            pass
+        return cnt, False, '[p6-confirm] %s score=%.1f cnt=%d -> hold' % (_sn(sec), sc, cnt)
+    except Exception:
+        return 1, False, '[p6-confirm] %s state error -> hold' % (_sn(sec))
 
 def _limit_down_price(sec):
                                                       
@@ -5843,6 +6541,8 @@ def _retry_sell_blocked(sec):
             return False
         if str(pp.get('status') or '').upper() == 'FILLED':
             return False
+        if _sell_inflight(sec):
+            return True
         _pos = _sellable_source() or {}
         _q = _sellable(sec, _pos)
         if _q <= 0:
@@ -5907,6 +6607,8 @@ def _audit_sell_skip(sec, why, now=None):
             cnt = {}; g.sell_skip_cnt = cnt
         cnt[sec] = int(cnt.get(sec) or 0) + 1
         hb = float(BLS.get('sell_skip_heartbeat_sec', 60.0) or 60.0)
+        if 't1=1' in str(why):
+            hb = float(BLS.get('sell_skip_heartbeat_t1_sec', 300.0) or 300.0)                      
         if now - float(gs.get(sec) or 0) < hb:
             return
         gs[sec] = now
@@ -6029,9 +6731,11 @@ def sell_manager(context):
         amt = _sellable(_raw, positions)
         if amt <= 0:
             _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
+            _tq0, _tk0, _tok0 = _sellable_total(_raw, positions)                            
             _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
-            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total=%d t1=%s)' % (
-                _raw, _k0 or '-', int(_av0), int(_tv0), _bought_today))
+            _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(_raw) or 0)
+            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
+                _raw, _k0 or '-', int(_av0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
             continue
         now = time.time()
         if _sell_inflight(sec):                                           
@@ -6060,6 +6764,9 @@ def sell_manager(context):
             _p7c = _p7c_check(sec, amt)
             if _p7c:
                 _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
+            _p7d = _p7d_check(sec, amt)
+            if _p7d and sec not in (getattr(g, 'p7d_sold', None) or set()):
+                _do_sell(context, sec, _p7d[1], _p7d[0]); _mark_p7(sec, 'p7d'); continue
                                                               
         _p8 = _lb_senti_cut_hold(sec)
         if _p8:
@@ -6090,8 +6797,15 @@ def sell_manager(context):
         if sc is None:
             continue                                     
         if sc < BLS['score_sell_clear'] * rp['score_clear_adj']:
+            _p6_weak_reset(sec)
             _do_sell(context, sec, amt, 'P5_score_clear score=%.1f' % sc)
         elif sc < BLS['score_sell_half'] * rp['score_half_adj']:
+            if BLS.get('p6_two_frame_enabled', True):
+                _cnt, _trig, _note = _p6_weak_step(sec, sc)
+                log.info(_note)
+                if not _trig:
+                    continue
+            _p6_weak_reset(sec)
             half = int(amt * float(BLS.get('sell_half_ratio', 0.5)))
             qty = int(half // 100) * 100
             if qty < 1:
@@ -6099,6 +6813,8 @@ def sell_manager(context):
             if qty > amt:
                 qty = amt
             _do_sell(context, sec, qty, 'P6_score_half score=%.1f' % sc)
+        else:
+            _p6_weak_reset(sec)
 
 def tick_sell_manager(context):
     g.sellscan_used = 0                       
@@ -6133,16 +6849,30 @@ def tick_sell_manager(context):
                     _half = int(amt * float(BLS.get('break2_half_ratio', 0.5)))
                     _half = int(_half // 100) * 100
                     _do_sell(context, sec, _half if _half >= 100 else amt,
-                             'TICK_break2_half_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                             'TICK_break2_half_sell break_cnt=%d held=%.0fs' % (_bc, now - _break_held_ts(ft, now)), mode='sell_break')
                     _mark_sold_event(sec, 'break2')
                     continue
             else:
                 if sec not in (getattr(g, 'break_sold', None) or set()):
-                    _do_sell(context, sec, amt, 'TICK_break_sell break_cnt=%d held=%.0fs' % (_bc, now - float(ft.get('break_ts') or now)), mode='sell_break')
+                    _do_sell(context, sec, amt, 'TICK_break_sell break_cnt=%d held=%.0fs' % (_bc, now - _break_held_ts(ft, now)), mode='sell_break')
                     _mark_sold_event(sec, 'break')
                     continue
                                                                                                                                                                                                                           
         if BLS.get('seal_low_sell_enabled', True) and ft.get('seal_low'):
+            if getattr(g, 'seal_batch_unhealthy', False):
+                log.info('[seal-low-guard] %s 本帧 L2 整批缺失 -> SEAL_LOW 跳过卖出，等待恢复' % _sn(sec))
+                continue
+            _cts = ft.get('seal_low_confirm_ts') or 0.0
+            _cnf = float(BLS.get('seal_low_confirm_sec', 6.0) or 0.0)
+            _fast = bool(ft.get('seal_low_fast') or False)
+            if _fast:
+                log.info('[seal-low-guard] %s SEAL_LOW_FAST 1帧确认 -> 立即卖出' % _sn(sec))
+            elif _cnf > 0 and (time.time() - _cts) < _cnf:
+                _skip_log('seal', sec, 'confirm_wait',
+                          '[seal-low-guard] %s SEAL_LOW 单帧待确认 age=%.0fs < %.0fs -> 不卖' % (
+                              _sn(sec), time.time() - _cts, _cnf),
+                          throttle_sec=3.0)
+                continue
             if sec not in (getattr(g, 'seal_sold', None) or set()):
                 _do_sell(context, sec, amt,
                          'TICK_seal_low_sell ratio<=%.2f' % float(BLS.get('seal_fail_ratio', 0.333)),
@@ -6172,6 +6902,9 @@ def tick_sell_manager(context):
             _p7c = _p7c_check(sec, amt)
             if _p7c:
                 _do_sell(context, sec, _p7c[1], _p7c[0], cool=False); _save_state(); continue
+            _p7d = _p7d_check(sec, amt)
+            if _p7d and sec not in (getattr(g, 'p7d_sold', None) or set()):
+                _do_sell(context, sec, _p7d[1], _p7d[0]); _mark_p7(sec, 'p7d'); continue
                                                                           
         _p8 = _lb_senti_cut_hold(sec)
         if _p8:
@@ -6198,14 +6931,21 @@ def tick_sell_manager(context):
                 if st4 in (PS, CS):
                     _do_sell(context, sec, amt, 'P4_exp_miss_tick ' + st4); continue
                                                        
-        if _hist_1d(sec) is None:
+        if _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0) is None:
             continue
         sc = score_now(sec)
         if sc is None:
             continue                                     
         if sc < BLS['score_sell_clear'] * rp['score_clear_adj']:
+            _p6_weak_reset(sec)
             _do_sell(context, sec, amt, 'P5_score_clear_tick score=%.1f' % sc)
         elif sc < BLS['score_sell_half'] * rp['score_half_adj']:
+            if BLS.get('p6_two_frame_enabled', True):
+                _cnt, _trig, _note = _p6_weak_step(sec, sc)
+                log.info(_note)
+                if not _trig:
+                    continue
+            _p6_weak_reset(sec)
             half = int(amt * float(BLS.get('sell_half_ratio', 0.5)))
             qty = int(half // 100) * 100
             if qty < 1:
@@ -6213,6 +6953,8 @@ def tick_sell_manager(context):
             if qty > amt:
                 qty = amt
             _do_sell(context, sec, qty, 'P6_score_half_tick score=%.1f' % sc)
+        else:
+            _p6_weak_reset(sec)
 
 def _mark_sold_event(sec, kind):
                                                                                                                                                                                                                                
@@ -6324,7 +7066,7 @@ def _p7a_check(sec, amt):
         return None
     if _sealed_now(sec):
         return None
-    df = _hist_1d(sec)
+    df = _hist_1d(sec, prio=1 if _is_hist_priority(sec) else 0)
     if df is None or len(df) < 2:
         return None
     vols = list(df['volume'])
@@ -6417,10 +7159,36 @@ def _p7c_check(sec, amt):
     rec['sold1_ts'] = now
     return ('P7c_passive_sweep b1 px=%.2f tripx=%.2f' % (px, tripx), half)
 
+def _p7d_check(sec, amt):
+                                                                     
+    if not BLS.get('p7d_sell_enabled', True):
+        return None
+    if _limitup_days(sec) < 3:
+        return None                                                      
+    if _unique_stand(sec):
+        return None                                
+    if _sealed_now(sec) or _today_zt(sec):
+        return None                                
+    s = g.spot.get(sec) or {}
+    px = last_px(sec) or 0.0
+    up = float(s.get('up_px') or 0.0)
+    vwap = float(s.get('wavg_px') or 0.0)
+    if not (px > 0 and up > 0 and vwap > 0):
+        return None                                
+    if px < up * (1.0 - float(BLS.get('p7d_limit_gap', 0.04) or 0.04)):
+        return None                              
+    if px < vwap * (1.0 + float(BLS.get('p7d_vwap_dev_min', 3.0) or 3.0) / 100.0):
+        return None                                
+    half = int(amt * float(BLS.get('p7d_half_ratio', 0.5) or 0.5))
+    half = int(half // 100) * 100
+    qty = half if half >= 100 else amt
+    return ('P7d_core_surge_dev px=%.2f up=%.2f vwap=%.2f dev=%.1f%%' % (
+        px, up, vwap, (px / vwap - 1.0) * 100.0), qty)
+
 def _mark_p7(sec, kind):
                                                
     try:
-        key = 'p7a_sold' if kind == 'p7a' else 'p7b_sold'
+        key = 'p7a_sold' if kind == 'p7a' else ('p7b_sold' if kind == 'p7b' else 'p7d_sold')
         st = getattr(g, key, None)
         if not isinstance(st, set):
             st = set(); setattr(g, key, st)
@@ -7146,8 +7914,37 @@ def _tx_frame_zt_ms(sec, frame_data):
     except Exception:
         return None
 
+def _break_held_ts(ft, now=None):
+                                                                 
+    try:
+        now = now or time.time()
+        ft = ft or {}
+        return float(ft.get('last_break_ts') or ft.get('break_ts') or now)
+    except Exception:
+        return now
+
+def _firstzt_rebreak_log(sec):
+                                                                
+    try:
+        gl = getattr(g, 'firstzt_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.firstzt_log_ts = gl
+        now = time.time()
+        sec_sec = float(BLS.get('firstzt_rebreak_log_sec', 30.0) or 30.0)
+        if now - float(gl.get(sec) or 0.0) < sec_sec:
+            return False
+        gl[sec] = now
+        return True
+    except Exception:
+        return True
+
 def tick_data(context, data):
                                                    
+    try:
+        g.gear_invalid_cnt = 0
+        g.gear_total_cnt = 0
+    except Exception:
+        pass
     if not BLS.get('tick_enabled', True):
         return
     _secs = _tick_targets()
@@ -7189,6 +7986,13 @@ def tick_data(context, data):
             if last <= 0 or u <= 0:
                 continue
             seal, bids = _seal_metrics(sec)
+            _book_ok = _seal_book_ok(sec)
+            try:
+                g.gear_total_cnt = int(getattr(g, 'gear_total_cnt', 0) or 0) + 1
+                if not _book_ok:
+                    g.gear_invalid_cnt = int(getattr(g, 'gear_invalid_cnt', 0) or 0) + 1
+            except Exception:
+                pass
             ft = g.first_zt.get(sec)
             if ft is None:
                 vol = _snap_vol(s)
@@ -7235,22 +8039,24 @@ def tick_data(context, data):
             if last < u - 1e-9:                     
                 if not ft.get('break'):
                     ft['break'] = True; ft['break_ts'] = time.time()
+                    ft['last_break_ts'] = time.time()                             
                     ft['break_cnt'] = int(ft.get('break_cnt') or 0) + 1
-                    log.info('[firstzt] %s price=%.2f -> BREAK#%d seal=%.0f held=%.0fs' % (_sn(sec), last, int(ft.get('break_cnt') or 0), seal, time.time() - ft.get('ts', time.time())))
+                    if _firstzt_rebreak_log(sec):
+                        log.info('[firstzt] %s price=%.2f -> BREAK#%d seal=%.0f held=%.0fs' % (_sn(sec), last, int(ft.get('break_cnt') or 0), seal, time.time() - ft.get('ts', time.time())))
                 continue
             if ft.get('break') and last >= u - 1e-9 and seal >= float(BLS.get('firstzt_min_seal', 0.0)):
                 ft['break'] = False
+                ft['last_reboard_ts'] = time.time()                        
                 if not ft.get('reboard_ts'):
                     ft['reboard_ts'] = time.time()
-                log.info('[firstzt] %s 回封 reboard_ts=%.0f break_cnt=%d seal=%.0f' % (_sn(sec), float(ft.get('reboard_ts') or 0), int(ft.get('break_cnt') or 0), seal))
+                if _firstzt_rebreak_log(sec):
+                    log.info('[firstzt] %s 回封 reboard_ts=%.0f break_cnt=%d seal=%.0f' % (_sn(sec), float(ft.get('reboard_ts') or 0), int(ft.get('break_cnt') or 0), seal))
             fs = ft.get('first_seal') or 0.0
             _sfr = float(BLS.get('seal_fail_ratio', 0.333))
             if _unique_stand(sec):                               
                 _sfr = float(BLS.get('seal_fail_ratio_unique', 0.25))                
-            if fs > 0 and seal < fs * _sfr:
-                if not ft.get('seal_low'):
-                    ft['seal_low'] = True
-                    log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW' % (_sn(sec), seal, fs, seal / fs, bids))
+            _update_seal_low_state(ft, sec, last, u, seal, bids, _book_ok, fs, _sfr,
+                                   float(BLS.get('seal_low_fast_ratio', 0.15) or 0.0))
             try:
                 _board_queue_cancel(sec, seal, bids)                        
             except Exception as _e:
@@ -7258,6 +8064,14 @@ def tick_data(context, data):
         except Exception:
             continue
                                                         
+    try:
+        _unhealthy, _tot, _inv, _ratio = _gear_batch_health()
+        g.seal_batch_unhealthy = _unhealthy
+        if _unhealthy:
+            log.info('[gear-na] 本帧 L2 十档缺失 %d/%d 占比=%.0f%% -> 整批不健康，跳过 SEAL_LOW 卖出' % (_inv, _tot, _ratio * 100.0))
+            _reset_seal_low_confirm_on_batch_bad()
+    except Exception as _e:
+        _warn('gear batch health fail: %r' % _e)
     try:
         tick_sell_manager(context)
     except Exception as e:
@@ -7313,6 +8127,7 @@ def auction_pre_confirm(context):
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))                      
     except Exception:
         pass
+    _hist1d_prewarm('09:25')                     
     for code in list(get_positions()):
         g.exp.setdefault(code, {})
         g.exp[code]['auction_status'] = _eval_auction(code)[0]
@@ -7347,9 +8162,36 @@ def _after_open_state_sync():
             len(g.first_zt or {}), len(g.l2_big or {}), len(g.lb_senti or {})))
         return 'keep'
     g.exp_day = today
+    g.hist_prio_cache = {}; g.hist_na_pending = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
+    g.hist_recover_once = {}; g.firstzt_log_ts = {}; g.bought_qty = {}                                        
     log.info('[aop-reset] 首日/跨日重置盘中状态 first_zt=0 l2_big=0')
     return 'reset'
+
+def lb_senti_auction_retry(context):
+                                                   
+    try:
+        if not BLS.get('lb_senti_auction_retry_enabled', True):
+            return
+        _set_now(context)
+        st = _lb_senti_state()
+        a = st.get('auction') or {}
+        if a.get('ready'):
+            return
+        _got, _missing = _fill_zt_spot()
+        if _got:
+            out = _lb_senti_auction() or {}
+            _rd = out.get('ready_detail') or {}
+            _mn = int(out.get('mid_n') or 0); _ln = int(out.get('low_n') or 0)
+            _mr = int(_rd.get('mid') or 0); _lr = int(_rd.get('low') or 0)
+            _pct = 100.0 * (_mr + _lr) / (_mn + _ln) if (_mn + _ln) else 100.0
+            log.info('[lb-senti] auction retry 09:26 got=%d ready=%s ready_pct=%.0f%% missing=%s'
+                     % (_got, bool(out.get('ready')), _pct, ','.join(_missing[:10])))
+        else:
+            log.info('[lb-senti] auction retry 09:26 got=0 ready=%s missing=%d'
+                     % (a.get('ready'), len(_missing or [])))
+    except Exception as e:
+        _warn('lb_senti auction retry fail: %r' % e)
 
 def after_open_probe(context):
     _set_now(context)
@@ -7369,6 +8211,7 @@ def after_open_probe(context):
         _l2_big_seed(list(dict.fromkeys([x for x in (_pool() + list(get_positions()) + list(g.exp_file or {})) if x])))                              
     except Exception:
         pass
+    _hist1d_prewarm('09:31')                       
     for sec in list(get_positions()):
         g.exp.setdefault(sec, {})
         au, _r = _eval_auction(sec)
@@ -7531,7 +8374,7 @@ def _size_total(context):
     return _total_asset(context)
 
 def _calc_buy_qty(context, sec, price, ratio):
-                                                                          
+                                                                       
     if price is None or price <= 0:
         return 0
     try:
@@ -7552,15 +8395,38 @@ def _calc_buy_qty(context, sec, price, ratio):
     if cap <= 0:
         return 0
     try:
-        budget = min(cash * float(ratio), cap, cash)
+        budget = min(total * float(ratio), cap, cash)
     except Exception:
         return 0
     if budget <= 0:
         return 0
-    lot = price * 100
+    lot_step = int(BLS.get('buy_lot_step', 100) or 100)
+    lot = price * lot_step
     if lot <= 0:
         return 0
-    return int(budget / lot) * 100
+    qty = int(budget / lot) * lot_step
+    try:
+        g.qty_calc_last = {'sec': sec, 'price': price, 'cash': cash, 'total': total,
+                           'held_mv': held_mv, 'cap': cap, 'budget': budget,
+                           'ratio': ratio, 'lot': lot, 'qty': qty}
+    except Exception:
+        pass
+    return qty
+
+def _qty_calc_log(context, sec, tag='order'):
+                                                                                 
+    try:
+        d = getattr(g, 'qty_calc_last', None)
+        if not isinstance(d, dict) or d.get('sec') != sec:
+            return
+        _skip_log('qty_calc', sec, tag,
+                  '[qty-calc] %s %s cash=%.2f total=%.2f held_mv=%.2f cap=%.2f budget=%.2f lot=%.2f qty=%d' % (
+                      tag, _sn(sec), float(d.get('cash') or 0), float(d.get('total') or 0),
+                      float(d.get('held_mv') or 0), float(d.get('cap') or 0),
+                      float(d.get('budget') or 0), float(d.get('lot') or 0), int(d.get('qty') or 0)),
+                  throttle_sec=30.0)
+    except Exception:
+        pass
 
 def _rt_lag_info(sec):
                                                                                      
@@ -7777,10 +8643,13 @@ def _release_buy_slot(sec):
     try:
         _db = getattr(g, 'daily', None)
         if isinstance(_db, dict):
-            for _k in ('bought', 'bought_board', 'bought_other'):
+            for _k in _BUY_SLOT_LIST_KEYS:
                 _lst = _db.get(_k)
                 if isinstance(_lst, list) and sec in _lst:
                     _lst.remove(sec)
+            _kd = _db.get('bought_kind')
+            if isinstance(_kd, dict):
+                _kd.pop(sec, None)
         if isinstance(getattr(g, 'exp_fired', None), set):
             g.exp_fired.discard(sec)
         log.info('[buy-slot] %s 释放当日买入名额(REJECTED/CANCELLED)' % _sn(sec))
@@ -7792,10 +8661,17 @@ def _reconcile_buy_slot_lists(_db, _keep):
                                      
     try:
         _keep_set = set(_keep)
-        for _k in ('bought_board', 'bought_other'):
+        for _k in _BUY_SLOT_LIST_KEYS:
+            if _k == 'bought':
+                continue
             _lst = _db.get(_k)
             if isinstance(_lst, list):
                 _db[_k] = [x for x in _lst if x in _keep_set]
+        _kd = _db.get('bought_kind')
+        if isinstance(_kd, dict):
+            for _c in list(_kd):
+                if _c not in _keep_set:
+                    _kd.pop(_c, None)
     except Exception:
         pass
 
@@ -8039,8 +8915,10 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
                 log.info('[sim-min-lot] %s buy qty 0->%d (SIM 最小一手兜底)' % (_sn(sec), qty))
             else:
                 _skip_log('place_order', sec, 'qty0', 'place_order skip(qty<=0) %s' % _sn(sec)); return False
-        if not _buy_pos_ok(context, sec, qty, limit):
-            return False                                      
+        qty = _buy_pos_cap_qty(context, sec, qty, limit)
+        if qty <= 0:
+            return False                                                          
+        _qty_calc_log(context, sec, 'order')
     else:
         limit = _order_limit(sec, side, mode)
         if qty is None:
@@ -8055,11 +8933,14 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         amt = qty if side == 'buy' else -qty                                       
         ent = order(sec, amt, limit_price=limit) if limit else order(sec, amt)
         _sb, _sbc = _seal_metrics(sec)                           
+        _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
-                          'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}
+                          'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
+                          'break_cnt_at_send': _bc_send}                        
         if side == 'buy':
             _buy_commit_add(sec, qty, limit or px)                           
-        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s %s %s' % (_sn(sec), side, qty, amt, limit, ent, note, _lag))
+        log.info('order sent %s %s qty=%s amt=%s limit=%s ent=%s ft_state=%s %s %s' % (
+            _sn(sec), side, qty, amt, limit, ent, _ft_state_str(sec) if side == 'buy' else '-', note, _lag))
         _signal(sec, side, qty, limit, mode, note, ent=ent, status='SENT')
         return True
     except Exception as e:
@@ -8091,6 +8972,15 @@ def place_expected_order(context, sec, note=''):
         return False                                                             
                                                        
     mode = 'board' if (up and px and px >= up * 0.998) else 'chase'
+    if mode == 'board' and BLS.get('exp_board_queue_gate', True):
+        _ok, _r = _exp_board_gate(sec)
+        if not _ok:
+            _bc = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0)
+            _skip_log('exp_board', sec, _r,
+                      '[exp-board-gate] %s break_cnt=%d 未回封/封单不足(%s) -> 等回封后重评' % (
+                          _sn(sec), _bc, _r),
+                      throttle_sec=5.0)
+            return False                               
     limit = _order_limit(sec, 'buy', mode)
     _log_order_limit(sec, limit)                 
     p_for_size = limit or px
@@ -8102,22 +8992,28 @@ def place_expected_order(context, sec, note=''):
             log.info('[sim-min-lot] %s exp buy qty 0->%d (SIM 最小一手兜底)' % (_sn(sec), qty))
         else:
             _skip_log('exp_order', sec, 'qty0', 'exp order skip(qty<=0) %s' % _sn(sec)); return False
-    if not _buy_pos_ok(context, sec, qty, limit):
-        return False                  
+    qty = _buy_pos_cap_qty(context, sec, qty, limit)
+    if qty <= 0:
+        return False                                       
+    _qty_calc_log(context, sec, 'exp-order')
     if BLS.get('EXPECT_ORDER', False):
         try:
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             _sb, _sbc = _seal_metrics(sec)                              
+            _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
-                              'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc}                             
+                              'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
+                              'break_cnt_at_send': _bc_send}                                          
             _buy_commit_add(sec, qty, limit or px)                   
-            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s ready=%s %s %s (EXPECT_ORDER=True)' % (_sn(sec), qty, limit, ent, rd, note, _lag))
+            log.info('[exp-order] %s buy qty=%s limit=%s ent=%s ready=%s ft_state=%s %s %s (EXPECT_ORDER=True)' % (
+                _sn(sec), qty, limit, ent, rd, _ft_state_str(sec), note, _lag))
             _signal(sec, 'BUY', qty, limit, mode, note, ent=ent, status='SENT')
             return True
         except Exception as e:
             log.error('exp order fail %s: %r' % (_sn(sec), e))
             return False
-    log.info('[exp-order] %s buy qty=%s limit=%s ready=%s %s %s (EXPECT_ORDER=False)' % (_sn(sec), qty, limit, rd, note, _lag))
+    log.info('[exp-order] %s buy qty=%s limit=%s ready=%s ft_state=%s %s %s (EXPECT_ORDER=False)' % (
+        _sn(sec), qty, limit, rd, _ft_state_str(sec), note, _lag))
     _signal(sec, 'BUY', qty, limit, mode, note, ent='', status='SIM')
     return True
 
@@ -8208,6 +9104,10 @@ def on_trade_response(context, trade_list):
                         p['status'] = 'FILLED'
                     else:
                         p['status'] = 'PARTIAL'
+                    _bq = getattr(g, 'bought_qty', None)
+                    if not isinstance(_bq, dict):
+                        _bq = {}; g.bought_qty = _bq
+                    _bq[code] = int(_bq.get(code, 0) or 0) + qty                                     
                     _buy_commit_rel(code, qty, float(p.get('limit') or 0.0))             
                 log.info('on_trade_response %s qty=%s raw_side=%s pend_side=%s eff=%s' % (
                     _sn(code), qty, side, _ps, _eff))
@@ -8231,6 +9131,9 @@ def load_state():
         _d.setdefault('bought', [])
         _d.setdefault('bought_board', [])
         _d.setdefault('bought_other', [])
+        for _k in _BUY_STRATEGY_KINDS:
+            _d.setdefault('bought_' + _k, [])
+        _d.setdefault('bought_kind', {})
         g.daily = _d
         g.exp_fired = set(st.get('exp_fired') or [])
         g.state_day = st.get('day')
@@ -8271,6 +9174,8 @@ def load_state():
             g.p7b_sold = set(st.get('p7b_sold') or [])
             g.p7c_part = dict(st.get('p7c_part') or {})
             g.p7c_sold = set(st.get('p7c_sold') or [])
+            g.p7d_sold = set(st.get('p7d_sold') or [])
+            g.p6_weak = dict(st.get('p6_weak') or {})                         
             g.pending = {k: dict(v) for k, v in (st.get('pending') or {}).items()}                     
             g.buy_commit = dict(st.get('buy_commit') or {})                     
             g.lb_senti = dict(st.get('lb_senti') or {})                         
@@ -8278,6 +9183,9 @@ def load_state():
             g.ma5_touched = set(st.get('ma5_touched') or [])                       
             g.ma5_lifecycle_day = st.get('ma5_lifecycle_day')
             g.ma5_lows = {k: list(v or [])[:2] for k, v in (st.get('ma5_lows') or {}).items()}
+            g.ma5_pending = set(st.get('ma5_pending') or [])                     
+            g.bought_qty = dict(st.get('bought_qty') or {})                        
+            g.hist_recover_once = dict(st.get('hist_recover_once') or {})                      
         else:
             g.auction_c = {}                             
             g.first_zt = {}                                   
@@ -8292,15 +9200,21 @@ def load_state():
             g.lb_senti = {}                           
             g.ma5_touch_day = None; g.ma5_touched = set()                     
             g.ma5_lifecycle_day = None; g.ma5_lows = {}                      
+            g.ma5_pending = set()                                                
+            g.p6_weak = {}                           
             g.exp_day = None                      
             g.exp_file = {}                        
+            g.bought_qty = {}                      
+            g.hist_recover_once = {}                     
     except Exception:
         g.buy_log = {}; g.sold_log = {}
-        g.daily = {'bought': [], 'bought_board': [], 'bought_other': [], 'sold': []}; g.state_day = None
+        g.daily = _new_daily(); g.state_day = None
         g.exp_fired = set(); g.ma5_touch_day = None; g.ma5_touched = set()
-        g.ma5_lifecycle_day = None; g.ma5_lows = {}
+        g.ma5_lifecycle_day = None; g.ma5_lows = {}; g.ma5_pending = set()
+        g.p6_weak = {}                                  
         g.auction_c = {}; g.first_zt = {}                                 
         g.exp_file = {}                                          
+        g.bought_qty = {}; g.hist_recover_once = {}                   
 
 def _save_state():
                                                         
@@ -8331,13 +9245,18 @@ def _save_state():
                          'p7b_sold': sorted(getattr(g, 'p7b_sold', None) or []),
                          'p7c_part': dict(getattr(g, 'p7c_part', None) or {}),
                          'p7c_sold': sorted(getattr(g, 'p7c_sold', None) or []),
+                         'p7d_sold': sorted(getattr(g, 'p7d_sold', None) or []),
+                         'p6_weak': dict(getattr(g, 'p6_weak', None) or {}),                  
                          'pending': {k: dict(v) for k, v in (getattr(g, 'pending', None) or {}).items()},                  
                          'buy_commit': dict(getattr(g, 'buy_commit', None) or {}),
                          'lb_senti': dict(getattr(g, 'lb_senti', None) or {}),
                          'ma5_touch_day': getattr(g, 'ma5_touch_day', None),
                          'ma5_touched': sorted(getattr(g, 'ma5_touched', None) or []),
                          'ma5_lifecycle_day': getattr(g, 'ma5_lifecycle_day', None),
-                         'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {})}, f, protocol=2)
+                         'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {}),
+                         'ma5_pending': sorted(getattr(g, 'ma5_pending', None) or []),
+                         'bought_qty': dict(getattr(g, 'bought_qty', None) or {}),                      
+                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {})}, f, protocol=2)                    
     except Exception as e:
         _warn('save_state fail %r' % e)
 
@@ -8367,6 +9286,8 @@ def after_trading_end(context, data):
             log.info('[l2-big-sum] 当日买入/卖出大单(买-卖=净, 元): %s' % ' | '.join(_parts))
     except Exception:
         pass
-    log.info('buysell_core end bought=%s board=%d other=%d sold=%s' % (
+    _strategy_used = ' '.join('%s=%d/%d' % (
+        k, len(g.daily.get('bought_' + k) or []), _buy_slot_limit(k)) for k in _BUY_STRATEGY_KINDS)
+    log.info('buysell_core end bought=%s board=%d total=%d %s sold=%s' % (
         _snl(g.daily.get('bought')), len(g.daily.get('bought_board') or []),
-        len(g.daily.get('bought_other') or []), _snl(g.daily.get('sold'))))
+        len(g.daily.get('bought') or []), _strategy_used, _snl(g.daily.get('sold'))))
