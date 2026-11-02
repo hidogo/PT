@@ -7,7 +7,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.23"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
+STRATEGY_VERSION = "v1.24"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
 
 
 def _warn(msg):
@@ -334,6 +334,16 @@ BLS = {
     'seal_low_fast_ratio': 0.15,     # v1.23 封单骤减快确认：seal <= 首封*该比例（含0）时 1 帧即卖，保灵敏度
     'seal_low_batch_invalid_ratio': 0.3,  # v1.23 同帧 L2 十档缺失占比超阈值 -> 整批不健康，跳过 SEAL_LOW 卖出
     'seal_low_batch_invalid_min': 5,      # v1.23 整批不健康的缺失家数下限（与占比同时满足才熔断）
+    # v1.24 竞价-开盘-10:00 跌停题材因子（docs/43 扩展）：全市场跌停归集到题材/概念，
+    # 作用方向分减分与题材级回避；昨日涨停池成员今日跌停视为强负反馈
+    'ld_senti_enabled': True,          # 跌停题材因子总开关
+    'ld_theme_soft_min': 1,            # 所属概念/题材跌停 >= N -> 方向分减分
+    'ld_theme_hard_min': 2,            # 所属概念跌停 >= N -> avoid 直接不参与
+    'ld_theme_penalty': 0.8,           # 题材跌停减分幅度（默认抵消 attack bonus）
+    'ld_zt_ld_hard_enabled': True,     # 昨日涨停池成员今日跌停 >=1 -> 所属题材 hard 回避
+    'ld_market_soft_n': 20,            # 全市场跌停家数 >= N -> 全局方向分减分
+    'ld_market_penalty': 0.3,          # 全市场跌停扩散减分幅度
+    'ld_sort_penalty': 1.5,            # 有跌停题材的排序加分扣减（硬回避时归零）
     'sealed_fresh_secs': 5.0,        # 封死判定持续 N 秒才生效（防瞬时零卖盘误判不排单）
     'sealed_offerqty_enabled': True, # 用 total_offerqty==0 判封死（快照总委卖量；缺失回退 ask_grp 空判）
     # 打分引擎（AXquant 默认）
@@ -786,6 +796,8 @@ def initialize(context):
     g.hold_stand_log = {}    # v0.59 持仓地位日志节流（60s/股，不持久化）
     run_daily(context, auction_pre_confirm, time='09:25')
     run_daily(context, lb_senti_auction_retry, time='09:26')   # v1.16 竞价情绪未就绪补拉
+    run_daily(context, ld_senti_auction, time='09:25')   # v1.24 竞价终态跌停快照
+    run_daily(context, ld_senti_open, time='09:30')      # v1.24 开盘跌停快照
     run_daily(context, after_open_probe, time='09:31')
     run_daily(context, lb_senti_t100_freeze, time='10:00')   # v0.65 10:00 情绪冻结快照（之后降频监控不归零）
     run_daily(context, mid_probe, time='11:00')
@@ -2799,10 +2811,26 @@ def _market_red_ttl():
     return float(BLS.get('market_red_ttl', 60.0))
 
 
+def _ld_ratio(sec):
+    # 跌停幅（与 _limit_down_price 同口径）：主板 10%、创业板/科创板 20%、北交所 30%；ST 5% 不单独建模（策略已剔除 ST）
+    num = str(sec).split('.')[0]
+    if num.startswith(('300', '301', '688', '689')):
+        return float(BLS.get('limit_down_chinext', 0.20))
+    if num.startswith(('8', '4', '92')):
+        return float(BLS.get('limit_down_bse', 0.30))
+    return float(BLS.get('limit_down_main', 0.10))
+
+
 def _fetch_market_red(pool):
-    # 全量分片 get_snapshot 统计 涨/(涨+跌)（与 AXquant 生成侧口径一致，不含平盘）；无有效样本 -> None
+    # 全量分片 get_snapshot 统计 涨/(涨+跌)（与 AXquant 生成侧口径一致，不含平盘）；
+    # v1.24 同时统计跌停家数并按题材/概念归集（竞价-开盘-10:00 跌停因子）；无有效样本 -> None
     batch = max(int(BLS.get('market_batch', 300)), 1)
-    up = dn = 0
+    up = dn = ld_n = zt_ld_n = 0
+    ld_codes = []
+    theme_ld = {}
+    concept_ld = {}
+    zt = getattr(g, 'zt_lianban', {}) or {}
+    concept_ok = _concept_active()
     t0 = time.time()
     n_batch = 0
     for i in range(0, len(pool), batch):
@@ -2824,6 +2852,17 @@ def _fetch_market_red(pool):
                     up += 1
                 elif px < pre:
                     dn += 1
+                if px <= pre * (1.0 - _ld_ratio(code)) * 1.0001:
+                    ld_n += 1
+                    if len(ld_codes) < 200:
+                        ld_codes.append(code)
+                    for nm in _zt_themes_of(code):
+                        theme_ld[nm] = int(theme_ld.get(nm) or 0) + 1
+                    if concept_ok:
+                        for nm in _concept_boards_of(code):
+                            concept_ld[nm] = int(concept_ld.get(nm) or 0) + 1
+                    if code in zt:
+                        zt_ld_n += 1
             except Exception:
                 continue
     denom = up + dn
@@ -2831,14 +2870,22 @@ def _fetch_market_red(pool):
         log.info('[market-red] 无有效样本（全量分片 %d 批）-> None' % n_batch)
         return None
     ratio = float(up) / denom
-    log.info('[market-red] 全市场红盘比=%.2f%% up=%d dn=%d 批=%d 样本=%d 耗时=%.1fs'
-             % (ratio * 100.0, up, dn, n_batch, denom, time.time() - t0))
-    return ratio
+    out = {
+        'red': ratio, 'up': up, 'dn': dn,
+        'ld_n': ld_n, 'ld_codes': ld_codes,
+        'theme_ld': theme_ld, 'concept_ld': concept_ld,
+        'zt_ld_n': zt_ld_n, 'zt_ld_codes': [c for c in ld_codes if c in zt][:30],
+    }
+    _top_ld_theme = sorted(theme_ld.items(), key=lambda kv: -kv[1])[:3]
+    log.info('[market-red] 全市场红盘比=%.2f%% up=%d dn=%d 跌停=%d 池内跌停=%d 题材=%s 批=%d 样本=%d 耗时=%.1fs'
+             % (ratio * 100.0, up, dn, ld_n, zt_ld_n,
+                ','.join('%s:%d' % (k, v) for k, v in _top_ld_theme),
+                n_batch, denom, time.time() - t0))
+    return out
 
 
-def _market_red_ratio():
-    # 全市场红盘比（v0.41）：get_Ashares 全量分片 get_snapshot 统计，独立预算源 market；
-    # 失败/无池 -> None（上层降级基线驱动保守上限）。日切随 DataHub 缓存 key(day) 失效。
+def _market_pool():
+    # 全市场代码池（按交易日缓存，get_Ashares 失败 -> 空池）
     try:
         day = str(get_trading_day())
         if getattr(g, 'pool_day', '') != day:
@@ -2848,12 +2895,35 @@ def _market_red_ratio():
             except Exception as e:
                 _warn('market-red get_Ashares fail: %r' % e)
                 g.pool_all = []
-        pool = list(g.pool_all or [])
+    except Exception:
+        pass
+    return list(g.pool_all or [])
+
+
+def _market_ld_senti(force_fetch=False):
+    # v1.24 全市场跌停因子：复用 mkt_red 缓存（同一轮全量快照统计红盘比+跌停归集）；
+    # force_fetch=True（09:25/09:30/10:00 阶段快照）ttl=0 强制刷新并写缓存。
+    try:
+        pool = _market_pool()
         if not pool:
             return None
+        day = str(get_trading_day())
         dh = _get_ds()
-        return dh.cached(('mkt_red', day), '_mkt_', _market_red_ttl(),
-                         lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
+        ttl = 0.0 if force_fetch else _market_red_ttl()
+        d = dh.cached(('mkt_red', day), '_mkt_', ttl,
+                      lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
+        return d if isinstance(d, dict) else None
+    except Exception as e:
+        _warn('market-ld fail: %r' % e)
+        return None
+
+
+def _market_red_ratio():
+    # 全市场红盘比（v0.41）：get_Ashares 全量分片 get_snapshot 统计，独立预算源 market；
+    # 失败/无池 -> None（上层降级基线驱动保守上限）。日切随 DataHub 缓存 key(day) 失效。
+    try:
+        d = _market_ld_senti()
+        return d.get('red') if isinstance(d, dict) else None
     except Exception as e:
         _warn('market-red fail: %r' % e)
         return None
@@ -3749,6 +3819,11 @@ def _zt_theme_sort_bonus(code):
     # v0.55/v0.56 题材强度/身位排序加分（_pool_exp_priority）：动态龙头 + 题材梯队名次 +
     # 新题材发酵（确认成员/前排）；仅参与排序观察、不放大追高（docs/41 §3.4 / docs/42 §3）。
     try:
+        # v1.24 跌停题材因子：所属题材/概念跌停 hard -> 排序加分归零；soft -> 扣减（回避/减分消费）
+        ld_hit = _ld_theme_hit(code)
+        if ld_hit and ld_hit.get('hard'):
+            return 0.0
+        ld_penalized = bool(ld_hit and int(ld_hit.get('n') or 0) >= int(BLS.get('ld_theme_soft_min', 1)))
         st = _dyn_theme_status()
         fm = _dyn_theme_ferment()
         best = 0.0
@@ -3777,6 +3852,8 @@ def _zt_theme_sort_bonus(code):
                 best = max(best, float(BLS.get('zt_theme_ferment_front_bonus', 0.8) or 0.8))
             else:
                 best = max(best, float(BLS.get('zt_theme_ferment_sort_bonus', 0.5) or 0.5))
+        if ld_penalized:
+            best = max(0.0, best - float(BLS.get('ld_sort_penalty', 1.5)))
         return best
     except Exception:
         return 0.0
@@ -4025,6 +4102,7 @@ def _lb_senti_state():
     st.setdefault('cut_seen', {})
     st.setdefault('gate_seen', {})
     st.setdefault('reject_cnt', {})   # v1.12 方向闸门拒绝计数（heartbeat 审计）
+    st.setdefault('ld', {})           # v1.24 竞价-开盘-10:00 跌停题材因子（auction/open/t100）
     return st
 
 
@@ -4366,6 +4444,10 @@ def lb_senti_t100_freeze(context):
                 ('%.2f' % d['red']) if d.get('red') is not None else '-',
                 int(d.get('low_assist') or 0), int(d.get('new_dir_n') or 0),
                 dir_n['attack_high'], dir_n['attack_low'], dir_n['avoid']))
+    try:
+        _ld_senti_snapshot('t100')   # v1.24 10:00 跌停题材因子冻结
+    except Exception:
+        pass
     _save_state()
 
 
@@ -4483,6 +4565,45 @@ def _exp_original_theme_leader(sec):
     return ''
 
 
+def _ld_theme_hit(sec, old_themes=None, new_themes=None):
+    # v1.24 所属题材/概念跌停命中（消费 _market_ld_senti 全市场归集）：
+    #   theme_ld = 昨日涨停池题材桶内跌停（强负反馈，>=1 即 hard）；
+    #   concept_ld = 全市场 THS 概念跌停（>=ld_theme_hard_min 才 hard，否则减分）。
+    # 数据缺失返回 None，绝不把“无数据”当“无跌停”。
+    if not BLS.get('ld_senti_enabled', True):
+        return None
+    try:
+        if _hhmm() < '09:25':
+            # 竞价终态前无有效跌停口径（last_px 尚未进入竞价），不消费也不视为无跌停
+            return None
+        d = _market_ld_senti()
+        if not d:
+            return None
+        old = list(old_themes) if old_themes is not None else _zt_themes_of(sec)
+        new = list(new_themes) if new_themes is not None else _new_themes_of(sec)
+        theme_ld = d.get('theme_ld') or {}
+        concept_ld = d.get('concept_ld') or {}
+        n_old = max((int(theme_ld.get(t) or 0) for t in old), default=0) if old else 0
+        concepts = []
+        for nm in new:
+            if str(nm).startswith('THS:'):
+                concepts.append(str(nm).split(':', 1)[1])
+        if _concept_active():
+            concepts.extend(_concept_boards_of(sec))
+        n_new = max((int(concept_ld.get(c) or 0) for c in concepts), default=0) if concepts else 0
+        n = max(n_old, n_new)
+        hard = (n_old >= 1 and bool(BLS.get('ld_zt_ld_hard_enabled', True))) \
+            or n_new >= int(BLS.get('ld_theme_hard_min', 2))
+        name = ''
+        if n_old > 0:
+            name = max(old, key=lambda t: int(theme_ld.get(t) or 0))
+        elif n_new > 0:
+            name = max(concepts, key=lambda c: int(concept_ld.get(c) or 0))
+        return {'hard': hard, 'n': n, 'theme': name, 'n_old': n_old, 'n_new': n_new}
+    except Exception:
+        return None
+
+
 def _exp_direction_eval(sec):
     # v0.71 预期买入方向裁判：attack_high/attack_low 仅排序 +0.8；avoid 直接不参与。
     # 技术三态 CX/CM/PM/CS 不在此函数内改变，仓位比例也不消费 direction score。
@@ -4566,6 +4687,25 @@ def _exp_direction_eval(sec):
         elif tier in ('mid', 'high'):
             out['role'] = 'follower'
 
+        # v1.24 跌停题材因子消费：硬回避优先（昨日涨停池题材跌停 >=1 或所属概念跌停 >=hard_min），
+        # 软命中只减方向分（默认抵消 attack bonus），全市场跌停扩散再全局减分，均不改仓位规则。
+        ld_hit = _ld_theme_hit(sec, old_themes, new_themes)
+        if ld_hit and ld_hit.get('hard'):
+            out.update(kind='avoid',
+                       theme=ld_hit.get('theme') or out.get('theme') or '',
+                       reason='theme_limit_down(n=%d,old=%d)' % (ld_hit.get('n'), ld_hit.get('n_old')))
+            out['ld_hit'] = ld_hit
+        else:
+            _ld = _market_ld_senti()
+            if ld_hit and int(ld_hit.get('n') or 0) >= int(BLS.get('ld_theme_soft_min', 1)):
+                out['score'] = float(out.get('score') or 0.0) - float(BLS.get('ld_theme_penalty', 0.8))
+                out['ld_hit'] = ld_hit
+                out['ld_penalized'] = True
+            if _ld and int(_ld.get('ld_n') or 0) >= int(BLS.get('ld_market_soft_n', 20)):
+                out['score'] = float(out.get('score') or 0.0) - float(BLS.get('ld_market_penalty', 0.3))
+                out['market_ld_n'] = int(_ld.get('ld_n') or 0)
+            out['score'] = max(0.0, out['score'])
+
         out['hard_skip'] = bool(out['kind'] == 'avoid'
                                 and BLS.get('exp_direction_avoid_hard_skip', True))
         if out['kind'] == 'avoid':
@@ -4603,6 +4743,12 @@ def _lb_senti_gate_apply(sec, action):
     try:
         if not BLS.get('lb_senti_gate_all_buys_enabled', True):
             return True
+        # v1.24 跌停题材因子：所属题材/概念 hard 命中时首板/回封/弹性同样回避（与方向裁判同口径）
+        ld_hit = _ld_theme_hit(sec)
+        if ld_hit and ld_hit.get('hard'):
+            _note = 'theme_ld_hard(n=%d,old=%d)' % (ld_hit.get('n'), ld_hit.get('n_old'))
+            _lb_gate_seen(sec, _note, action)
+            return False
         allow, note = _lb_senti_buy_gate(sec)
         if not allow:
             _lb_gate_seen(sec, note, action)
@@ -8690,8 +8836,54 @@ def lb_senti_auction_retry(context):
         else:
             log.info('[lb-senti] auction retry 09:26 got=0 ready=%s missing=%d'
                      % (a.get('ready'), len(_missing or [])))
+        # v1.24 竞价跌停快照缺失补拉（09:25 run_daily 预算/数据异常时兜底，幂等）
+        st2 = _lb_senti_state()
+        if not (st2.get('ld') or {}).get('auction'):
+            _ld_senti_snapshot('auction')
     except Exception as e:
         _warn('lb_senti auction retry fail: %r' % e)
+
+
+def _ld_senti_snapshot(stage='auction'):
+    # v1.24 跌停题材因子阶段快照：强制刷新全市场统计并落 st['ld']（竞价 09:25 -> 开盘 09:30 -> 10:00）。
+    # 数据缺失只打日志不写档，消费端以最新可用档位为准，绝不把“无数据”当“无跌停”。
+    if not BLS.get('ld_senti_enabled', True):
+        return None
+    try:
+        st = _lb_senti_state()
+        d = _market_ld_senti(force_fetch=True)
+        if not d:
+            log.info('[ld-senti] %s 跌停快照无数据 -> 不写档' % stage)
+            return None
+        rec = {
+            'ts': time.time(),
+            'n': int(d.get('ld_n') or 0),
+            'zt_ld_n': int(d.get('zt_ld_n') or 0),
+            'theme': dict(d.get('theme_ld') or {}),
+            'concept': dict(d.get('concept_ld') or {}),
+            'zt_ld_codes': list(d.get('zt_ld_codes') or [])[:30],
+        }
+        st.setdefault('ld', {})[stage] = rec
+        st['ld']['last'] = stage
+        st['ld']['ts'] = rec['ts']
+        _top = sorted(rec['theme'].items(), key=lambda kv: -kv[1])[:5]
+        log.info('[ld-senti] stage=%s 跌停=%d 昨日涨停池跌停=%d 题材=%s'
+                 % (stage, rec['n'], rec['zt_ld_n'],
+                    ','.join('%s:%d' % (k, v) for k, v in _top) or '-'))
+        return rec
+    except Exception as e:
+        _warn('ld-senti snapshot fail: %r' % e)
+        return None
+
+
+def ld_senti_auction(context):
+    _set_now(context)
+    _ld_senti_snapshot('auction')
+
+
+def ld_senti_open(context):
+    _set_now(context)
+    _ld_senti_snapshot('open')
 
 
 def after_open_probe(context):

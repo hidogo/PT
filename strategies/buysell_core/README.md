@@ -3,14 +3,31 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.23（2026-11-02）
+- 当前版本：v1.24（2026-11-02）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.23 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.24 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.24
+- v1.24 竞价-开盘-10:00 跌停题材因子（2026-11-02 用户要求“增加竞价终态-开盘-10:00的跌停数据因子，作用概念/题材的回避或减分消费”）：
+  - 数据链路：全市场分片 `get_snapshot` 与红盘比同轮统计（复用 `mkt_red` 缓存），
+    09:25 竞价终态 / 09:30 开盘 / 10:00 冻结三档强制快照
+    （`ld_senti_auction` / `ld_senti_open` / `lb_senti_t100_freeze` 内 `_ld_senti_snapshot`），
+    盘中 10:00 前 30s、之后 60s 渐进刷新；跌停判定按主板 10%/创业板科创板 20%/北交所 30% 限幅。
+  - 题材归集：跌停票按昨日涨停池题材桶（`theme_ld`）与 THS 概念文件（`concept_ld`）双向归集，
+    并统计昨日涨停池成员今日跌停家数（`zt_ld_n`）；概念文件未加载时只保留题材桶与全市场家数，不落 API。
+  - 消费规则：所属题材桶跌停 >=1（昨日涨停池内负反馈）或所属概念跌停 >=`ld_theme_hard_min=2`
+    时 `avoid` 直接不参与（预期买入/首板/回封/弹性共用 `_lb_senti_gate_apply`）；
+    软命中（>=`ld_theme_soft_min=1`）只扣方向分 `ld_theme_penalty=0.8`，全市场跌停
+    >=`ld_market_soft_n=20` 再全局扣 `ld_market_penalty=0.3`；有跌停题材的排序加分扣
+    `ld_sort_penalty=1.5`、硬回避时归零。数据缺失不拦截、不把“无数据”当“无跌停”。
+  - 测试：新增 `tests/test_buysell_core_v124_ld_factor.py`（跌停统计与归集、old/concept
+    软硬阈值、竞价前不消费、direction 减分/avoid、gate 拦截、排序扣减、三档快照落档），
+    全量 pytest 144 passed。
 
 ### v1.23
 - v1.23 SEAL_LOW 稳健性（2026-11-02 用户确认“尾盘竞价阶段适用两帧确认”，红太阳 14:57 L2 整批空档误卖根因修复）：
