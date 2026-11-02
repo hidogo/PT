@@ -206,3 +206,13 @@ def test_ld_senti_snapshot_missing_data_keeps_no_stage(mod):
     assert mod._ld_senti_snapshot("open") is None
     st = mod._lb_senti_state()
     assert "open" not in st["ld"]
+
+
+def test_ld_ttl_before_1000_is_fast(mod):
+    mod._hhmm = lambda: "09:45"
+    assert mod._ld_ttl() == pytest.approx(15.0)
+
+
+def test_ld_ttl_after_1000_is_slow(mod):
+    mod._hhmm = lambda: "10:05"
+    assert mod._ld_ttl() == pytest.approx(120.0)

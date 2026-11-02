@@ -7,7 +7,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.24"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
+STRATEGY_VERSION = "v1.25"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
 
 
 def _warn(msg):
@@ -344,6 +344,8 @@ BLS = {
     'ld_market_soft_n': 20,            # 全市场跌停家数 >= N -> 全局方向分减分
     'ld_market_penalty': 0.3,          # 全市场跌停扩散减分幅度
     'ld_sort_penalty': 1.5,            # 有跌停题材的排序加分扣减（硬回避时归零）
+    'ld_ttl_before': 15.0,             # v1.25 10:00 前跌停因子刷新 TTL（灵敏度优先，受 market budget 约束）
+    'ld_ttl_after': 120.0,             # v1.25 10:00 后跌停因子刷新 TTL（降频，避免无谓全量拉取）
     'sealed_fresh_secs': 5.0,        # 封死判定持续 N 秒才生效（防瞬时零卖盘误判不排单）
     'sealed_offerqty_enabled': True, # 用 total_offerqty==0 判封死（快照总委卖量；缺失回退 ask_grp 空判）
     # 打分引擎（AXquant 默认）
@@ -2811,6 +2813,13 @@ def _market_red_ttl():
     return float(BLS.get('market_red_ttl', 60.0))
 
 
+def _ld_ttl():
+    # v1.25 跌停题材因子刷新节奏：10:00 前灵敏度优先（15s），10:00 后降频（120s）
+    if _lb_senti_t100_passed():
+        return float(BLS.get('ld_ttl_after', 120.0))
+    return float(BLS.get('ld_ttl_before', 15.0))
+
+
 def _ld_ratio(sec):
     # 跌停幅（与 _limit_down_price 同口径）：主板 10%、创业板/科创板 20%、北交所 30%；ST 5% 不单独建模（策略已剔除 ST）
     num = str(sec).split('.')[0]
@@ -2909,7 +2918,7 @@ def _market_ld_senti(force_fetch=False):
             return None
         day = str(get_trading_day())
         dh = _get_ds()
-        ttl = 0.0 if force_fetch else _market_red_ttl()
+        ttl = 0.0 if force_fetch else _ld_ttl()
         d = dh.cached(('mkt_red', day), '_mkt_', ttl,
                       lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
         return d if isinstance(d, dict) else None

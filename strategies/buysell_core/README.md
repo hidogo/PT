@@ -3,14 +3,21 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.24（2026-11-02）
+- 当前版本：v1.25（2026-11-02）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.24 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.25 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.25
+- v1.25 跌停因子刷新节奏（2026-11-02 用户要求“10点后降频，10点前以最优灵敏度节奏刷新供方数据”）：
+  - 跌停题材因子独立 TTL：10:00 前 `ld_ttl_before=15.0s`（灵敏度优先），
+    10:00 后 `ld_ttl_after=120.0s`（降频，避免无谓全量拉取）；不再与红盘比 30s/60s 共用节奏。
+  - 09:25/09:30/10:00 三档强制快照不变；盘中消费端按新 TTL 渐进刷新，10:00 后仍不归零。
+  - 测试：新增 `test_ld_ttl_before_1000_is_fast` / `test_ld_ttl_after_1000_is_slow`。
 
 ### v1.24
 - v1.24 竞价-开盘-10:00 跌停题材因子（2026-11-02 用户要求“增加竞价终态-开盘-10:00的跌停数据因子，作用概念/题材的回避或减分消费”）：

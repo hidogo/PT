@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.24"                                                        
+STRATEGY_VERSION = "v1.25"                                                        
 
 def _warn(msg):
                                                                  
@@ -333,6 +333,8 @@ BLS = {
     'ld_market_soft_n': 20,                                     
     'ld_market_penalty': 0.3,                       
     'ld_sort_penalty': 1.5,                                  
+    'ld_ttl_before': 15.0,                                                                
+    'ld_ttl_after': 120.0,                                                   
     'sealed_fresh_secs': 5.0,                                    
     'sealed_offerqty_enabled': True,                                                  
                       
@@ -2643,6 +2645,12 @@ def _market_red_ttl():
         pass
     return float(BLS.get('market_red_ttl', 60.0))
 
+def _ld_ttl():
+                                                        
+    if _lb_senti_t100_passed():
+        return float(BLS.get('ld_ttl_after', 120.0))
+    return float(BLS.get('ld_ttl_before', 15.0))
+
 def _ld_ratio(sec):
                                                                                    
     num = str(sec).split('.')[0]
@@ -2736,7 +2744,7 @@ def _market_ld_senti(force_fetch=False):
             return None
         day = str(get_trading_day())
         dh = _get_ds()
-        ttl = 0.0 if force_fetch else _market_red_ttl()
+        ttl = 0.0 if force_fetch else _ld_ttl()
         d = dh.cached(('mkt_red', day), '_mkt_', ttl,
                       lambda: _fetch_market_red(pool), budget='market', stale_ok=True)
         return d if isinstance(d, dict) else None
