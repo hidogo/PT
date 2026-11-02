@@ -3,14 +3,29 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.25（2026-11-02）
+- 当前版本：v1.26（2026-11-02）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.25 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.26 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.26
+- v1.26 打板/扫板场景拆分（2026-11-02 用户确认“A 新题材首板扫板 / B 动态唯一扫板，其它打板统一涨停价首帧成交后最快买入”）：
+  - 提前扫板（`mode='sweep'`，卖2/上浮封顶涨停价）只保留 A/B 两场景：
+    A 新题材首板：09:30-09:40 + 新题材前排首板（`_ferment_front_gate`）+ 分时拉升
+    （`_two_1m_break`/`_limit_up_within_1m`）+ 均价跟随拉高（新增 `_vwap_follow_up`，
+    连续 2 帧均价走高）+ L2 净大单占比>=10%；B 动态唯一扫板窗口保留 09:30-10:00。
+  - 其余打板入口统一“涨停价首帧成交后最快打板”：首板 tx 首帧成交豁免封单硬门
+    （snap 兜底 `firstzt_min_seal`/`first_board_seal_min` 降为 5万）；
+    回封仅回封首帧（`reboard_ts` 新鲜 6s 内）且封单下限降为 5万；
+    预期买入删除 exp_chase 追涨路径，统一 board 占打板名额；
+    核心票必须过确认门（盘中超预期确认 或 L2 净量>=10%）且命中涨停价首帧时按 board 执行。
+  - 弹性 arb/top 保持“半路买点”（chase），不属于打板/扫板序列，L2>=10% 仅作加分；
+    MA5 低吸不变；sweep 排单同样纳入 `_board_queue_cancel` 炸板/封单衰减撤单保护。
+  - 测试：新增 `tests/test_buysell_core_v126_board_sweep_split.py`。
 
 ### v1.25
 - v1.25 跌停因子刷新节奏（2026-11-02 用户要求“10点后降频，10点前以最优灵敏度节奏刷新供方数据”）：

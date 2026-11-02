@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.23（2026-11-02）
-# 部署核对：日志首行 `buysell_core init version=v1.20 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.26（2026-11-02）
+# 部署核对：日志首行 `buysell_core init version=v1.26 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.25"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
+STRATEGY_VERSION = "v1.26"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
 
 
 def _warn(msg):
@@ -57,9 +57,8 @@ BLS = {
     'ma5_buy_score_min': 50.0,         # 5D低吸独立评分门槛（L2 净大单加分已并入 score_now）
     'ma5_buy_ratio': 0.10,             # 5D低吸单笔仓位=总资产10%
     'cold_secs': 60, 'daily_max_buy': 3,   # v1.21 总闸门：打板2 + 其它各策略1（用户确认 2026-11-02）
-    'daily_max_board_buy': 2,   # v1.14 打板类每日上限（首板/回封/扫板/预期board）；未成交终态释放不占名额
+    'daily_max_board_buy': 2,   # v1.14/v1.26 打板类每日上限（首板/回封/预期board/扫板A+B）；未成交终态释放不占名额
     'daily_strategy_buy_limit': {   # v1.21 其它策略各独立1个名额，不共用（用户确认 2026-11-02）
-        'exp_chase': 1,             # 预期买入（非涨停价路径）
         'ma5': 1,                   # 5D 低吸
         'core': 1,                  # 核心票买入
         'elastic_arb': 1,           # 弹性套利 arb
@@ -70,7 +69,7 @@ BLS = {
     'tick_exp_enabled': True,       # 预期买入走 tick_data 3s 事件触发（敏捷）
     'exp_order_pct': 0.10,          # 预期买入单笔仓位比例（预算规则「打板20%、其它10%」；实盘测试可调小，如 0.01）
     'buy_chase_pct': 0.008,         # 追高分时确认买入：限价较现价上浮比例（防过度追高）
-    'buy_limit_use_sell2': True,    # v1.12 追高/预期买入限价取 L2 卖2价（仅 chase/expected，用户确认）
+    'buy_limit_use_sell2': True,    # v1.12/v1.26 追高/扫板限价取 L2 卖2价（chase/sweep，用户确认）
     'buy_limit_sell2_level': 2,     # v1.12 卖2档位（ask_grp level；缺失/异常回退 buy_chase_pct）
     'order_limit_log': True,        # v1.12 下单限价来源核对日志（[order-limit] src=sell2/pct）
     'price_precision': 2,           # A股限价单价格精度（取整 2 位小数）
@@ -135,7 +134,7 @@ BLS = {
     'board_queue_cancel_break_enabled': True, # v1.18 在途 break_cnt 增加且未回封 -> 撤单（排单成交保护）
     'exp_board_queue_gate': True,             # v1.18 预期打板：已有 break 历史需回封+封单达标才下板单
     'exp_board_queue_max_sec': 600.0,         # v1.18 在途 break 保护窗口（窗口内出现 break/封单衰减才撤，不硬撤稳定封单）
-    'firstzt_min_seal': 200000.0,      # 首此涨停上报最小封单额(元)，过滤假封
+    'firstzt_min_seal': 50000.0,      # v1.26 快照兜底最小封单额(元)防假封；tx 首帧成交豁免
     'firstzt_min_bids': 5,            # 首此涨停上报最小买一挂单量(手)
     # v0.49 炸板应对收紧 + 回封打板（docs/33）
     'break_sell_bid_level': 3,        # 炸板卖出限价：L2 买N档价（默认买3）
@@ -145,7 +144,7 @@ BLS = {
     'reboard_buy_enabled': True,      # 回封打板总开关（前排首板/2板 10:00前炸板回封）
     'reboard_until_minute': 30,       # 回封打板生命周期：09:30-10:00
     'reboard_max_lianban': 2,         # 回封仅限首板或2板
-    'reboard_seal_min': 200000.0,      # 回封封单下限(元)（与大单加持二选一）
+    'reboard_seal_min': 50000.0,      # v1.26 回封封单下限(元)（20万->5万提灵敏度）
     'reboard_l2_big_min': 0.10,       # 回封要求大单占比>=10%实时成交量
     'tick_full_sell_enabled': True,      # v0.53 持仓监控全覆盖：P4/P5/P6 并入 3s tick（1m sell_manager 兜底）
     'frame_sellscan_limit': 8,           # v0.53 帧内评分卖出持仓数上限（持仓一般<=5 天然不超）
@@ -229,7 +228,12 @@ BLS = {
     'exp_meet_require_intraday_confirm': True,  # v1.11 meet/未标注买入强制分时确认（两1m强势或1分钟内触板，且不破VWAP）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
-    'first_board_seal_min': 200000.0,   # 首板打板最小封单额(元)（与 firstzt 门槛一致）
+    'first_board_seal_min': 50000.0,   # v1.26 首板打板最小封单额(元)：tx 首帧成交豁免，仅 snap 兜底
+    'new_theme_sweep_enabled': True,   # v1.26 A 新题材首板提前扫板总开关
+    'new_theme_sweep_window_min': 10,  # v1.26 A 扫板窗口：开盘 10 分钟（09:30-09:40）
+    'vwap_follow_frames': 2,           # v1.26 分时均价跟随拉高：连续 N 帧均价走高
+    'vwap_follow_min_rise': 0.0005,    # v1.26 均价走高容忍（相对涨幅，防同值抖动）
+    'board_first_frame_fresh_sec': 6.0, # v1.26 涨停价首帧新鲜窗口（首帧成交后 6s 内打板）
     'dyn_unq_mid_skip': True,          # v0.46 竞价唯一预判跳过中位股（与 _mid_board_avoid 统一口径）
     'dyn_unq_require_board_map': True, # v0.73 竞价唯一需板块成员映射成功（防竞品=0 假唯一）
     'dyn_unq_auction_member_cap': 15,   # v0.73 竞价唯一板块成员参与上限（兜底口径）
@@ -721,6 +725,7 @@ def initialize(context):
     g.now_dt = None     # 当前 bar 时间（context.blotter.current_dt，回测/交易均可用）
     g.bar_counter = 0
     g.vwap_below_since = {}  # sec -> 连续低于VWAP计时起点(_sec_age值)；高于VWAP即移除(恢复归零)
+    g.vwap_track = {}     # v1.26 A 扫板分时均价跟随帧跟踪（sec -> {vwap,cnt,ts}）
 
     g.pool_all = []     # 全市场 A 股代码（按交易日刷新）
     g.pool_day = None
@@ -908,7 +913,7 @@ def _maybe_roll_day():
     g.ma5_lifecycle_day = day; g.ma5_lows = {}; g.ma5_pending = set()
     g.hist_prio_cache = {}; g.hist_na_pending = {}
     g.seal_base = {}; g.seal_bid_base = {}; g.first_zt = {}; g.sealed_warn = set(); g.first_board_fired = set(); g.break_sold = set(); g.seal_sold = set(); g.break2_sold = set(); g.board_cancel_log = set(); g.reboard_fired = False; g.sealed_since = {}; g.gear_cache = {}; g.m1_surge_cache = {}; _get_ds().reset(); g.one_word_open = set(); g.one_word_marked_open = False; g.rt_stats = {}; g.l2_big = {}; g.l2_big_probed = set(); g.l2_dir_dist = {}; g.l2_big_wm = {}; g.l2_big_seeded = set(); g.l2_big_seed_onjoin_ts = 0.0; g.l2_big_seed_onjoin_px = {}; g.l2_big_log_ts = {}; g.below_vwap_pending = {}; g.zt_new_cache = {}; g.zt_ferment_cache = {}; g.zt_ferment_stage = {}; g.zt_unmapped_n = 0; g.lb_senti = {}; g.lb_senti_cache = {}
-    g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0   # v0.74 跨日重置近涨停通道与扫描游标
+    g.near_scan = {}; g.scan_order = []; g.scan_order_day = None; g.scan_round = 0; g.scan_offset = 0; g.vwap_track = {}   # v0.74/v1.26 跨日重置近涨停通道与扫板均价跟踪
     g.first_zt_rebuild_pending = []; g.first_zt_rebuild_retry_ts = {}; g.first_zt_rebuild_ts = {}; g.first_zt_rebuild_attempts = {}; g.first_zt_rebuild_zt_seen = {}; g.restart_rebuild_hb_ts = 0.0; g.last_save_ts = 0.0; g.st_skip_log_ts = 0.0; g.skip_log_ts = {}; g.budget_log_ts = 0.0; g.budget_over_acc = {}; g.budget_deg_logged = set(); g.score_na_pending = {}; g.pos_cap_skips = 0; g.pos_cap_shrinks = 0; g.sell_skip_cnt = {}; g.order_limit_src = ''; g.sell_retry_cnt = {}   # v0.75/76/80/81/1.5 + v1.12/1.15 跨日重置
     g.hist_recover_once = {}; g.firstzt_log_ts = {}; g.bought_qty = {}   # v1.22 跨日重置恢复日志去重/炸板日志节流/买入成交累计
     return True
@@ -1024,6 +1029,10 @@ def handle_data(context, data):
         _try_dyn_unq(context)            # v0.38 盘中动态唯一+跟风+扫板（1m 兜底，状态幂等）
     except Exception as e:
         _warn('dyn_unq(1m) fail: %r' % e)
+    try:
+        _try_new_theme_sweep(context)    # v1.26 A 新题材首板扫板（1m 兜底）
+    except Exception as e:
+        _warn('new_theme_sweep(1m) fail: %r' % e)
     try:
         _lb_senti_mid()                  # v0.65 连板盘中情绪状态机（1m 兜底，15s/60s 缓存节流）
     except Exception as e:
@@ -2225,6 +2234,32 @@ def _below_vwap(sec):
     vwap = float(s.get("wavg_px") or 0.0) if s else 0.0
     px = last_px(sec)
     return bool(px and vwap and px < vwap)
+
+
+def _vwap_follow_up(sec):
+    # v1.26 A 新题材首板扫板：现价 >= 分时均价，且均价连续 N 帧走高（分时拉升均价跟随拉高）。
+    try:
+        s = g.spot.get(sec) or {}
+        px = last_px(sec)
+        vwap = float(s.get('wavg_px') or 0.0)
+        if not px or not vwap or px < vwap:
+            return False
+        now = time.time()
+        track = getattr(g, 'vwap_track', None)
+        if track is None:
+            track = {}; g.vwap_track = track
+        prev = track.get(sec) or {}
+        frames = int(BLS.get('vwap_follow_frames', 2) or 2)
+        min_rise = float(BLS.get('vwap_follow_min_rise', 0.0005) or 0.0005)
+        rising = bool(prev.get('vwap') is not None
+                      and vwap >= float(prev['vwap']) * (1.0 - min_rise)
+                      and now - float(prev.get('ts') or 0.0) <= 15.0)
+        cnt = int(prev.get('cnt') or 0) + 1 if rising else 1
+        track[sec] = {'vwap': vwap, 'cnt': cnt, 'ts': now}
+        return cnt >= frames
+    except Exception:
+        return False
+
 
 def _below_vwap_confirm(sec):
     # v0.73 分时 VWAP 弱化确认：首帧宽限 + 贴板豁免 + 两帧确认，防 09:30 数据未稳定永久误弃；
@@ -5153,9 +5188,9 @@ def _attempt_expected_buy(context, code, direction=None):
     _s0 = (getattr(g, 'spot', None) or {}).get(code) or {}
     _px0 = float(_s0.get('last_px') or 0.0)
     _up0 = float(_s0.get('up_px') or 0.0)
-    _kind = 'board' if (_up0 > 0 and _px0 >= _up0 * 0.998) else 'exp_chase'   # v1.21 预期chase独立1个名额
+    _kind = 'board'   # v1.26 预期买入统一涨停价打板（删 exp_chase 追涨路径）
     if not _buy_slot_ok(_kind):
-        return None   # v1.21 分类每日闸门：预期board计入打板、预期chase独立1个名额
+        return None   # v1.26 预期买入计入打板类名额
     st, reason = _exp_rt_status(code)
     if st == PM and str(reason).startswith("observe"):
         eo = g.exp.setdefault(code, {})
@@ -5168,6 +5203,11 @@ def _attempt_expected_buy(context, code, direction=None):
         log.info("[exp] %s miss=%s -> skip" % (_sn(code), reason))
         return True
     if st in (CX, CM):
+        if not _board_first_frame_ok(code):
+            _skip_log('exp_board', code, 'no_first_frame',
+                      '[exp-board] %s %s 已确认但非涨停价首帧成交 -> 等待(不追涨)' % (_sn(code), reason),
+                      throttle_sec=5.0)
+            return None   # v1.26 不追涨：等涨停价首帧成交后按打板执行
         _exp_direction_log(code, dctx, 'allow')
         note = 'exp_rt %s %s dir=%s score=%.1f size_mult=1.0 reason=%s ft_state=%s' % (
             st, reason, dctx.get('kind') or 'neutral', float(dctx.get('score') or 0.0),
@@ -5395,9 +5435,78 @@ def _dyn_unq_eval_follow(sec, st, u):
         u['confirm'] = True; u['confirm_ts'] = now
         log.info('[dyn-unq] %s 跟风确认 %d家(1m>=%.1f%%) -> 确认' % (
             _sn(sec), surge_cnt, float(BLS.get('dyn_unq_surge_pct', 1.5))))
+
+
+def _try_new_theme_sweep(context):
+    # v1.26 A 新题材首板提前扫板（09:30-09:40）：新题材前排首板 + 分时拉升均价跟随拉高
+    # + L2 净大单占比>=10%；未触板时按 sweep(卖2/上浮封顶涨停价) 扫入，避免涨停价排队。
+    if not BLS.get('new_theme_sweep_enabled', True):
+        return
+    if _min_age() > int(BLS.get('new_theme_sweep_window_min', 10)):
+        return
+    if not _buy_slot_ok('board'):   # 扫板计入打板类（与打板共 2 名额）
+        return
+    positions = context.portfolio.positions
+    now = time.time()
+    _src = []
+    for _c in (list((getattr(g, 'near_scan', None) or {}).keys()) +
+               list(getattr(g, 'pool_static', None) or []) +
+               list(getattr(g, 'watch', None) or []) +
+               list((getattr(g, 'exp_file', None) or {}).keys())):
+        _x = _norm_sec(_c)
+        if _x:
+            _src.append(_x)
+    cands = list(dict.fromkeys(_src))
+    for sec in cands:
+        if sec in positions or sec in g.daily['bought']:
+            continue
+        if not trade_open(sec):
+            continue
+        if BLS.get('skip_st_pool', True) and _is_st(sec):
+            continue
+        if _is_one_word_open(sec) or _block_sealed_buy(sec):
+            continue
+        if not _is_first_board(sec):
+            continue
+        if _mid_board_avoid(sec):
+            _skip_log('sweep_a', sec, 'mid_avoid',
+                      '[sweep-a] %s 连板中位股规避 -> skip' % _sn(sec), throttle_sec=60.0)
+            continue
+        if _ferment_front_gate(sec) is not True:
+            continue                       # 仅新题材前排/最早存活首板
+        s = g.spot.get(sec) or {}
+        px = last_px(sec); up = float(s.get('up_px') or 0.0)
+        if not px or up <= 0 or px >= up * 0.998:
+            continue                       # 已触板/现价=涨停价：不扫，改走打板通道
+        if not (_two_1m_break(sec) or _limit_up_within_1m(sec)):
+            continue                       # 分时拉升（两分钟上攻/一分钟冲涨停）
+        if not _vwap_follow_up(sec):
+            continue                       # 分时均价跟随拉高
+        big = _l2_big_ratio(sec)
+        if not _l2_big_ok(sec):
+            continue                       # L2 净大单占比>=10%
+        if not _lb_senti_gate_apply(sec, 'sweep_a'):
+            continue
+        if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
+            continue
+        limit = _order_limit(sec, 'buy', 'sweep')
+        if not limit:
+            continue
+        themes = ','.join(_new_themes_of(sec)[:3])
+        if place_order(context, sec, 'buy',
+                       note='sweep_a px=%.2f limit=%.2f big=%s vwap_follow=1 themes=%s' % (
+                           px, limit, _fmt_big_ratio(big), themes),
+                       mode='sweep', ratio=float(BLS.get('board_buy_budget_ratio', 0.20))):
+            _buy_slot_add(sec, 'board'); g.buy_log[sec] = now
+            log.info('[sweep-a] %s order px=%.2f limit=%.2f big=%s themes=%s' % (
+                _sn(sec), px, limit, _fmt_big_ratio(big), themes))
+            _save_state()
+            return                                   # 一帧一单
+
+
 def _try_dyn_sweep(context, st=None):
-    # v1.11 D 竞价唯一扫板：竞价终态超预期+同身位竞品不及预期(竞价唯一)+开盘上攻冲板(_two_1m_break/
-    # _limit_up_within_1m)+跟风确认+现价<涨停价(未封板) -> 涨停价扫板(预算20%)，避免买不到；已封板不扫。
+    # v1.11/v1.26 B 动态唯一扫板：竞价终态超预期+同身位竞品不及预期(竞价唯一)+开盘上攻冲板(_two_1m_break/
+    # _limit_up_within_1m)+跟风确认+现价<涨停价(未封板) -> sweep(卖2/上浮封顶涨停价)扫入；已封板不扫。
     # 生命周期 09:30-10:00（dyn_sweep_window_minute=30，与动态唯一/预期买入窗口对齐）。
     if not BLS.get('dyn_sweep_enabled', True):
         return
@@ -5427,14 +5536,14 @@ def _try_dyn_sweep(context, st=None):
             continue                           # 开盘上攻冲板（两分钟上攻 或 一分钟冲涨停）
         if now - g.buy_log.get(sec, 0) < BLS['cold_secs']:
             continue
-        limit = _order_limit(sec, 'buy', 'board')
+        limit = _order_limit(sec, 'buy', 'sweep')
         if not limit:
-            log.info('[dyn-sweep] %s sealed -> no sweep' % _sn(sec))
+            log.info('[sweep-b] %s sealed -> no sweep' % _sn(sec))
             continue
         if place_order(context, sec, 'buy',
-                       note='dyn_sweep px=%.2f limit=%.2f 跟风%d家' % (
+                       note='sweep_b px=%.2f limit=%.2f 跟风%d家' % (
                            px, limit, (st.get('uniq', {}).get(sec) or {}).get('surge_cnt', 0)),
-                       mode='board', ratio=float(BLS.get('dyn_sweep_budget_ratio', 0.20))):
+                       mode='sweep', ratio=float(BLS.get('dyn_sweep_budget_ratio', 0.20))):
             _buy_slot_add(sec, 'board'); g.buy_log[sec] = now
             st['swept'][sec] = {'ts': now}
             _save_state()
@@ -5471,7 +5580,7 @@ def _try_dyn_unq(context):
             _dyn_unq_eval_follow(sec, st, u)       # B 跟风确认
         except Exception as e:
             _warn('dyn_unq %s fail %r' % (_sn(sec), e))
-    _try_dyn_sweep(context, st)                    # D 竞价唯一扫板
+    _try_dyn_sweep(context, st)                    # B 动态唯一扫板
 
 
 def _pool_exp_priority(code, direction=None):
@@ -5490,7 +5599,8 @@ def _pool_exp_priority(code, direction=None):
 
 # ---------- v1.21 每日买入分类闸门 ----------
 # 打板类 2 个名额；其它每个策略各自 1 个名额、不共用（用户确认 2026-11-02）。
-_BUY_STRATEGY_KINDS = ('exp_chase', 'ma5', 'core', 'elastic_arb', 'elastic_top')
+# v1.26 预期买入统一打板（删 exp_chase 追涨路径），扫板 A/B 计入打板类。
+_BUY_STRATEGY_KINDS = ('ma5', 'core', 'elastic_arb', 'elastic_top')
 _BUY_SLOT_LIST_KEYS = ('bought', 'bought_board') + tuple('bought_%s' % k for k in _BUY_STRATEGY_KINDS) + ('bought_other', 'legacy_other')
 
 
@@ -5710,9 +5820,21 @@ def try_ma5_buy(context):
                 g.ma5_touched.add(sec)   # 首次进入MA5带但评分/风控不达标：当日不再追补
 
 
+def _core_confirm_ok(sec):
+    # v1.26 核心票确认门：盘中超预期确认（两1m强势/1分钟内触板且不破VWAP），
+    # 或 L2 净大单占比>=10% 放行（用户确认“有大单净量>=10%可路”）。
+    try:
+        if _two_1m_break(sec) or _limit_up_within_1m(sec):
+            return not _below_vwap_confirm(sec)
+        return _l2_big_ok(sec)
+    except Exception:
+        return False
+
+
 def try_core_buy(context):
-    # 核心票买入（v0.18，对齐 AXquant CORE 门禁）：score>=buy_score_min 且 连板<core_max_lianban；
-    # 一字/封死涨停不排队；追高定价（封顶涨停/弹性10%上限）。tag CORE 已并入打分，本入口补门禁与执行。
+    # 核心票买入（v0.18/v1.26，对齐 AXquant CORE 门禁）：score>=buy_score_min 且 连板<core_max_lianban；
+    # 必须满足确认门（盘中超预期确认 或 L2 净量>=10%），且命中涨停价首帧成交时按打板点执行。
+    # 一字/封死涨停不排队；tag CORE 已并入打分，本入口补门禁与执行。
     if not BLS.get('core_buy_enabled', True):
         return
     if not _buy_slot_ok('core'):    # v1.21 核心票独立1个名额
@@ -5744,12 +5866,25 @@ def try_core_buy(context):
         px = last_px(sec)
         if not px or px <= 0:
             continue
+        if not _core_confirm_ok(sec):
+            _skip_log('core_buy', sec, 'confirm',
+                      '[core-board] %s 确认门未达(盘中超预期或L2净量>=10%%) -> skip' % _sn(sec),
+                      throttle_sec=60.0)
+            continue
+        if not _board_first_frame_ok(sec):
+            _skip_log('core_buy', sec, 'no_first_frame',
+                      '[core-board] %s 非涨停价首帧成交 -> 等待(不追涨)' % _sn(sec),
+                      throttle_sec=60.0)
+            continue
         score = score_now(sec)
         if not score:
             continue   # v0.68 评分未就绪 -> 不评估买入
         if score >= BLS['buy_score_min'] and _buy_red_ok(sec):
-            if place_order(context, sec, 'buy', note='core_buy px=%.2f score=%.1f tags=%s' % (px, score, ','.join(_tags(sec))), mode='chase'):
+            if place_order(context, sec, 'buy', note='core_buy px=%.2f score=%.1f tags=%s' % (
+                    px, score, ','.join(_tags(sec))),
+                    mode='board', ratio=float(BLS.get('board_buy_budget_ratio', 0.20))):
                 _buy_slot_add(sec, 'core'); g.buy_log[sec] = now
+                log.info('[core-board] %s order px=%.2f score=%.1f mode=board' % (_sn(sec), px, score))
                 _save_state()
                 if not _buy_slot_ok('core'):
                     break
@@ -5858,6 +5993,23 @@ def _first_zt_ms(sec):
     return int(time.strftime('%Y%m%d%H%M%S', lt)) * 1000 + int(float(ts) % 1 * 1000)
 
 
+def _board_first_frame_ok(sec):
+    # v1.26 涨停价首帧成交：现价=涨停价，且 firstzt 首触发生在 board_first_frame_fresh_sec 内。
+    # 打板类入口统一用该判定，避免对已封一段/排单靠后的票追板。
+    try:
+        s = g.spot.get(sec) or {}
+        px = last_px(sec)
+        up = float(s.get('up_px') or 0.0)
+        if not px or up <= 0 or px < up - 1e-9:
+            return False
+        ft = (g.first_zt or {}).get(sec) or {}
+        ts = float(ft.get('ts') or 0.0)
+        fresh = float(BLS.get('board_first_frame_fresh_sec', 6.0) or 6.0)
+        return bool(ts and time.time() - ts <= fresh)
+    except Exception:
+        return False
+
+
 def _ft_state_str(sec):
     # v1.18 预期买入审计：first_zt 的 src/ms/break_cnt/seal 快照（供复盘首帧失真与排单保护定位）
     ft = (getattr(g, 'first_zt', None) or {}).get(sec) or {}
@@ -5923,10 +6075,11 @@ def _try_first_board_buy(context, sec, rank_secs=None):
     amt, _cnt = _seal_metrics(sec)   # v0.46 首板封单下限（L2 买一挂单金额, 防假封秒炸）
     seal_min = float(BLS.get('first_board_seal_min', 50000.0))
     _big_r = _l2_big_ratio(sec)   # v0.47 大单加持：占比>=10% 豁免封单下限（预封扫板）
-    if seal_min > 0 and amt > 0 and amt < seal_min and not _l2_big_ok(sec):
+    _ft0 = (g.first_zt or {}).get(sec) or {}
+    if _ft0.get('src') != 'tx' and seal_min > 0 and amt > 0 and amt < seal_min and not _l2_big_ok(sec):
         log.info('[firstboard] %s 封单不足 seal=%.0f<%.0f 且无大单加持(big=%.2f%%) -> skip' % (
             _sn(sec), amt, seal_min, _big_r * 100.0 if _big_r >= 0 else 0.0))
-        return
+        return                       # v1.26 tx 首帧成交豁免封单硬门（保证最快打板）
     s = g.spot.get(sec) or {}
     up = float(s.get('up_px') or 0.0)
     if not up or up <= 0:
@@ -5935,13 +6088,14 @@ def _try_first_board_buy(context, sec, rank_secs=None):
     if not limit:
         log.info('[firstboard] %s sealed -> skip board queue' % _sn(sec))
         return
-    if place_order(context, sec, 'buy', note='first_board_buy px=%.2f limit=%.2f chg=%.1f%% tags=%s' % (
-        last_px(sec) or 0.0, limit, _sector_chg(sec) * 100.0, ','.join(_tags(sec))), mode='board',
+    if place_order(context, sec, 'buy', note='first_board_buy px=%.2f limit=%.2f chg=%.1f%% tags=%s ft=%s' % (
+        last_px(sec) or 0.0, limit, _sector_chg(sec) * 100.0, ','.join(_tags(sec)), _ft_state_str(sec)), mode='board',
         ratio=BLS.get('board_buy_budget_ratio', 0.20)):
         _buy_slot_add(sec, 'board'); g.buy_log[sec] = now
         if not getattr(g, 'first_board_fired', None):
             g.first_board_fired = set()
         g.first_board_fired.add(sec)
+        log.info('[board-feed] %s order limit=%.2f ft=%s' % (_sn(sec), limit, _ft_state_str(sec)))
         _save_state()
 
 
@@ -5969,6 +6123,9 @@ def _try_reboard_buy(context):
             continue
         if _is_one_word_open(sec) or sec in context.portfolio.positions:
             continue
+        fresh = float(BLS.get('board_first_frame_fresh_sec', 6.0) or 6.0)
+        if time.time() - float(ft.get('reboard_ts') or 0.0) > fresh:
+            continue                             # v1.26 仅回封首帧打板，错过不追
         if _mid_board_avoid(sec):
             continue
         if _limitup_days(sec) > int(BLS.get('reboard_max_lianban', 2)):
@@ -8752,6 +8909,11 @@ def tick_data(context, data):
         _try_dyn_unq(context)
     except Exception as e:
         _warn('dyn_unq fail: %r' % e)
+    # v1.26 A 新题材首板扫板（独立于动态唯一，窗口 09:30-09:40）
+    try:
+        _try_new_theme_sweep(context)
+    except Exception as e:
+        _warn('new_theme_sweep fail: %r' % e)
     # v0.81 帧末拉取预算统计（节流：常规 60s 心跳 + over/degraded 事件行，见 _budget_log）
     _budget_log()
 
@@ -8977,7 +9139,7 @@ def _log_order_limit(sec, limit):
 
 
 def _order_limit(sec, side, mode):
-    # 下单限价策略：板(涨停价) / 追高(现价上浮后封顶涨停价) / 回踩(现价) / 卖出(现价限价防急跌垃圾价)
+    # 下单限价策略：板(涨停价) / 追高+sweep(卖2或现价上浮后封顶涨停价) / 回踩(现价) / 卖出(现价限价防急跌垃圾价)
     s = g.spot.get(sec) or {}
     px = last_px(sec)
     up = float(s.get('up_px') or 0.0) if s else 0.0
@@ -9678,7 +9840,7 @@ def place_order(context, sec, side, qty=None, note='', mode='chase', ratio=None)
         amt = qty if side == 'buy' else -qty   # v1.10 PTrade order(amount) 正=买/负=卖
         ent = order(sec, amt, limit_price=limit) if limit else order(sec, amt)
         _sb, _sbc = _seal_metrics(sec)   # v1.6 打板排单封单基准（封单衰减撤单用）
-        _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
+        _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode in ('board', 'sweep') else 0
         g.pending[sec] = {'no': ent, 'side': side, 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
                           'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
                           'break_cnt_at_send': _bc_send}   # v1.18 在途 break 保护基准
@@ -9716,8 +9878,13 @@ def place_expected_order(context, sec, note=''):
         return False
     if _block_sealed_buy(sec):
         return False   # 一字/封死涨停：不排队买入（v0.15 对齐 AXquant limit_up_sealed_no_queue）
-    # 定价：冲板/一字 -> 打板(涨停价排队)；两分钟上攻(非涨停) -> 追高(现价上浮封顶涨停价)
-    mode = 'board' if (up and px and px >= up * 0.998) else 'chase'
+    if not _board_first_frame_ok(sec):
+        _skip_log('exp_order', sec, 'no_first_frame',
+                  '[exp-order] %s 非涨停价首帧成交 -> 等待(不追涨)' % _sn(sec),
+                  throttle_sec=5.0)
+        return False   # v1.26 预期买入统一打板，仅首帧涨停价成交后执行
+    # 定价：v1.26 预期买入统一涨停价打板（首帧成交后最快排队），不再走追高。
+    mode = 'board'
     if mode == 'board' and BLS.get('exp_board_queue_gate', True):
         _ok, _r = _exp_board_gate(sec)
         if not _ok:
@@ -9730,7 +9897,7 @@ def place_expected_order(context, sec, note=''):
     limit = _order_limit(sec, 'buy', mode)
     _log_order_limit(sec, limit)   # v1.12 限价来源审计
     p_for_size = limit or px
-    ratio = float(BLS.get('board_buy_budget_ratio', BLS.get('exp_order_pct', 0.3))) if mode == 'board' else float(BLS.get('exp_order_pct', 0.3))
+    ratio = float(BLS.get('board_buy_budget_ratio', BLS.get('exp_order_pct', 0.3)))
     qty = _calc_buy_qty(context, sec, p_for_size, ratio)
     if qty <= 0:
         if _sim_mode():
@@ -9746,7 +9913,7 @@ def place_expected_order(context, sec, note=''):
         try:
             ent = order(sec, qty, limit_price=limit) if limit else order(sec, qty)
             _sb, _sbc = _seal_metrics(sec)   # v1.6 一字/打板排单封单基准（封单衰减撤单用）
-            _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode == 'board' else 0
+            _bc_send = int((getattr(g, 'first_zt', None) or {}).get(sec, {}).get('break_cnt') or 0) if mode in ('board', 'sweep') else 0
             g.pending[sec] = {'no': ent, 'side': 'buy', 'qty': qty, 'limit': limit, 'status': 'SENT', 'filled': 0,
                               'ts': time.time(), 'mode': mode, 'seal_base': _sb, 'seal_bid_base': _sbc,
                               'break_cnt_at_send': _bc_send}   # v1.18 字段与 place_order 对齐 + break 保护基准

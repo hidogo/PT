@@ -79,7 +79,8 @@ def test_slot_kinds_independent_within_total(mod):
     assert mod._buy_slot_ok("ma5") is True
     assert mod._buy_slot_ok("elastic_arb") is True
     assert mod._buy_slot_ok("elastic_top") is True
-    assert mod._buy_slot_ok("exp_chase") is True
+    # v1.26 exp_chase 已删除，预期买入统一走 board；未知 kind 仍回落 bought_other 不阻塞
+    assert mod._buy_slot_ok("legacy_unknown") is True
 
 
 def test_total_max_3_stops_all_channels(mod):
@@ -133,12 +134,12 @@ def test_release_only_corresponding_kind(mod):
 
 def test_release_buy_slot_pops_exp_fired_and_kind(mod):
     mod.g.exp_fired = {"A"}
-    mod._buy_slot_add("A", "exp_chase")
+    mod._buy_slot_add("A", "core")
 
     mod._release_buy_slot("A")
 
     assert "A" not in mod.g.daily["bought"]
-    assert "A" not in mod.g.daily["bought_exp_chase"]
+    assert "A" not in mod.g.daily["bought_core"]
     assert "A" not in mod.g.daily["bought_kind"]
     assert "A" not in mod.g.exp_fired
 

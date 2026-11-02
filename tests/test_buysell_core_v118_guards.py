@@ -97,7 +97,7 @@ def test_place_expected_order_board_gate_waits_without_firing(mod):
 
 def test_place_expected_order_board_gate_allows_resealed(mod):
     mod.g.spot["A"] = {"last_px": 10.0, "up_px": 10.0}
-    mod.g.first_zt = {"A": {"break_cnt": 1, "break": False}}
+    mod.g.first_zt = {"A": {"break_cnt": 1, "break": False, "ts": mod.time.time()}}
     mod._mid_board_avoid = lambda sec: False
     mod._is_st = lambda sec: False
     mod.last_px = lambda sec: 10.0

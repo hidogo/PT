@@ -207,7 +207,8 @@ def test_cx_order_note_logs_direction_but_keeps_position_ratio(mod):
     notes = []
     mod.g = SimpleNamespace(
         exp_fired=set(), buy_log={}, exp={}, daily={"bought": []},
-        spot={"A": {"up_px": 10.0}}, pending={},
+        spot={"A": {"up_px": 10.0, "last_px": 10.0}}, pending={},
+        first_zt={"A": {"ts": mod.time.time()}},
     )
     mod._mid_board_avoid = lambda sec: False
     mod._lb_senti_buy_gate = lambda sec: (True, "normal")
@@ -217,10 +218,10 @@ def test_cx_order_note_logs_direction_but_keeps_position_ratio(mod):
     mod._save_state = lambda: None
     mod._exp_direction_log = lambda sec, ctx, action: None
     mod._rt_lag_info = lambda sec: (0.0, "ok")
-    mod.last_px = lambda sec: 9.8
+    mod.last_px = lambda sec: 10.0
     mod._avail_cash = lambda context: 1_000_000.0
     mod._block_sealed_buy = lambda sec: False
-    mod._order_limit = lambda sec, side, mode: 9.8
+    mod._order_limit = lambda sec, side, mode: 10.0
 
     def _calc(context, sec, px, ratio):
         captured["ratio"] = ratio
@@ -245,14 +246,15 @@ def test_cx_order_note_logs_direction_but_keeps_position_ratio(mod):
 
 def test_place_expected_order_ratio_is_independent_of_direction(mod):
     captured = {}
-    mod.g = SimpleNamespace(spot={"A": {"up_px": 11.0, "last_px": 10.5,
-                                        "open_px": 10.5, "wavg_px": 10.5}}, pending={})
+    mod.g = SimpleNamespace(spot={"A": {"up_px": 11.0, "last_px": 11.0,
+                                        "open_px": 10.5, "wavg_px": 10.5}}, pending={},
+                            first_zt={"A": {"ts": mod.time.time()}})
     mod._mid_board_avoid = lambda sec: False
     mod._rt_lag_info = lambda sec: (0.0, "ok")
-    mod.last_px = lambda sec: 10.5
+    mod.last_px = lambda sec: 11.0
     mod._avail_cash = lambda context: 1_000_000.0
     mod._block_sealed_buy = lambda sec: False
-    mod._order_limit = lambda sec, side, mode: 10.5
+    mod._order_limit = lambda sec, side, mode: 11.0
 
     def _calc(context, sec, px, ratio):
         captured["ratio"] = ratio
@@ -265,7 +267,7 @@ def test_place_expected_order_ratio_is_independent_of_direction(mod):
     ok = mod.place_expected_order(SimpleNamespace(), "A", note="direction ignored here")
 
     assert ok is True
-    assert captured["ratio"] == pytest.approx(mod.BLS["exp_order_pct"])
+    assert captured["ratio"] == pytest.approx(mod.BLS["board_buy_budget_ratio"])
 
 
 def test_attack_score_scales_after_1000_without_zeroing(mod):
