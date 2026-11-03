@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.30"                                                        
+STRATEGY_VERSION = "v1.31"                                                        
 
 def _warn(msg):
                                                                  
@@ -445,6 +445,17 @@ BLS = {
     'exp_direction_hot_front_only': True,                
     'exp_direction_rotate_leader_exception': True,                          
     'exp_direction_log': True,                       
+                                                                             
+    'senti_hist_enabled': True,                           
+    'senti_hist_keep_days': 10,                                   
+    'cold_streak_min': 3,                                          
+    'theme_overheat_zt_min': 20,                                                       
+    'warm_confirm_front_bonus': 0.4,                                      
+    'stage_rear_round_enabled': True,                                        
+    'stage_rear_cut_ratio': 0.5,                         
+    'stage_rear_max_rounds': 3,                                       
+    'stage_rear_round_gap_sec': 60.0,                                    
+    'senti_stage_cache_sec': 15.0,                                  
 }
                                                  
 BONUS = {
@@ -789,6 +800,9 @@ def initialize(context):
     g.zt_unmapped_n = 0                              
     g.lb_senti = {}                                             
     g.lb_senti_cache = {}                                
+    g.senti_hist = None                                                     
+    g.senti_stage_cache = None                                       
+    g.senti_stage_sell_log = {}                                    
     g.exp_file = {}                                  
     g.hist_prio_cache = {}                                     
     g.hist_na_pending = {}                                  
@@ -861,6 +875,7 @@ def before_trading_start(context, data):
     _load_expectation(merge=_restart_same_day)                                              
     _load_zt_lianban()
     _load_sentiment()
+    _senti_hist_load()                                     
     try:
         _load_boards()                                            
     except Exception:
@@ -4302,6 +4317,10 @@ def lb_senti_t100_freeze(context):
         _ld_senti_snapshot('t100')                         
     except Exception:
         pass
+    try:
+        _senti_hist_touch('t100')                         
+    except Exception as e:
+        _warn('senti_hist t100 touch fail: %r' % e)
     _save_state()
 
 def _lb_senti_direction_bonus(sec):
@@ -4599,6 +4618,304 @@ def _lb_gate_seen(sec, note, action='expected_buy'):
     except Exception:
         pass
 
+def senti_hist_fp():
+    return get_research_path() + 'sentiment_hist.pkl'
+
+def _senti_hist_paths():
+                                                            
+    return [r + 'sentiment_hist.pkl' for r in _research_roots()]
+
+def _senti_hist_load():
+                                                                
+    g.senti_hist = {}
+    for cand in _senti_hist_paths():
+        try:
+            with open(cand, 'rb') as f:
+                data = pickle.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        hist = {}
+        for d, r in data.items():
+            if not isinstance(r, dict):
+                continue
+            r2 = dict(r)
+            r2['date'] = str(r2.get('date') or d)
+            hist[str(d)] = r2
+        g.senti_hist = hist
+        log.info('[senti-hist] loaded %s -> days=%d' % (cand, len(hist)))
+        return len(hist)
+    log.info('[senti-hist] file not found (tried %s)' % _senti_hist_paths())
+    return 0
+
+def _senti_hist_save():
+                                          
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return 0
+        hist = getattr(g, 'senti_hist', None) or {}
+        keep = max(1, int(BLS.get('senti_hist_keep_days', 10) or 10))
+        dates = sorted(hist, reverse=True)[:keep]
+        out = {d: dict(hist[d]) for d in dates}
+        with open(senti_hist_fp(), 'wb') as f:
+            pickle.dump(out, f, protocol=2)
+        return len(out)
+    except Exception as e:
+        _warn('senti_hist save fail %r' % e)
+        return 0
+
+def _senti_baseline():
+                                                                     
+    s = getattr(g, 'sentiment', None)
+    if isinstance(s, dict) and (s.get('date') or s.get('ice') is not None or s.get('emotion')):
+        out = dict(s)
+        out.setdefault('hist_fallback', False)
+        return out
+    hist = getattr(g, 'senti_hist', None) or {}
+    today = str(get_trading_day())
+    prev = [r for d, r in sorted(hist.items()) if str(d) < today]
+    if prev:
+        r = dict(prev[-1])
+        flags = set(r.get('stage_flags') or [])
+        ice = bool(r.get('ice')) or ('cold' in flags)
+        out = {
+            'date': str(r.get('date') or ''),
+            'ice': ice,
+            'ice_streak': int(r.get('ice_streak') or (1 if ice else 0)),
+            'warm_days': int(r.get('warm_days') or 0),
+            'divergence': bool(r.get('divergence')) or bool(r.get('stage_flags') and 'diverging' in flags),
+            'emotion': str(r.get('emotion') or ''),
+            'emotion_basis': str(r.get('emotion_basis') or ''),
+            'phase': str(r.get('phase') or ''),
+            'hist_fallback': True,
+        }
+        return out
+    return {'hist_fallback': True, 'ice': False, 'ice_streak': 0, 'warm_days': 0, 'divergence': False,
+            'emotion': '', 'emotion_basis': '', 'phase': '', 'date': ''}
+
+def _senti_theme_zt_n():
+                                                
+    try:
+        dyn = _dyn_theme_status() or {}
+        fm = _dyn_theme_ferment() or {}
+        best_n = 0; best = ''
+        for name in list(dyn) + list(fm):
+            n = int((dyn.get(name) or {}).get('alive_count') or 0) \
+                + int((fm.get(name) or {}).get('assist_count') or 0)
+            if n > best_n:
+                best_n = n; best = str(name or '')
+        return best_n, best
+    except Exception:
+        return 0, ''
+
+def _theme_first_burst_day():
+                                                  
+    try:
+        hist = getattr(g, 'senti_hist', None) or {}
+        today = str(get_trading_day())
+        th = float(BLS.get('theme_overheat_zt_min', 20) or 20)
+        burst = set()
+        for d, r in sorted(hist.items()):
+            if str(d) >= today:
+                continue
+            fb = r.get('first_burst_themes') or []
+            if isinstance(fb, str) and fb:
+                burst.add(fb)
+            elif isinstance(fb, (list, tuple, set)):
+                burst.update(str(x) for x in fb)
+            if float(r.get('theme_zt_n') or 0) > th:
+                t = str(r.get('theme_zt_name') or '').strip()
+                if t:
+                    burst.add(t)
+        return burst
+    except Exception:
+        return set()
+
+def _senti_stage(force=False):
+                                                        
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return {'ts': time.time(), 'flags': set(), 'note': 'disabled'}
+        now = time.time()
+        day = str(get_trading_day())
+        cache = getattr(g, 'senti_stage_cache', None)
+        ttl = float(BLS.get('senti_stage_cache_sec', 15.0) or 15.0)
+        if not force and isinstance(cache, dict) and cache.get('day') == day \
+                and now - float(cache.get('ts') or 0) < ttl and cache.get('flags') is not None:
+            return cache
+        base = _senti_baseline()
+        hist = getattr(g, 'senti_hist', None) or {}
+        rec = hist.get(day) or {}
+        flags = set()
+        red = rec.get('red')
+        if red is None:
+            try:
+                red = _market_red_ratio()
+            except Exception:
+                red = None
+        base_ice = bool(base.get('ice'))
+        streak = max(int(base.get('ice_streak') or 0), 0)
+        warm_days = max(int(base.get('warm_days') or 0), 0)
+        ice_ratio = float(BLS.get('sentiment_ice_ratio', 0.40) or 0.40)
+        warm_min = float(BLS.get('sentiment_warm_min', 0.45) or 0.45)
+        warm_base = float(BLS.get('sentiment_warm_base', 0.55) or 0.55)
+        decay = float(BLS.get('sentiment_warm_decay', 0.02) or 0.02)
+        th = max(warm_min, warm_base - max(streak, 1) * decay)
+        if red is None:
+                                          
+            if not base_ice and warm_days > 0:
+                flags.add('warm_continue')
+        else:
+            today_cold = float(red) < ice_ratio
+            today_warm = not today_cold and float(red) >= th
+            if today_cold:
+                flags.add('cold')
+                if streak >= int(BLS.get('cold_streak_min', 3) or 3):
+                    flags.add('deep_ice')
+            elif today_warm:
+                if base_ice:
+                    flags.add('warm_confirm_day')
+                else:
+                    flags.add('warm_continue')
+        n, theme = _senti_theme_zt_n()
+        if n > int(BLS.get('theme_overheat_zt_min', 20) or 20):
+            burst = _theme_first_burst_day()
+            if theme and theme in burst:
+                flags.add('theme_overheat')
+            else:
+                flags.add('first_burst')
+        if bool(base.get('divergence')) \
+                or warm_days >= int(BLS.get('warm_taper_start', 3) or 3) \
+                or 'theme_overheat' in flags:
+            flags.add('diverging')
+        try:
+            ph = _lb_senti_phase().get('phase') or 'watch'
+        except Exception:
+            ph = 'watch'
+        out = {
+            'ts': now, 'day': day, 'flags': flags, 'red': red,
+            'cold_streak': streak, 'warm_days': warm_days,
+            'theme_zt_n': n, 'theme_zt_name': theme, 'phase': ph,
+            'hist_fallback': bool(base.get('hist_fallback')),
+            'note': '',
+        }
+        g.senti_stage_cache = out
+        return out
+    except Exception as e:
+        return {'ts': time.time(), 'flags': set(), 'note': 'fail:%r' % e}
+
+def _senti_hist_touch(stage):
+                                                                         
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return None
+        day = str(get_trading_day())
+        hist = getattr(g, 'senti_hist', None)
+        if not isinstance(hist, dict):
+            hist = {}
+            g.senti_hist = hist
+        rec = dict(hist.get(day) or {})
+        rec['day'] = day
+        rec['date'] = day
+        base = _senti_baseline()
+        for k in ('ice', 'ice_streak', 'warm_days', 'divergence', 'emotion', 'emotion_basis', 'phase'):
+            if k not in rec:
+                rec[k] = base.get(k)
+        try:
+            lb = _lb_senti_state()
+            au = lb.get('auction') or {}
+            if stage in ('auction', 't100', 'final') and au:
+                rec['auction'] = {
+                    'ts': au.get('ts'),
+                    'ready': bool(au.get('ready')),
+                    'ready_pct': au.get('ready_pct'),
+                    'mid_open_rate': au.get('mid_open_rate'),
+                    'mid_green_rate': au.get('mid_green_rate'),
+                    'low_open_rate': au.get('low_open_rate'),
+                    'mid_yizi_rate': au.get('mid_yizi_rate'),
+                }
+            if stage == 't100':
+                t100 = lb.get('t100') or {}
+                if t100:
+                    rec['t100'] = {
+                        'ts': t100.get('ts'),
+                        'phase': t100.get('phase'),
+                        'direction': dict(t100.get('direction') or {}),
+                    }
+            if stage == 'final':
+                rec['final_ts'] = time.time()
+        except Exception:
+            pass
+        if rec.get('red') is None:
+            try:
+                rec['red'] = _market_red_ratio()
+            except Exception:
+                rec['red'] = None
+        n, theme = _senti_theme_zt_n()
+        if n > 0:
+            rec['theme_zt_n'] = n
+            rec['theme_zt_name'] = theme
+        if n > int(BLS.get('theme_overheat_zt_min', 20) or 20) and theme:
+            rec['first_burst_themes'] = [theme]
+        hist[day] = rec
+        stg = _senti_stage(force=True)
+        rec['stage_flags'] = sorted(stg.get('flags') or [])
+        rec['stage'] = ','.join(rec['stage_flags']) or 'watch'
+        hist[day] = rec
+        keep = max(1, int(BLS.get('senti_hist_keep_days', 10) or 10))
+        for d in sorted(hist)[:-keep]:
+            hist.pop(d)
+        _senti_hist_save()
+        _lg = getattr(g, 'senti_stage_sell_log', None)
+        if not isinstance(_lg, dict):
+            _lg = {}
+            g.senti_stage_sell_log = _lg
+        key = 'touch:%s:%s' % (day, stage)
+        if key not in _lg:
+            _lg[key] = time.time()
+            log.info('[senti-hist] %s %s red=%s theme_zt=%d(%s) stage=%s' % (
+                day, stage,
+                ('%.2f' % rec['red']) if rec.get('red') is not None else '-',
+                int(rec.get('theme_zt_n') or 0), rec.get('theme_zt_name') or '-',
+                rec.get('stage') or '-'))
+        return rec
+    except Exception as e:
+        _warn('senti_hist touch fail %r' % e)
+        return None
+
+def _lb_cut_round(sec):
+                                    
+    try:
+        st = _lb_senti_state()
+        rec = (st.get('cut_seen') or {}).get(sec)
+        if isinstance(rec, dict):
+            return max(0, int(rec.get('round') or 1))
+        if isinstance(rec, (int, float)):
+            n = int(rec)
+            return 1 if n > 1000000000 else max(1, n)                  
+        return 0
+    except Exception:
+        return 0
+
+def _senti_rear_exempt(sec):
+                                            
+    try:
+        if _lb_senti_tier(sec) == 'high':
+            return True
+        if _dyn_theme_leader(sec):
+            return True
+        if _dyn_unq_confirmed(sec):
+            return True
+        fm = _dyn_theme_ferment()
+        for name in _new_themes_of(sec):
+            d = fm.get(name) or {}
+            if d.get('confirmed') and d.get('front') == sec:
+                return True
+        return False
+    except Exception:
+        return False
+
 def _lb_senti_cut_hold(sec):
                                                                   
     try:
@@ -4607,23 +4924,49 @@ def _lb_senti_cut_hold(sec):
         ph = _lb_senti_phase().get('phase') or 'watch'
         if ph not in ('high_diverg', 'rotate_low'):
             return None
-        if _lb_senti_tier(sec) != 'mid':
-            return None
         if _today_zt(sec):
             return None                               
-        st = _lb_senti_state()
-        if sec in st.setdefault('cut_seen', {}):
+        stg = _senti_stage()
+        flags = stg.get('flags') or set()
+        stage_mode = bool(flags & {'theme_overheat', 'diverging'}) \
+            and bool(BLS.get('stage_rear_round_enabled', True))
+        tier = _lb_senti_tier(sec)
+        if stage_mode and _senti_rear_exempt(sec):
             return None
-        frac = float(BLS.get('lb_senti_cut_half_ratio', 0.5))
-        return (frac, 'P8_lb_senti_cut_half phase=%s' % ph)
+        if tier == 'mid':
+            pass
+        elif stage_mode and tier == 'low':
+            pass
+        else:
+            return None
+        st = _lb_senti_state()
+        rounds = _lb_cut_round(sec)
+        cut = (st.get('cut_seen') or {}).get(sec)
+        ts = float(cut.get('ts') or 0.0) if isinstance(cut, dict) else 0.0
+        now = time.time()
+        if stage_mode:
+            if rounds >= max(1, int(BLS.get('stage_rear_max_rounds', 3) or 3)):
+                return None
+            gap = float(BLS.get('stage_rear_round_gap_sec', 60.0) or 60.0)
+            if rounds > 0 and ts and now - ts < gap:
+                return None
+            frac = float(BLS.get('stage_rear_cut_ratio', 0.5) or 0.5)
+            note = 'P8_stage_rear_cut phase=%s stage=%s round=%d' % (
+                ph, ','.join(sorted(flags)) or '-', rounds + 1)
+        else:
+            if rounds > 0:
+                return None
+            frac = float(BLS.get('lb_senti_cut_half_ratio', 0.5) or 0.5)
+            note = 'P8_lb_senti_cut_half phase=%s' % ph
+        return (frac, note)
     except Exception:
         return None
 
 def _mark_lb_cut(sec):
-                                  
+                                                 
     try:
         st = _lb_senti_state()
-        st.setdefault('cut_seen', {})[sec] = time.time()
+        st.setdefault('cut_seen', {})[sec] = {'ts': time.time(), 'round': _lb_cut_round(sec) + 1}
         _save_state()
     except Exception:
         pass
@@ -5554,6 +5897,11 @@ def _pool_exp_priority(code, direction=None):
         sc += float(BLS.get('dyn_unq_sort_bonus', 2.0))                       
     sc += _zt_theme_sort_bonus(code)                                         
     sc += float(dctx.get('score') or 0.0) * _lb_senti_participate_scale()                            
+                                                                 
+    stg = _senti_stage()
+    if 'warm_confirm_day' in (stg.get('flags') or set()) \
+            and dctx.get('kind') in ('attack_high', 'attack_low'):
+        sc += float(BLS.get('warm_confirm_front_bonus', 0.4) or 0.4)
     act = _first_zt_ms(code) or 1e18                                  
     return (-sc, act)
 
@@ -8996,6 +9344,10 @@ def auction_pre_confirm(context):
         _fill_zt_spot()                                                         
         _lb_senti_auction()                                    
         _lb_senti_mid()
+        try:
+            _senti_hist_touch('auction')                     
+        except Exception as e:
+            _warn('senti_hist auction touch fail: %r' % e)
     except Exception as e:
         _warn('lb_senti auction eval fail: %r' % e)
     log.info('auction_pre_confirm 09:25 done exp_file=%d' % len(g.exp_file))
@@ -9027,6 +9379,10 @@ def lb_senti_auction_retry(context):
         _got, _missing = _fill_zt_spot()
         if _got:
             out = _lb_senti_auction() or {}
+            try:
+                _senti_hist_touch('auction')                              
+            except Exception as e:
+                _warn('senti_hist auction retry touch fail: %r' % e)
             _rd = out.get('ready_detail') or {}
             _mn = int(out.get('mid_n') or 0); _ln = int(out.get('low_n') or 0)
             _mr = int(_rd.get('mid') or 0); _lr = int(_rd.get('low') or 0)
@@ -9113,6 +9469,10 @@ def after_open_probe(context):
     try:
         _lb_senti_auction()                                
         _lb_senti_mid()
+        try:
+            _senti_hist_touch('auction')                                  
+        except Exception as e:
+            _warn('senti_hist auction 09:31 touch fail: %r' % e)
     except Exception as e:
         _warn('lb_senti after_open eval fail: %r' % e)
 
@@ -10162,6 +10522,10 @@ def _save_state():
 
 def after_trading_end(context, data):
     _save_state()
+    try:
+        _senti_hist_touch('final')                     
+    except Exception as e:
+        _warn('senti_hist final touch fail: %r' % e)
                                            
     try:
         _st = getattr(g, 'rt_stats', None)

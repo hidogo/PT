@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.30（2026-11-03）
-# 部署核对：日志首行 `buysell_core init version=v1.30 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.31（2026-11-03）
+# 部署核对：日志首行 `buysell_core init version=v1.31 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.30"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
+STRATEGY_VERSION = "v1.31"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
 
 
 def _warn(msg):
@@ -456,6 +456,17 @@ BLS = {
     'exp_direction_hot_front_only': True,   # 发酵高潮只允许最强前排
     'exp_direction_rotate_leader_exception': True,  # rotate_low 允许原题材唯一存活龙头
     'exp_direction_log': True,             # 输出方向裁决日志
+    # v1.31 云端近期情绪温度历史（sentiment_hist.pkl，docs/40 扩展）：CSV 为 T-1 基线，云端盘中确认当日状态
+    'senti_hist_enabled': True,            # 云端近期情绪温度历史总开关
+    'senti_hist_keep_days': 10,            # 历史保留最近交易日数（用户确认 10 日）
+    'cold_streak_min': 3,                  # 连续冰点 >= 3 日为连冰（用户确认阈值）
+    'theme_overheat_zt_min': 20,           # 题材内涨停家数再次 > 20 = 过热（首次只记 first_burst，用户确认）
+    'warm_confirm_front_bonus': 0.4,       # 回暖确认日已确认前排额外排序加分（不放开技术硬条件/仓位）
+    'stage_rear_round_enabled': True,      # 过热/分歧日后排/杂毛按轮次逐步减半清仓（沿用 P8 触发条件）
+    'stage_rear_cut_ratio': 0.5,           # 阶段后排逐步清仓每轮比例
+    'stage_rear_max_rounds': 3,            # 阶段后排逐步清仓最大轮次（保留尾仓交 P5/P6）
+    'stage_rear_round_gap_sec': 60.0,      # 阶段后排相邻轮次最小间隔（防 3s tick 连续砍仓）
+    'senti_stage_cache_sec': 15.0,         # 阶段判定缓存（避免 3s tick 重复计算）
 }
 # 打分加减分配置（scoring.bonus.* / scoring.penalty.* 默认）
 BONUS = {
@@ -813,6 +824,9 @@ def initialize(context):
     g.zt_unmapped_n = 0    # v0.57 无概念映射新首板计数（变化才打日志）
     g.lb_senti = {}        # v0.65 连板盘中情绪动态 {auction, mid, t100}
     g.lb_senti_cache = {}  # v0.65 盘中确认滚动缓存 {'ts','data'}
+    g.senti_hist = None    # v1.31 云端近期情绪温度历史（独立 sentiment_hist.pkl，10 个交易日）
+    g.senti_stage_cache = None   # v1.31 阶段判定 15s 缓存（避免 3s tick 重复计算）
+    g.senti_stage_sell_log = {}  # v1.31 阶段后排卖出日志节流（按 sec+round 一次）
     g.exp_file = {}     # sec -> 预期文件条目（AXquant 竞价终态）
     g.hist_prio_cache = {}   # v1.16 核心/预期日线优先集缓存 {'tok','set'}
     g.hist_na_pending = {}   # v1.16 百日新高日线缺失待重评 {'sec': ts}
@@ -887,6 +901,7 @@ def before_trading_start(context, data):
     _load_expectation(merge=_restart_same_day)   # v1.5 同日重启 merge，配合 exp_file 持久化防 34->5 收缩
     _load_zt_lianban()
     _load_sentiment()
+    _senti_hist_load()   # v1.31 加载云端近期情绪温度历史（独立文件，损坏降级不阻塞）
     try:
         _load_boards()   # v0.36d 板块映射文件（Step1 仅加载验证, docs/24 §26）
     except Exception:
@@ -4577,6 +4592,10 @@ def lb_senti_t100_freeze(context):
         _ld_senti_snapshot('t100')   # v1.24 10:00 跌停题材因子冻结
     except Exception:
         pass
+    try:
+        _senti_hist_touch('t100')   # v1.31 10:00 情绪温度冻结落档
+    except Exception as e:
+        _warn('senti_hist t100 touch fail: %r' % e)
     _save_state()
 
 
@@ -4906,33 +4925,377 @@ def _lb_gate_seen(sec, note, action='expected_buy'):
         pass
 
 
+# ================= v1.31 云端近期情绪温度历史（docs/40 扩展） =================
+# sentiment_latest.csv 为 T-1 情绪基线（只读）；云端盘中/收盘确认写入 sentiment_hist.pkl，
+# 独立于 buysell_core_state.pkl，保留最近 10 个交易日。阶段只做方向排序与 P8 兑现参考，
+# 不改仓位上限规则。
+def senti_hist_fp():
+    return get_research_path() + 'sentiment_hist.pkl'
+
+
+def _senti_hist_paths():
+    # 读路径对齐研究根（base/upload_file/data/data_upload_file），写只走主根
+    return [r + 'sentiment_hist.pkl' for r in _research_roots()]
+
+
+def _senti_hist_load():
+    # 加载云端近期情绪温度历史；损坏/缺失降级为空（hist_fallback 由 _senti_baseline 兜底）
+    g.senti_hist = {}
+    for cand in _senti_hist_paths():
+        try:
+            with open(cand, 'rb') as f:
+                data = pickle.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        hist = {}
+        for d, r in data.items():
+            if not isinstance(r, dict):
+                continue
+            r2 = dict(r)
+            r2['date'] = str(r2.get('date') or d)
+            hist[str(d)] = r2
+        g.senti_hist = hist
+        log.info('[senti-hist] loaded %s -> days=%d' % (cand, len(hist)))
+        return len(hist)
+    log.info('[senti-hist] file not found (tried %s)' % _senti_hist_paths())
+    return 0
+
+
+def _senti_hist_save():
+    # 保留最近 N 个交易日；日期字符串 YYYY-MM-DD 字典序即时间序
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return 0
+        hist = getattr(g, 'senti_hist', None) or {}
+        keep = max(1, int(BLS.get('senti_hist_keep_days', 10) or 10))
+        dates = sorted(hist, reverse=True)[:keep]
+        out = {d: dict(hist[d]) for d in dates}
+        with open(senti_hist_fp(), 'wb') as f:
+            pickle.dump(out, f, protocol=2)
+        return len(out)
+    except Exception as e:
+        _warn('senti_hist save fail %r' % e)
+        return 0
+
+
+def _senti_baseline():
+    # T-1 情绪基线：sentiment_latest.csv 优先；缺失/坏档回退最近一条历史终态（hist_fallback）
+    s = getattr(g, 'sentiment', None)
+    if isinstance(s, dict) and (s.get('date') or s.get('ice') is not None or s.get('emotion')):
+        out = dict(s)
+        out.setdefault('hist_fallback', False)
+        return out
+    hist = getattr(g, 'senti_hist', None) or {}
+    today = str(get_trading_day())
+    prev = [r for d, r in sorted(hist.items()) if str(d) < today]
+    if prev:
+        r = dict(prev[-1])
+        flags = set(r.get('stage_flags') or [])
+        ice = bool(r.get('ice')) or ('cold' in flags)
+        out = {
+            'date': str(r.get('date') or ''),
+            'ice': ice,
+            'ice_streak': int(r.get('ice_streak') or (1 if ice else 0)),
+            'warm_days': int(r.get('warm_days') or 0),
+            'divergence': bool(r.get('divergence')) or bool(r.get('stage_flags') and 'diverging' in flags),
+            'emotion': str(r.get('emotion') or ''),
+            'emotion_basis': str(r.get('emotion_basis') or ''),
+            'phase': str(r.get('phase') or ''),
+            'hist_fallback': True,
+        }
+        return out
+    return {'hist_fallback': True, 'ice': False, 'ice_streak': 0, 'warm_days': 0, 'divergence': False,
+            'emotion': '', 'emotion_basis': '', 'phase': '', 'date': ''}
+
+
+def _senti_theme_zt_n():
+    # 题材涨停家数近似（用户确认口径）：T-1 题材桶存活 + 今日新首板助攻，取最大题材
+    try:
+        dyn = _dyn_theme_status() or {}
+        fm = _dyn_theme_ferment() or {}
+        best_n = 0; best = ''
+        for name in list(dyn) + list(fm):
+            n = int((dyn.get(name) or {}).get('alive_count') or 0) \
+                + int((fm.get(name) or {}).get('assist_count') or 0)
+            if n > best_n:
+                best_n = n; best = str(name or '')
+        return best_n, best
+    except Exception:
+        return 0, ''
+
+
+def _theme_first_burst_day():
+    # 历史已发生题材首爆（>20 家）的题材名集合；今日首次不算过热（first_burst）
+    try:
+        hist = getattr(g, 'senti_hist', None) or {}
+        today = str(get_trading_day())
+        th = float(BLS.get('theme_overheat_zt_min', 20) or 20)
+        burst = set()
+        for d, r in sorted(hist.items()):
+            if str(d) >= today:
+                continue
+            fb = r.get('first_burst_themes') or []
+            if isinstance(fb, str) and fb:
+                burst.add(fb)
+            elif isinstance(fb, (list, tuple, set)):
+                burst.update(str(x) for x in fb)
+            if float(r.get('theme_zt_n') or 0) > th:
+                t = str(r.get('theme_zt_name') or '').strip()
+                if t:
+                    burst.add(t)
+        return burst
+    except Exception:
+        return set()
+
+
+def _senti_stage(force=False):
+    # v1.31 阶段判定（15s 缓存）：T-1 基线 + 当日实测（红盘比/题材家数/连板盘中阶段）。
+    # flags: cold/deep_ice/warm_confirm_day/warm_continue/first_burst/theme_overheat/diverging
+    # 只做方向排序与 P8 兑现参考，不改变仓位上限规则。
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return {'ts': time.time(), 'flags': set(), 'note': 'disabled'}
+        now = time.time()
+        day = str(get_trading_day())
+        cache = getattr(g, 'senti_stage_cache', None)
+        ttl = float(BLS.get('senti_stage_cache_sec', 15.0) or 15.0)
+        if not force and isinstance(cache, dict) and cache.get('day') == day \
+                and now - float(cache.get('ts') or 0) < ttl and cache.get('flags') is not None:
+            return cache
+        base = _senti_baseline()
+        hist = getattr(g, 'senti_hist', None) or {}
+        rec = hist.get(day) or {}
+        flags = set()
+        red = rec.get('red')
+        if red is None:
+            try:
+                red = _market_red_ratio()
+            except Exception:
+                red = None
+        base_ice = bool(base.get('ice'))
+        streak = max(int(base.get('ice_streak') or 0), 0)
+        warm_days = max(int(base.get('warm_days') or 0), 0)
+        ice_ratio = float(BLS.get('sentiment_ice_ratio', 0.40) or 0.40)
+        warm_min = float(BLS.get('sentiment_warm_min', 0.45) or 0.45)
+        warm_base = float(BLS.get('sentiment_warm_base', 0.55) or 0.55)
+        decay = float(BLS.get('sentiment_warm_decay', 0.02) or 0.02)
+        th = max(warm_min, warm_base - max(streak, 1) * decay)
+        if red is None:
+            # 无当日实测：非冰点基线软给回暖延续；冰点基线不提前授回暖
+            if not base_ice and warm_days > 0:
+                flags.add('warm_continue')
+        else:
+            today_cold = float(red) < ice_ratio
+            today_warm = not today_cold and float(red) >= th
+            if today_cold:
+                flags.add('cold')
+                if streak >= int(BLS.get('cold_streak_min', 3) or 3):
+                    flags.add('deep_ice')
+            elif today_warm:
+                if base_ice:
+                    flags.add('warm_confirm_day')
+                else:
+                    flags.add('warm_continue')
+        n, theme = _senti_theme_zt_n()
+        if n > int(BLS.get('theme_overheat_zt_min', 20) or 20):
+            burst = _theme_first_burst_day()
+            if theme and theme in burst:
+                flags.add('theme_overheat')
+            else:
+                flags.add('first_burst')
+        if bool(base.get('divergence')) \
+                or warm_days >= int(BLS.get('warm_taper_start', 3) or 3) \
+                or 'theme_overheat' in flags:
+            flags.add('diverging')
+        try:
+            ph = _lb_senti_phase().get('phase') or 'watch'
+        except Exception:
+            ph = 'watch'
+        out = {
+            'ts': now, 'day': day, 'flags': flags, 'red': red,
+            'cold_streak': streak, 'warm_days': warm_days,
+            'theme_zt_n': n, 'theme_zt_name': theme, 'phase': ph,
+            'hist_fallback': bool(base.get('hist_fallback')),
+            'note': '',
+        }
+        g.senti_stage_cache = out
+        return out
+    except Exception as e:
+        return {'ts': time.time(), 'flags': set(), 'note': 'fail:%r' % e}
+
+
+def _senti_hist_touch(stage):
+    # 每日幂等更新：auction(09:25/09:26/09:31) / t100(10:00) / final(收盘) 覆盖当日记录；
+    # 日期守卫防跨日污染，落档后保留最近 10 个交易日并落盘。
+    try:
+        if not BLS.get('senti_hist_enabled', True):
+            return None
+        day = str(get_trading_day())
+        hist = getattr(g, 'senti_hist', None)
+        if not isinstance(hist, dict):
+            hist = {}
+            g.senti_hist = hist
+        rec = dict(hist.get(day) or {})
+        rec['day'] = day
+        rec['date'] = day
+        base = _senti_baseline()
+        for k in ('ice', 'ice_streak', 'warm_days', 'divergence', 'emotion', 'emotion_basis', 'phase'):
+            if k not in rec:
+                rec[k] = base.get(k)
+        try:
+            lb = _lb_senti_state()
+            au = lb.get('auction') or {}
+            if stage in ('auction', 't100', 'final') and au:
+                rec['auction'] = {
+                    'ts': au.get('ts'),
+                    'ready': bool(au.get('ready')),
+                    'ready_pct': au.get('ready_pct'),
+                    'mid_open_rate': au.get('mid_open_rate'),
+                    'mid_green_rate': au.get('mid_green_rate'),
+                    'low_open_rate': au.get('low_open_rate'),
+                    'mid_yizi_rate': au.get('mid_yizi_rate'),
+                }
+            if stage == 't100':
+                t100 = lb.get('t100') or {}
+                if t100:
+                    rec['t100'] = {
+                        'ts': t100.get('ts'),
+                        'phase': t100.get('phase'),
+                        'direction': dict(t100.get('direction') or {}),
+                    }
+            if stage == 'final':
+                rec['final_ts'] = time.time()
+        except Exception:
+            pass
+        if rec.get('red') is None:
+            try:
+                rec['red'] = _market_red_ratio()
+            except Exception:
+                rec['red'] = None
+        n, theme = _senti_theme_zt_n()
+        if n > 0:
+            rec['theme_zt_n'] = n
+            rec['theme_zt_name'] = theme
+        if n > int(BLS.get('theme_overheat_zt_min', 20) or 20) and theme:
+            rec['first_burst_themes'] = [theme]
+        hist[day] = rec
+        stg = _senti_stage(force=True)
+        rec['stage_flags'] = sorted(stg.get('flags') or [])
+        rec['stage'] = ','.join(rec['stage_flags']) or 'watch'
+        hist[day] = rec
+        keep = max(1, int(BLS.get('senti_hist_keep_days', 10) or 10))
+        for d in sorted(hist)[:-keep]:
+            hist.pop(d)
+        _senti_hist_save()
+        _lg = getattr(g, 'senti_stage_sell_log', None)
+        if not isinstance(_lg, dict):
+            _lg = {}
+            g.senti_stage_sell_log = _lg
+        key = 'touch:%s:%s' % (day, stage)
+        if key not in _lg:
+            _lg[key] = time.time()
+            log.info('[senti-hist] %s %s red=%s theme_zt=%d(%s) stage=%s' % (
+                day, stage,
+                ('%.2f' % rec['red']) if rec.get('red') is not None else '-',
+                int(rec.get('theme_zt_n') or 0), rec.get('theme_zt_name') or '-',
+                rec.get('stage') or '-'))
+        return rec
+    except Exception as e:
+        _warn('senti_hist touch fail %r' % e)
+        return None
+
+
+def _lb_cut_round(sec):
+    # 当前已兑现轮次；兼容旧版纯 ts 记录（视为已完成 1 轮）
+    try:
+        st = _lb_senti_state()
+        rec = (st.get('cut_seen') or {}).get(sec)
+        if isinstance(rec, dict):
+            return max(0, int(rec.get('round') or 1))
+        if isinstance(rec, (int, float)):
+            n = int(rec)
+            return 1 if n > 1000000000 else max(1, n)   # 旧版纯时间戳按 1 轮处理
+        return 0
+    except Exception:
+        return 0
+
+
+def _senti_rear_exempt(sec):
+    # 阶段后排清仓豁免：高标/动态唯一/发酵前排/唯一龙头（含原题材唯一存活龙头）
+    try:
+        if _lb_senti_tier(sec) == 'high':
+            return True
+        if _dyn_theme_leader(sec):
+            return True
+        if _dyn_unq_confirmed(sec):
+            return True
+        fm = _dyn_theme_ferment()
+        for name in _new_themes_of(sec):
+            d = fm.get(name) or {}
+            if d.get('confirmed') and d.get('front') == sec:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _lb_senti_cut_hold(sec):
     # P8 中高位兑现指导（docs/43）：高位分歧/切低位 + 持仓为连板中位股（非唯一高标） + 今日晋级失败(未续板)
     # -> 减半兑现；高标/低位/已封板/已兑现不重复触发。返回 (fraction, note) 或 None。
+    # v1.31 阶段模式：theme_overheat/diverging 时，中位/后排/杂毛（除唯一龙头/发酵前排/高标豁免）
+    # 按轮次逐步减半清仓，仍要求未续板、阶段持续；原 high_diverg/rotate_low+mid 单次口径不变。
     try:
         if not BLS.get('lb_senti_cut_enabled', True):
             return None
         ph = _lb_senti_phase().get('phase') or 'watch'
         if ph not in ('high_diverg', 'rotate_low'):
             return None
-        if _lb_senti_tier(sec) != 'mid':
-            return None
         if _today_zt(sec):
             return None                      # 续板封住不兑现
-        st = _lb_senti_state()
-        if sec in st.setdefault('cut_seen', {}):
+        stg = _senti_stage()
+        flags = stg.get('flags') or set()
+        stage_mode = bool(flags & {'theme_overheat', 'diverging'}) \
+            and bool(BLS.get('stage_rear_round_enabled', True))
+        tier = _lb_senti_tier(sec)
+        if stage_mode and _senti_rear_exempt(sec):
             return None
-        frac = float(BLS.get('lb_senti_cut_half_ratio', 0.5))
-        return (frac, 'P8_lb_senti_cut_half phase=%s' % ph)
+        if tier == 'mid':
+            pass
+        elif stage_mode and tier == 'low':
+            pass
+        else:
+            return None
+        st = _lb_senti_state()
+        rounds = _lb_cut_round(sec)
+        cut = (st.get('cut_seen') or {}).get(sec)
+        ts = float(cut.get('ts') or 0.0) if isinstance(cut, dict) else 0.0
+        now = time.time()
+        if stage_mode:
+            if rounds >= max(1, int(BLS.get('stage_rear_max_rounds', 3) or 3)):
+                return None
+            gap = float(BLS.get('stage_rear_round_gap_sec', 60.0) or 60.0)
+            if rounds > 0 and ts and now - ts < gap:
+                return None
+            frac = float(BLS.get('stage_rear_cut_ratio', 0.5) or 0.5)
+            note = 'P8_stage_rear_cut phase=%s stage=%s round=%d' % (
+                ph, ','.join(sorted(flags)) or '-', rounds + 1)
+        else:
+            if rounds > 0:
+                return None
+            frac = float(BLS.get('lb_senti_cut_half_ratio', 0.5) or 0.5)
+            note = 'P8_lb_senti_cut_half phase=%s' % ph
+        return (frac, note)
     except Exception:
         return None
 
 
 def _mark_lb_cut(sec):
-    # P8 兑现首触发标记（跨重启持久化，防同日重启后重复卖）
+    # P8 兑现轮次标记（跨重启持久化，防同日重启后重复卖；旧纯 ts 记录按 1 轮兼容）
     try:
         st = _lb_senti_state()
-        st.setdefault('cut_seen', {})[sec] = time.time()
+        st.setdefault('cut_seen', {})[sec] = {'ts': time.time(), 'round': _lb_cut_round(sec) + 1}
         _save_state()
     except Exception:
         pass
@@ -5908,6 +6271,11 @@ def _pool_exp_priority(code, direction=None):
         sc += float(BLS.get('dyn_unq_sort_bonus', 2.0))   # v0.38 动态唯一龙头确认排序加分
     sc += _zt_theme_sort_bonus(code)                      # v0.55 题材强度/身位排序加分
     sc += float(dctx.get('score') or 0.0) * _lb_senti_participate_scale()   # v0.71 方向奖励，10:00 后缩放不归零
+    # v1.31 回暖确认日：已确认前排（attack_high/attack_low）额外排序加分，不放开技术硬条件/仓位
+    stg = _senti_stage()
+    if 'warm_confirm_day' in (stg.get('flags') or set()) \
+            and dctx.get('kind') in ('attack_high', 'attack_low'):
+        sc += float(BLS.get('warm_confirm_front_bonus', 0.4) or 0.4)
     act = _first_zt_ms(code) or 1e18   # v0.37 毫秒归一（逐笔 ms 优先, 帧 ts 归一）
     return (-sc, act)
 
@@ -9544,6 +9912,10 @@ def auction_pre_confirm(context):
         _fill_zt_spot()   # v1.4 B：09:25 竞价情绪全池缺 spot 批量补快照，防 ready=26/41 类就绪率不足
         _lb_senti_auction()   # v0.65 竞价终态：中高位高开/绿开/一字率 + 低位高开率
         _lb_senti_mid()
+        try:
+            _senti_hist_touch('auction')   # v1.31 竞价终态情绪温度落档
+        except Exception as e:
+            _warn('senti_hist auction touch fail: %r' % e)
     except Exception as e:
         _warn('lb_senti auction eval fail: %r' % e)
     log.info('auction_pre_confirm 09:25 done exp_file=%d' % len(g.exp_file))
@@ -9578,6 +9950,10 @@ def lb_senti_auction_retry(context):
         _got, _missing = _fill_zt_spot()
         if _got:
             out = _lb_senti_auction() or {}
+            try:
+                _senti_hist_touch('auction')   # v1.31 09:26 补拉后重写当日情绪温度记录
+            except Exception as e:
+                _warn('senti_hist auction retry touch fail: %r' % e)
             _rd = out.get('ready_detail') or {}
             _mn = int(out.get('mid_n') or 0); _ln = int(out.get('low_n') or 0)
             _mr = int(_rd.get('mid') or 0); _lr = int(_rd.get('low') or 0)
@@ -9669,6 +10045,10 @@ def after_open_probe(context):
     try:
         _lb_senti_auction()   # v0.65 09:31 兜底重算竞价终态（重置后补齐）
         _lb_senti_mid()
+        try:
+            _senti_hist_touch('auction')   # v1.31 09:31 兜底重写（防 09:25 未就绪）
+        except Exception as e:
+            _warn('senti_hist auction 09:31 touch fail: %r' % e)
     except Exception as e:
         _warn('lb_senti after_open eval fail: %r' % e)
 
@@ -10774,6 +11154,10 @@ def _save_state():
 
 def after_trading_end(context, data):
     _save_state()
+    try:
+        _senti_hist_touch('final')   # v1.31 收盘终态情绪温度落档
+    except Exception as e:
+        _warn('senti_hist final touch fail: %r' % e)
     # v0.43 灵敏度日结：检测->下单时延按 (side, mode) 汇总
     try:
         _st = getattr(g, 'rt_stats', None)

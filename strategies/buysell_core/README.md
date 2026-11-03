@@ -3,14 +3,33 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.30（2026-11-03）
+- 当前版本：v1.31（2026-11-03）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.30 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.31 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.31
+- v1.31 云端近期情绪温度历史 + 阶段消费（2026-11-03 用户确认后实施）：
+  - `sentiment_latest.csv` 仅作 T-1 情绪基线（只读），云端盘中/收盘确认写入独立
+    `sentiment_hist.pkl`（research 根，与 buysell_core_state.pkl 分离），保留最近 10 个
+    交易日、日期幂等覆盖；CSV 缺失回退最近历史终态（hist_fallback），损坏文件降级不阻塞。
+  - 阶段判定 15s 缓存：连冰（`ice_streak>=3`）、回暖确认日（前一日冰点 + 当日红盘确认）、
+    回暖延续、题材首爆（>20 家首次只记 first_burst）、题材过热（同题材再次 >20 家）、
+    分歧/兑现（基线 divergence 或 warm_days>=3 或过热）。
+  - 回暖确认日已确认前排（attack_high/attack_low）额外排序 +0.4
+    （`warm_confirm_front_bonus`），不放开技术硬条件、不改仓位上限规则。
+  - 过热/分歧阶段除唯一龙头/发酵前排/高标豁免外，中位/后排/杂毛按现有 P8 触发条件
+    （未续板 + 阶段持续）逐轮减半清仓：每轮 50%、最多 3 轮、间隔 60s，参数化
+    `stage_rear_cut_ratio/stage_rear_max_rounds/stage_rear_round_gap_sec`。
+  - 写入时点：09:25/09:26/09:31 竞价终态 auction、10:00 t100、收盘 final；
+    题材家数按 `_dyn_theme_status().alive_count + _dyn_theme_ferment().assist_count` 近似。
+  - 测试：新增 `tests/test_buysell_core_v131_senti_hist.py`（窗口裁剪/同日幂等/CSV 缺失
+    兜底/连冰/回暖确认/回暖延续/首爆/过热/分歧/前排加分/P8 轮次与豁免/旧版 ts 兼容/
+    损坏降级/仓位上限不变）；PT 全量 pytest 221 passed。
 
 ### v1.30
 - v1.30 动态唯一题材化重构 + T+1 当日买入保护持久化（2026-11-03 用户确认后实施）：
