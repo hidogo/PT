@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.26"                                                        
+STRATEGY_VERSION = "v1.28"                                                        
 
 def _warn(msg):
                                                                  
@@ -173,6 +173,8 @@ BLS = {
     'p2e_theme_drop_min': -2.0,                                        
     'p2e_auction_drop_min': -2.0,                                         
     'p2e_confirm_at': '09:24:45',                                     
+    'p2e_reverse_guard_enabled': True,                                
+    'p2e_audit_heartbeat_sec': 60.0,                                          
     'single_stock_cap': 0.30,                                                               
     'buy_lot_step': 100,                                                 
     'ordinary_buy_ratio': 0.10,                                                                  
@@ -216,6 +218,9 @@ BLS = {
     'exp_entry_type_resync': True,                                                       
     'exp_meet_score_ready': True,                                                       
     'exp_meet_require_intraday_confirm': True,                                                
+    'exp_bad_seal_red_exceed': 0.0,                                           
+    'exp_bad_seal_big_green_miss': -2.0,                                          
+    'one_word_open_meet_ratio': 0.8,                                                                 
     'first_board_buy_enabled': True,                                
     'first_board_minute': 10,                                      
     'first_board_seal_min': 50000.0,                                           
@@ -1677,19 +1682,19 @@ def _yesterday_open_chg(sec):
     return 0.0, False
 
 def _auction_benchmark(sec):
-                                                                                   
+                                                                              
     e = g.exp.setdefault(sec, {})
     if e.get("has_expected_auction"):
         v = float(e.get("expected_auction_change_pct") or 0.0)
-        return v, (v > 0.0)
+        return v, True
     en = g.exp_file.get(sec) or {}
     if en.get("has_expected_auction"):
         v = float(en.get("expected_auction_change_pct") or 0.0)
-        return v, (v > 0.0)
+        return v, True
     opens, closes = _hist_window(sec)
     if opens and closes and len(opens) >= 2 and len(closes) >= 2 and opens[-1] and closes[-2]:
         v = (opens[-1] / closes[-2] - 1.0) * 100.0
-        return v, (v > 0.0)
+        return v, True
     return 0.0, False
 
 def _gear(sec):
@@ -2180,12 +2185,37 @@ def _eval_auction(sec):
                                                  
     if chg == 0.0 and not _auction_ready(sec):
         return AW, ["auction_data_not_ready"]
+                                                             
+    if _bad_seal_role(sec):
+        if chg > float(BLS.get('exp_bad_seal_red_exceed', 0.0) or 0.0):
+            return PX, ["bad_seal_red_open_exceed"]
+        if chg <= float(BLS.get('exp_bad_seal_big_green_miss', -2.0) or -2.0):
+            return PS, ["bad_seal_big_green_miss"]
+        return PM, ["bad_seal_small_green_meet"]
     if chg < 0:
         return PS, ["auction_green_open"]
     yopen, has = _yesterday_open_chg(sec)
     if has and chg > yopen:
         return PX, ["auction_higher_than_yesterday"]                  
+    if not has:
+        return AW, ["missing_yesterday_open"]                          
     return PM, ["auction_small_open"]
+
+def _bad_seal_role(sec):
+                                             
+    en = g.exp_file.get(sec) or {}
+    e = g.exp.setdefault(sec, {})
+    rd = str(en.get('role_detail') or e.get('role_detail') or '')
+    return rd in ('bad_seal_board', 'broken_consecutive_limit_up')
+
+def _limit_pct_by_sec(sec):
+                                                   
+    num = str(sec).split('.')[0]
+    if num.startswith(('300', '301', '688', '689')):
+        return 20.0
+    if num.startswith(('8', '4', '92')):
+        return 30.0
+    return 10.0
 
 def _calc_intraday_bars_ready(sec):
                                                    
@@ -4755,10 +4785,10 @@ def _confirm_expected(code):
     actual = _auction_change(code)                  
     exp_status = en.get("expected_status") or ""
     if "exceed" in exp_status:
-        bm, has_bm = _auction_benchmark(code)                              
+        bm, has_bm = _auction_benchmark(code)                          
         if not has_bm:
             return PM, actual
-        return (CX if actual >= bm else PM), actual
+        return (CX if actual > bm else PM), actual
     if "miss" in exp_status:
         return (CS if actual < 0 else PM), actual
     return PM, actual                      
@@ -4800,9 +4830,33 @@ def _exp_rt_status(code):
     e["auction_status"] = au
     if entry == "one_word":
         st, _r = _exp_one_word(code)
+                                                                           
+        if st not in (AW,) and _auction_ready(code):
+            _ac = _auction_change(code)
+            _min_open = _limit_pct_by_sec(code) * float(
+                BLS.get('one_word_open_meet_ratio', 0.8) or 0.8
+            )
+            if _ac < _min_open:
+                return CS, "one_word_open_below_min(%.1f%%)" % _ac
         if "exceed" in exp_status and st == CM:
             return PM, "seal_wait"                                        
         return st, "seal"
+                                                  
+    if _bad_seal_role(code):
+        if au == AW:
+            return PM, "bad_seal_auction_awaiting"
+        if au == PX:
+            _t1 = _two_1m_break(code)
+            _t2 = _limit_up_within_1m(code)
+            if (_t1 or _t2) and not _below_vwap_confirm(code):
+                _src = 'two_1m' if _t1 else 'limit_1m'
+                return CX, "bad_seal_intraday_exceed_%s" % _src
+            if _below_vwap_confirm(code):
+                return CS, "below_vwap_weak"
+            return PM, "observe_bad_seal_red_open"
+        if au == PM:
+            return PM, "bad_seal_small_green_meet"
+        return CS, "bad_seal_green_open_miss"
     if "exceed" in exp_status:
                                                               
         acon, actual = _confirm_expected(code)
@@ -6549,6 +6603,36 @@ def _hold_arb_log(sec, msg):
     except Exception:
         pass
 
+def _p2e_reverse_log(sec, msg):
+                                 
+    try:
+        gl = getattr(g, 'p2e_reverse_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.p2e_reverse_log = gl
+        now = time.time()
+        hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
+        if now - float(gl.get(sec) or 0) < hb:
+            return
+        gl[sec] = now
+        log.info('[P2E-reverse] %s %s' % (_sn(sec), msg))
+    except Exception:
+        pass
+
+def _p2e_skip_log(sec, why):
+                                  
+    try:
+        gl = getattr(g, 'p2e_skip_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.p2e_skip_log = gl
+        now = time.time()
+        hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
+        if now - float(gl.get(sec) or 0) < hb:
+            return
+        gl[sec] = now
+        log.info('[P2E-skip] %s %s' % (_sn(sec), why))
+    except Exception:
+        pass
+
 def _role_tolerance(sec):
                                                                         
     en = g.exp_file.get(sec) or {}
@@ -6666,7 +6750,7 @@ def _sell_avail_backfill_log(sec, qty, avail_key, kind):
     except Exception:
         pass
 
-def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0):
+def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0, avail_qty=0):
                                                             
     try:
         if not BLS.get('sell_avail_amt0_warn_only', True):
@@ -6679,8 +6763,8 @@ def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key
             return
         gl[sec] = now
         _bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
-        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
-            _sn(sec), avail_key or '-', int(bool(avail_present)), int(bool(total_present)),
+        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d avail_val=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
+            _sn(sec), avail_key or '-', int(bool(avail_present)), int(avail_qty or 0), int(bool(total_present)),
             total_key or '-', int(total_qty or 0), _bq))
     except Exception:
         pass
@@ -6692,13 +6776,25 @@ def _sellable_backfill_detail(sec, positions):
         return qty, key, avail_present, total_present
     tq, tk, ok = _sellable_total(sec, positions)
     if not ok or tq <= 0:
-        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq)
+        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq, qty)
         return qty, key, avail_present, total_present
     _bought = str(sec) in ((getattr(g, 'daily', None) or {}).get('bought') or [])
     if _bought and BLS.get('sell_avail_t1_strict', True):
         return qty, key, avail_present, total_present                
     _sell_avail_backfill_log(sec, tq, tk, 't0' if _bought else 'prev')
     return tq, 'enable_backfill', True, True
+
+def _audit_sell_amt0(sec, raw, positions):
+                                                                    
+    try:
+        _q0, _k0, _av0, _tv0 = _sellable_detail(raw, positions)
+        _tq0, _tk0, _tok0 = _sellable_total(raw, positions)
+        _bought_today = '1' if str(raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
+        _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(raw) or 0)
+        _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail_present=%d avail_val=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
+            raw, _k0 or '-', int(_av0), int(_q0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
+    except Exception:
+        pass
 
 def _sellable(sec, positions):
     return _sellable_backfill_detail(sec, positions)[0]
@@ -6909,10 +7005,10 @@ def _audit_sell_skip(sec, why, now=None):
 def _p2e_core_sell_check(sec):
                                                                                              
     if not BLS.get('p2e_sell_enabled', True):
-        return False, ''
+        return False, '', False
     en = g.exp_file.get(sec) or {}
     if str(en.get('side') or '') not in ('sell', 'hold'):
-        return False, ''
+        return False, '', False
     _au = _auction_change(sec)
                   
     _mid = None
@@ -6943,23 +7039,52 @@ def _p2e_core_sell_check(sec):
     if BLS.get('exp_sell_on_pending_miss', False):
         _ma = _ma + ('pending_miss',)
     _hitB = bool(_est and _est in _ma and _au <= float(BLS.get('p2e_auction_drop_min', -2.0)))
+    _reversed = False
     if _hitB:
         try:                                                 
             _rev, _ra = _confirm_expected(sec)
             if _rev == CX:
-                _hold_arb_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
+                _p2e_reverse_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
                 _hitB = False
+                _reversed = True
         except Exception:
             pass
+                                                    
+    if _hitA:
+        _revA, _revAnote = _p2e_holding_reverse(sec, en)
+        if _revA:
+            _p2e_reverse_log(sec, '题材中位崩塌被自身反证豁免 %s (A: %s)' % (_revAnote, _noteA))
+            _hitA = False
+            _reversed = True
                          
     if (_hitA or _hitB) and _unique_stand(sec):
-        _hold_arb_log(sec, '唯一高身位豁免 P2E 竞价核卖 -> 交盘中监控')
-        return False, ''
+        _p2e_reverse_log(sec, '唯一高身位豁免 P2E 竞价核卖 -> 交盘中监控')
+        return False, '', True
     if _hitA:
-        return True, _noteA
+        return True, _noteA, False
     if _hitB:
-        return True, 'P2E_exp_miss %s ac=%.1f%%' % (_est, _au)
-    return False, ''
+        return True, 'P2E_exp_miss %s ac=%.1f%%' % (_est, _au), False
+    return False, '', _reversed
+
+def _p2e_holding_reverse(sec, en):
+                                                      
+    try:
+        if not BLS.get('p2e_reverse_guard_enabled', True):
+            return False, 'disabled'
+        if not _auction_ready(sec):
+            return False, 'auction_not_ready'
+        _au0, _rau = _eval_auction(sec)
+        if _au0 == PX:
+            return True, 'auction_exceed(%s)' % ','.join(_rau)
+        _rev, _ract = _confirm_expected(sec)
+        if _rev == CX:
+            return True, 'file_cx(%s)' % str(_ract)
+        e = g.exp.get(sec) or {}
+        if str(e.get('entry_type') or en.get('entry_type') or '') == 'one_word' and _is_one_word_open(sec):
+            return True, 'one_word_sealed'
+        return False, ''
+    except Exception:
+        return False, ''
 
 def p2e_auction_core_sell(context):
                                                                        
@@ -6980,26 +7105,54 @@ def p2e_auction_core_sell(context):
             _load_expectation(merge=True)                                   
         except Exception:
             pass
+        log.info('[P2E] 确认段开始 hms=%s exp_file=%d' % (_hms, len(g.exp_file or {})))
     positions = _sellable_source() or context.portfolio.positions
     if not positions:
+        log.info('[P2E] 确认段 hms=%s 无持仓 positions=0' % _hms)
         return
     _sl = float(BLS.get('sell_cold_secs', 30.0))
+    _n_eval = 0; _n_hit = 0; _n_rev = 0; _n_skip = 0
+    _hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
     for _raw in list(positions.keys()):
         sec = _norm_sec(_raw) or _raw
         amt = _sellable(_raw, positions)
         if amt <= 0:
+            _n_skip += 1
+            _p2e_skip_log(sec, 'amt0(可卖=0)')
             continue
         if _sell_inflight(sec):
+            _n_skip += 1
+            _p2e_skip_log(sec, 'inflight')
             continue
         if isinstance(getattr(g, 'sold_log', None), dict) and (time.time() - g.sold_log.get(sec, 0)) < _sl:
+            _n_skip += 1
+            _p2e_skip_log(sec, 'sold_cold')
             continue
+        if not (getattr(g, 'zt_theme', None) or {}):
+            _p2e_skip_log(sec, 'theme_data_missing(全局题材索引为空)')
+        _n_eval += 1
         try:
-            _hit, _note = _p2e_core_sell_check(sec)
+            _res = _p2e_core_sell_check(sec)
+            _hit, _note = _res[0], _res[1]
+            _rev = bool(_res[2]) if len(_res) > 2 else False
         except Exception as _e:
             _warn('p2e check fail %s: %r' % (_sn(sec), _e)); continue
+        if _rev:
+            _n_rev += 1
+        elif _hit:
+            _n_hit += 1
+        log.info('[P2E] %s hms=%s hit=%d reverse=%d reason=%s' % (_sn(sec), _hms, int(_hit), int(_rev), _note or '-'))
         if _hit:
-            log.info('[P2E] %s 竞价核卖 %s hms=%s' % (_sn(sec), _note, _hms))
             _do_sell(context, sec, amt, _note, urgent=True)
+    _now = time.time()
+    if _now - float(getattr(g, 'p2e_heartbeat_ts', 0) or 0) >= _hb:
+        g.p2e_heartbeat_ts = _now
+        log.info('[P2E-heartbeat] hms=%s positions=%d eval=%d hit=%d reverse=%d skip=%d' % (
+            _hms, len(positions), _n_eval, _n_hit, _n_rev, _n_skip))
+    if _hms >= '09:25:00' and not getattr(g, 'p2e_end_logged', False):
+        g.p2e_end_logged = True
+        log.info('[P2E] 确认段结束 hms=%s positions=%d eval=%d hit=%d reverse=%d skip=%d exp_file=%d' % (
+            _hms, len(positions), _n_eval, _n_hit, _n_rev, _n_skip, len(g.exp_file or {})))
 
 def sell_manager(context):
     positions = _sellable_source() or context.portfolio.positions
@@ -7018,12 +7171,7 @@ def sell_manager(context):
             pass
         amt = _sellable(_raw, positions)
         if amt <= 0:
-            _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
-            _tq0, _tk0, _tok0 = _sellable_total(_raw, positions)                            
-            _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
-            _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(_raw) or 0)
-            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
-                _raw, _k0 or '-', int(_av0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
+            _audit_sell_amt0(sec, _raw, positions)                                  
             continue
         now = time.time()
         if _sell_inflight(sec):                                           
@@ -7034,7 +7182,7 @@ def sell_manager(context):
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open drop=%.1f%%' % _auction_change(sec), urgent=True); continue
                                                                                   
-        _hit2, _note2 = _p2e_core_sell_check(sec)
+        _hit2, _note2 = _p2e_core_sell_check(sec)[:2]
         if _hit2:
             _do_sell(context, sec, amt, _note2, urgent=True); continue
         if cost > 0:
@@ -7171,7 +7319,7 @@ def tick_sell_manager(context):
         rp = _role_tolerance(sec)
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open_tick drop=%.1f%%' % _auction_change(sec), urgent=True); continue
-        _hit2, _note2 = _p2e_core_sell_check(sec)
+        _hit2, _note2 = _p2e_core_sell_check(sec)[:2]
         if _hit2:
             _do_sell(context, sec, amt, _note2, urgent=True); continue
         cost = my_cost(_raw, positions)

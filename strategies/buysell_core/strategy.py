@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.26（2026-11-02）
-# 部署核对：日志首行 `buysell_core init version=v1.26 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.27（2026-11-02）
+# 部署核对：日志首行 `buysell_core init version=v1.28 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.26"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-02）
+STRATEGY_VERSION = "v1.28"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
 
 
 def _warn(msg):
@@ -183,6 +183,8 @@ BLS = {
     'p2e_theme_drop_min': -2.0,        # 中位股最弱竞价涨幅阈值 %（昨日涨停中位，今日默认 -2%）
     'p2e_auction_drop_min': -2.0,      # 自身大不及竞价涨幅阈值 %（文件 miss + 今日竞价绿开幅度）
     'p2e_confirm_at': '09:24:45',      # 9:15-9:25 钩子确认段起点（此前预热只日志不触发）
+    'p2e_reverse_guard_enabled': True, # v1.28 触发A持仓自身反证：竞价超预期/一字封死不核卖
+    'p2e_audit_heartbeat_sec': 60.0,   # v1.28 [P2E-reverse]/[P2E-skip] 审计节流秒数
     'single_stock_cap': 0.30,          # 单支市值上限：买入后该股市值 <= 总资产×30%（AXquant single_stock_cap）
     'buy_lot_step': 100,               # v1.17 买入整手步长（A股最小申报单位，取整/仓位缩量共用）
     'ordinary_buy_ratio': 0.10,        # 普通买入单笔=总资产×10%（AXquant ordinary_buy_ratio=1/10，替代硬编码0.3）
@@ -226,6 +228,9 @@ BLS = {
     'exp_entry_type_resync': True,       # v0.73 开盘重标 buy 候选 one_word/normal（防一字走普通超预期路径）
     'exp_meet_score_ready': True,        # v1.8 pending_meet 评分就绪兜底（1m<2 根时 board 就绪也放行）
     'exp_meet_require_intraday_confirm': True,  # v1.11 meet/未标注买入强制分时确认（两1m强势或1分钟内触板，且不破VWAP）
+    'exp_bad_seal_red_exceed': 0.0,             # v1.27 放量烂板/炸板不回封：红开>该值=竞价超预期
+    'exp_bad_seal_big_green_miss': -2.0,        # v1.27 放量烂板/炸板不回封：绿开<=该值或跌停开=低于预期
+    'one_word_open_meet_ratio': 0.8,            # v1.27 一字/近一字开盘符合下限=涨停幅*该比例（主板+8%/20cm+16%/30cm+24%）
     'first_board_buy_enabled': True,   # 首板打板总开关（tick 首触主路径 + 1m 兜底）
     'first_board_minute': 10,          # 首板闸门：开盘 N 分钟内（09:30-09:40）
     'first_board_seal_min': 50000.0,   # v1.26 首板打板最小封单额(元)：tx 首帧成交豁免，仅 snap 兜底
@@ -1764,19 +1769,20 @@ def _yesterday_open_chg(sec):
     return 0.0, False
 
 def _auction_benchmark(sec):
-    # 预期达标基准（expected_auction_change_pct=T日开盘涨幅）：优先供方；缺失/<=0 用云端 1d 历史折算，再无基准=not提供
+    # 预期达标基准（expected_auction_change_pct=T日开盘涨幅）：优先供方；缺失用云端 1d 历史折算，再无基准=not提供
+    # v1.27 基准只看“是否提供”：0.0 平开与负基都是合法基准，不再用 >0 过滤（S-1 平开/低开同样可比）
     e = g.exp.setdefault(sec, {})
     if e.get("has_expected_auction"):
         v = float(e.get("expected_auction_change_pct") or 0.0)
-        return v, (v > 0.0)
+        return v, True
     en = g.exp_file.get(sec) or {}
     if en.get("has_expected_auction"):
         v = float(en.get("expected_auction_change_pct") or 0.0)
-        return v, (v > 0.0)
+        return v, True
     opens, closes = _hist_window(sec)
     if opens and closes and len(opens) >= 2 and len(closes) >= 2 and opens[-1] and closes[-2]:
         v = (opens[-1] / closes[-2] - 1.0) * 100.0
-        return v, (v > 0.0)
+        return v, True
     return 0.0, False
 
 def _gear(sec):
@@ -2306,12 +2312,39 @@ def _eval_auction(sec):
     # 防负基昨日开盘把未就绪误判 PX（2026-10-28 榕基软件类场景）。
     if chg == 0.0 and not _auction_ready(sec):
         return AW, ["auction_data_not_ready"]
+    # v1.27 放量烂板/炸板不回封独立三态：红开=超预期；-2%<小绿开<=0=符合；<=-2% 或跌停开=低于
+    if _bad_seal_role(sec):
+        if chg > float(BLS.get('exp_bad_seal_red_exceed', 0.0) or 0.0):
+            return PX, ["bad_seal_red_open_exceed"]
+        if chg <= float(BLS.get('exp_bad_seal_big_green_miss', -2.0) or -2.0):
+            return PS, ["bad_seal_big_green_miss"]
+        return PM, ["bad_seal_small_green_meet"]
     if chg < 0:
         return PS, ["auction_green_open"]
     yopen, has = _yesterday_open_chg(sec)
     if has and chg > yopen:
         return PX, ["auction_higher_than_yesterday"]   # 负基也判高开（v0.17）
+    if not has:
+        return AW, ["missing_yesterday_open"]   # v1.27 基准缺失保持等待，不误判 PM
     return PM, ["auction_small_open"]
+
+
+def _bad_seal_role(sec):
+    # v1.27 放量烂板/炸板不回封：权威 role_detail 或云端动态标注
+    en = g.exp_file.get(sec) or {}
+    e = g.exp.setdefault(sec, {})
+    rd = str(en.get('role_detail') or e.get('role_detail') or '')
+    return rd in ('bad_seal_board', 'broken_consecutive_limit_up')
+
+
+def _limit_pct_by_sec(sec):
+    # v1.27 名义涨停幅 %：主板10/20cm20/30cm30（供一字开盘符合下限折算）
+    num = str(sec).split('.')[0]
+    if num.startswith(('300', '301', '688', '689')):
+        return 20.0
+    if num.startswith(('8', '4', '92')):
+        return 30.0
+    return 10.0
 
 def _calc_intraday_bars_ready(sec):
     # v1.3 分时数据兜底：1m 已有 >=2 根（spot VWAP 缺失时证明分时已就绪）
@@ -5073,10 +5106,10 @@ def _confirm_expected(code):
     actual = _auction_change(code)   # 真实竞价涨幅%（标准函数）
     exp_status = en.get("expected_status") or ""
     if "exceed" in exp_status:
-        bm, has_bm = _auction_benchmark(code)   # 基准缺失/<=0 不算达标（防过触发，v0.17）
+        bm, has_bm = _auction_benchmark(code)   # v1.27 基准缺失才不判；0/负基均合法
         if not has_bm:
             return PM, actual
-        return (CX if actual >= bm else PM), actual
+        return (CX if actual > bm else PM), actual
     if "miss" in exp_status:
         return (CS if actual < 0 else PM), actual
     return PM, actual   # meet/未标注 -> 等盘中确认
@@ -5122,9 +5155,33 @@ def _exp_rt_status(code):
     e["auction_status"] = au
     if entry == "one_word":
         st, _r = _exp_one_word(code)
+        # v1.27 一字/近一字开盘档位：非超预期且竞价涨幅低于涨停幅*0.8（主板+8%/20cm+16%/30cm+24%）判不及预期
+        if st not in (AW,) and _auction_ready(code):
+            _ac = _auction_change(code)
+            _min_open = _limit_pct_by_sec(code) * float(
+                BLS.get('one_word_open_meet_ratio', 0.8) or 0.8
+            )
+            if _ac < _min_open:
+                return CS, "one_word_open_below_min(%.1f%%)" % _ac
         if "exceed" in exp_status and st == CM:
             return PM, "seal_wait"      # 一字超预期：封单未超预期(CM)不下单，等封单超预期(CX)才买
         return st, "seal"
+    # v1.27 放量烂板/炸板不回封独立三态：红开超预期走盘中确认；小绿符合；大绿/跌停低于
+    if _bad_seal_role(code):
+        if au == AW:
+            return PM, "bad_seal_auction_awaiting"
+        if au == PX:
+            _t1 = _two_1m_break(code)
+            _t2 = _limit_up_within_1m(code)
+            if (_t1 or _t2) and not _below_vwap_confirm(code):
+                _src = 'two_1m' if _t1 else 'limit_1m'
+                return CX, "bad_seal_intraday_exceed_%s" % _src
+            if _below_vwap_confirm(code):
+                return CS, "below_vwap_weak"
+            return PM, "observe_bad_seal_red_open"
+        if au == PM:
+            return PM, "bad_seal_small_green_meet"
+        return CS, "bad_seal_green_open_miss"
     if "exceed" in exp_status:
         # 用户确认逻辑（T+1）：先竞价终态「初判」——竞价超预期才观察；未超预期则放弃（兜底，不再放任盘中买入）
         acon, actual = _confirm_expected(code)
@@ -6973,6 +7030,38 @@ def _hold_arb_log(sec, msg):
         pass
 
 
+def _p2e_reverse_log(sec, msg):
+    # v1.28 P2E 持仓自身反证审计（60s/股节流）
+    try:
+        gl = getattr(g, 'p2e_reverse_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.p2e_reverse_log = gl
+        now = time.time()
+        hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
+        if now - float(gl.get(sec) or 0) < hb:
+            return
+        gl[sec] = now
+        log.info('[P2E-reverse] %s %s' % (_sn(sec), msg))
+    except Exception:
+        pass
+
+
+def _p2e_skip_log(sec, why):
+    # v1.28 P2E 确认段跳过原因审计（60s/股节流）
+    try:
+        gl = getattr(g, 'p2e_skip_log', None)
+        if not isinstance(gl, dict):
+            gl = {}; g.p2e_skip_log = gl
+        now = time.time()
+        hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
+        if now - float(gl.get(sec) or 0) < hb:
+            return
+        gl[sec] = now
+        log.info('[P2E-skip] %s %s' % (_sn(sec), why))
+    except Exception:
+        pass
+
+
 def _role_tolerance(sec):
     # 按预期 sell_policy_hint 缩放卖出容忍度（AXquant 地位角色迁移，docs/17）；缺省 none=一律基础。
     # v0.33 防冲突：云端实时已走弱（绿开/破VWAP/分时CS）时，文件的乐观容忍不得放大 P1 绿开/P3 止损
@@ -7102,8 +7191,9 @@ def _sell_avail_backfill_log(sec, qty, avail_key, kind):
         pass
 
 
-def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0):
+def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key='', total_qty=0, avail_qty=0):
     # v1.22 桥持仓 amount=0 审计：可卖字段存在但总量缺失/为 0 时打印明细，不回填可卖（不虚构）
+    # v1.28 追加可卖字段真实值 avail_qty，消除“avail=1 是数量还是字段存在标志”的误读。
     try:
         if not BLS.get('sell_avail_amt0_warn_only', True):
             return
@@ -7115,8 +7205,8 @@ def _sell_avail_amt0_log(sec, avail_key, avail_present, total_present, total_key
             return
         gl[sec] = now
         _bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
-        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
-            _sn(sec), avail_key or '-', int(bool(avail_present)), int(bool(total_present)),
+        log.info('[pos-amt0] %s 可卖字段=%s avail_present=%d avail_val=%d total_present=%d total_field=%s total_qty=%d bought_qty=%d -> 不回填(防虚构可卖)' % (
+            _sn(sec), avail_key or '-', int(bool(avail_present)), int(avail_qty or 0), int(bool(total_present)),
             total_key or '-', int(total_qty or 0), _bq))
     except Exception:
         pass
@@ -7131,13 +7221,26 @@ def _sellable_backfill_detail(sec, positions):
         return qty, key, avail_present, total_present
     tq, tk, ok = _sellable_total(sec, positions)
     if not ok or tq <= 0:
-        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq)
+        _sell_avail_amt0_log(sec, key, avail_present, total_present, tk, tq, qty)
         return qty, key, avail_present, total_present
     _bought = str(sec) in ((getattr(g, 'daily', None) or {}).get('bought') or [])
     if _bought and BLS.get('sell_avail_t1_strict', True):
         return qty, key, avail_present, total_present   # T+1 当日买入不回填
     _sell_avail_backfill_log(sec, tq, tk, 't0' if _bought else 'prev')
     return tq, 'enable_backfill', True, True
+
+
+def _audit_sell_amt0(sec, raw, positions):
+    # v1.28 T+1 当日买入可卖 0 审计：打印可卖字段真实值 + 总量，供桥侧核对（sell_manager 1m 心跳）
+    try:
+        _q0, _k0, _av0, _tv0 = _sellable_detail(raw, positions)
+        _tq0, _tk0, _tok0 = _sellable_total(raw, positions)
+        _bought_today = '1' if str(raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
+        _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(raw) or 0)
+        _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail_present=%d avail_val=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
+            raw, _k0 or '-', int(_av0), int(_q0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
+    except Exception:
+        pass
 
 def _sellable(sec, positions):
     return _sellable_backfill_detail(sec, positions)[0]
@@ -7356,15 +7459,17 @@ def _audit_sell_skip(sec, why, now=None):
 def _p2e_core_sell_check(sec):
     # v0.58 P2E 竞价核卖统一判定（钩子 + 9:30 后 sell_manager/tick_sell_manager 共用，防逻辑漂移），返回 (hit, note)。
     #   触发 A：持仓所属题材存在中位股(T-1 board_cnt 2-5)，中位股最弱竞价 <= p2e_theme_drop_min(-2%)
-    #           且自身确认（基准有效: 竞价<基准；基准无效: 绿开<0）。
+    #           且中位股自身确认（基准有效: 竞价<基准；基准无效: 绿开<0）。
     #   触发 B：文件 expected_status ∈ (confirmed_miss, degraded)（pending_miss 默认不卖）+
     #           自身竞价 <= p2e_auction_drop_min(-2%)。
-    #   豁免：唯一高身位（交盘中监控，不核卖）；v0.33 反证守卫（实时 CX 不核卖）；side 仅 sell/hold。
+    #   豁免：唯一高身位（交盘中监控，不核卖）；v0.33/v1.28 反证守卫（触发A持仓自身超预期/一字封死
+    #           与触发B实时 CX 均不核卖，交盘中分时反证）；side 仅 sell/hold。
+    #   返回 (hit, note, reversed)：reversed=True 表示命中后被自身反证/身位豁免拦截。
     if not BLS.get('p2e_sell_enabled', True):
-        return False, ''
+        return False, '', False
     en = g.exp_file.get(sec) or {}
     if str(en.get('side') or '') not in ('sell', 'hold'):
-        return False, ''
+        return False, '', False
     _au = _auction_change(sec)
     # A：同题材中位股最弱竞价
     _mid = None
@@ -7395,29 +7500,61 @@ def _p2e_core_sell_check(sec):
     if BLS.get('exp_sell_on_pending_miss', False):
         _ma = _ma + ('pending_miss',)
     _hitB = bool(_est and _est in _ma and _au <= float(BLS.get('p2e_auction_drop_min', -2.0)))
+    _reversed = False
     if _hitB:
         try:   # v0.33 反证守卫：文件悲观但云端实时竞价超预期(CX) -> 不核卖，转实时分时三态
             _rev, _ra = _confirm_expected(sec)
             if _rev == CX:
-                _hold_arb_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
+                _p2e_reverse_log(sec, '文件预期=%s 悲观 vs 云端实时竞价超预期(CX) -> 不核卖' % _est)
                 _hitB = False
+                _reversed = True
         except Exception:
             pass
+    # A 反证守卫（v1.28）：持仓自身竞价超预期/一字封死，题材联动不直接清仓，交盘中分时确认
+    if _hitA:
+        _revA, _revAnote = _p2e_holding_reverse(sec, en)
+        if _revA:
+            _p2e_reverse_log(sec, '题材中位崩塌被自身反证豁免 %s (A: %s)' % (_revAnote, _noteA))
+            _hitA = False
+            _reversed = True
     # 唯一高身位豁免（有容忍度交到盘中监控）
     if (_hitA or _hitB) and _unique_stand(sec):
-        _hold_arb_log(sec, '唯一高身位豁免 P2E 竞价核卖 -> 交盘中监控')
-        return False, ''
+        _p2e_reverse_log(sec, '唯一高身位豁免 P2E 竞价核卖 -> 交盘中监控')
+        return False, '', True
     if _hitA:
-        return True, _noteA
+        return True, _noteA, False
     if _hitB:
-        return True, 'P2E_exp_miss %s ac=%.1f%%' % (_est, _au)
-    return False, ''
+        return True, 'P2E_exp_miss %s ac=%.1f%%' % (_est, _au), False
+    return False, '', _reversed
+
+
+def _p2e_holding_reverse(sec, en):
+    # v1.28 持仓自身反证判定：竞价超预期（PX/CX）或一字封死 -> 不核卖，给盘中反证机会。
+    # 竞价未就绪不误卖（保持等待），大绿开仍由 P1 硬信号兜底。
+    try:
+        if not BLS.get('p2e_reverse_guard_enabled', True):
+            return False, 'disabled'
+        if not _auction_ready(sec):
+            return False, 'auction_not_ready'
+        _au0, _rau = _eval_auction(sec)
+        if _au0 == PX:
+            return True, 'auction_exceed(%s)' % ','.join(_rau)
+        _rev, _ract = _confirm_expected(sec)
+        if _rev == CX:
+            return True, 'file_cx(%s)' % str(_ract)
+        e = g.exp.get(sec) or {}
+        if str(e.get('entry_type') or en.get('entry_type') or '') == 'one_word' and _is_one_word_open(sec):
+            return True, 'one_word_sealed'
+        return False, ''
+    except Exception:
+        return False, ''
 
 
 def p2e_auction_core_sell(context):
     # v0.58 P2E 竞价核卖：09:15-09:25 钩子（run_interval 3s）。09:24:45 前预热只日志不触发
     # （避免早期撮合价污染 g.auction_c）；09:24:45-09:25:30 确认段评估触发（先重读当日预期文件 +
     # 刷新竞价缓存）；9:30 后 sell_manager/tick_sell_manager 同条件兜底（sold_log 冷却 + 在途守卫去重）。
+    # v1.28 审计：确认段逐票评估 + [P2E-heartbeat] + 跳过原因，命中反证记 [P2E-reverse]。
     _set_now(context)
     if not BLS.get('p2e_sell_enabled', True):
         return
@@ -7435,26 +7572,54 @@ def p2e_auction_core_sell(context):
             _load_expectation(merge=True)   # 幂等重读：命中 9:15 前上传的当日文件（C 合并防收缩）
         except Exception:
             pass
+        log.info('[P2E] 确认段开始 hms=%s exp_file=%d' % (_hms, len(g.exp_file or {})))
     positions = _sellable_source() or context.portfolio.positions
     if not positions:
+        log.info('[P2E] 确认段 hms=%s 无持仓 positions=0' % _hms)
         return
     _sl = float(BLS.get('sell_cold_secs', 30.0))
+    _n_eval = 0; _n_hit = 0; _n_rev = 0; _n_skip = 0
+    _hb = float(BLS.get('p2e_audit_heartbeat_sec', 60.0) or 60.0)
     for _raw in list(positions.keys()):
         sec = _norm_sec(_raw) or _raw
         amt = _sellable(_raw, positions)
         if amt <= 0:
+            _n_skip += 1
+            _p2e_skip_log(sec, 'amt0(可卖=0)')
             continue
         if _sell_inflight(sec):
+            _n_skip += 1
+            _p2e_skip_log(sec, 'inflight')
             continue
         if isinstance(getattr(g, 'sold_log', None), dict) and (time.time() - g.sold_log.get(sec, 0)) < _sl:
+            _n_skip += 1
+            _p2e_skip_log(sec, 'sold_cold')
             continue
+        if not (getattr(g, 'zt_theme', None) or {}):
+            _p2e_skip_log(sec, 'theme_data_missing(全局题材索引为空)')
+        _n_eval += 1
         try:
-            _hit, _note = _p2e_core_sell_check(sec)
+            _res = _p2e_core_sell_check(sec)
+            _hit, _note = _res[0], _res[1]
+            _rev = bool(_res[2]) if len(_res) > 2 else False
         except Exception as _e:
             _warn('p2e check fail %s: %r' % (_sn(sec), _e)); continue
+        if _rev:
+            _n_rev += 1
+        elif _hit:
+            _n_hit += 1
+        log.info('[P2E] %s hms=%s hit=%d reverse=%d reason=%s' % (_sn(sec), _hms, int(_hit), int(_rev), _note or '-'))
         if _hit:
-            log.info('[P2E] %s 竞价核卖 %s hms=%s' % (_sn(sec), _note, _hms))
             _do_sell(context, sec, amt, _note, urgent=True)
+    _now = time.time()
+    if _now - float(getattr(g, 'p2e_heartbeat_ts', 0) or 0) >= _hb:
+        g.p2e_heartbeat_ts = _now
+        log.info('[P2E-heartbeat] hms=%s positions=%d eval=%d hit=%d reverse=%d skip=%d' % (
+            _hms, len(positions), _n_eval, _n_hit, _n_rev, _n_skip))
+    if _hms >= '09:25:00' and not getattr(g, 'p2e_end_logged', False):
+        g.p2e_end_logged = True
+        log.info('[P2E] 确认段结束 hms=%s positions=%d eval=%d hit=%d reverse=%d skip=%d exp_file=%d' % (
+            _hms, len(positions), _n_eval, _n_hit, _n_rev, _n_skip, len(g.exp_file or {})))
 
 
 def sell_manager(context):
@@ -7475,12 +7640,7 @@ def sell_manager(context):
             pass
         amt = _sellable(_raw, positions)
         if amt <= 0:
-            _q0, _k0, _av0, _tv0 = _sellable_detail(_raw, positions)
-            _tq0, _tk0, _tok0 = _sellable_total(_raw, positions)   # v1.22 amt0 审计带实际总量字段/数值
-            _bought_today = '1' if str(_raw) in ((getattr(g, 'daily', None) or {}).get('bought') or []) else '0'
-            _bq0 = int((getattr(g, 'bought_qty', None) or {}).get(_raw) or 0)
-            _audit_sell_skip(sec, 'amt0(lookup key=%s field=%s avail=%d total_field=%s total_qty=%d total_present=%d t1=%s bought_qty=%d)' % (
-                _raw, _k0 or '-', int(_av0), _tk0 or '-', int(_tq0), int(bool(_tok0)), _bought_today, _bq0))
+            _audit_sell_amt0(sec, _raw, positions)   # v1.28 打印可卖字段真实值+总量，防 avail 误读
             continue
         now = time.time()
         if _sell_inflight(sec):            # 订单/成交回报驱动的去重：有未终态卖单在途则跳过(防叠单)
@@ -7491,7 +7651,7 @@ def sell_manager(context):
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open drop=%.1f%%' % _auction_change(sec), urgent=True); continue
         # P2E 竞价核卖（v0.58 docs/33 统一判定）：自身大不及(文件 miss/degraded + 竞价大低开) / 同题材中位崩塌传导
-        _hit2, _note2 = _p2e_core_sell_check(sec)
+        _hit2, _note2 = _p2e_core_sell_check(sec)[:2]
         if _hit2:
             _do_sell(context, sec, amt, _note2, urgent=True); continue
         if cost > 0:
@@ -7632,7 +7792,7 @@ def tick_sell_manager(context):
         rp = _role_tolerance(sec)
         if _auction_change(sec) <= BLS['green_open_drop'] * rp['green_tol']:
             _do_sell(context, sec, amt, 'P1_green_open_tick drop=%.1f%%' % _auction_change(sec), urgent=True); continue
-        _hit2, _note2 = _p2e_core_sell_check(sec)
+        _hit2, _note2 = _p2e_core_sell_check(sec)[:2]
         if _hit2:
             _do_sell(context, sec, amt, _note2, urgent=True); continue
         cost = my_cost(_raw, positions)

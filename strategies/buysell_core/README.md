@@ -3,14 +3,49 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.26（2026-11-02）
+- 当前版本：v1.28（2026-11-03）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.26 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.28 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.28
+- v1.28 P2E 持仓自身反证 + 审计（2026-11-03 用户确认“超预期个股给容忍度和盘中反证机会”后实施）：
+  - 触发 A（同题材中位崩塌传导）新增持仓自身反证守卫：竞价超预期（`_eval_auction` PX / 文件 CX）、
+    bad seal 红开超预期、一字封死均不核卖，交盘中分时确认；P1 大绿开、P3 止损、P4 破 VWAP 弱化
+    兜底不变；参数 `p2e_reverse_guard_enabled=True` 总开关。澳洋健康类“红开超预期被题材联动误卖”不再发生。
+  - 确认段审计：`p2e_auction_core_sell` 逐票评估日志 `[P2E] sec hms hit/reverse/reason`、
+    `[P2E-heartbeat]` 计数心跳、`[P2E-skip]` 跳过原因（amt0/inflight/sold_cold/题材索引缺失）、
+    确认段起止日志含 exp_file 条目数；反证豁免记 `[P2E-reverse]`。
+  - T+1 可卖 0 审计修正：`[sell-skip] amt0` / `[pos-amt0]` 增加 `avail_val`（可卖字段真实值），
+    原 `avail=1` 是“字段存在”标志，避免误读为 1 股；当日买入仍 T+1 严格不回填，跨日总量兜底不变。
+  - 测试：新增 `tests/test_buysell_core_v128_p2e_reverse.py`（bad seal 红开反证、文件 CX 反证、
+    一字封死反证、绿开仍核卖、反证开关、审计心跳、amt0 真实值）；PT 全量 pytest 187 passed。
+
+### v1.27
+- v1.27 预期三态口径修正（2026-11-02 用户确认后实施）：
+  - 竞价超预期基准：今日竞价涨幅 > S-1 日开盘涨幅即竞价超预期，进入盘中确认；
+    取消核心苗子 seed `max(auc,3.0)` 固定底线；`_auction_benchmark` 按“是否提供”
+    判断，0.0 平开与负基均为合法基准（`has_expected_auction`），不再用 >0 过滤。
+  - 放量烂板/炸板不回封独立三态：`role_detail=bad_seal_board` /
+    `broken_consecutive_limit_up` 时，红开 >0 = 超预期；-2% < 绿开 <= 0 = 符合；
+    绿开 <= -2% 或跌停开 = 低于；阈值参数
+    `exp_bad_seal_red_exceed / exp_bad_seal_big_green_miss`；
+    红开超预期继续走盘中确认，不受复盘基础 `pending_miss` 静态放弃，
+    竞价数据未就绪返回 `bad_seal_auction_awaiting` 等待。
+  - 一字/近一字开盘档位：封单未超预期且竞价涨幅低于涨停幅*0.8
+    （主板 +8%、20cm +16%、30cm +24%，参数 `one_word_open_meet_ratio=0.8`）
+    判 `one_word_open_below_min` 不及预期；封单/数据未就绪保持等待。
+  - 中位身份：`role_detail=mid_consecutive_limit_up` 权威标注硬规避，
+    买入/预期/弹性/扫板一律不参与；无权威标注时保留 zt `unique_high` 与
+    动态唯一兜底放行（供方 `derive_role_detail` 已保证中位与唯一龙头互斥）。
+  - 所有股票买入必须过盘中超预期确认（meet 也强制分时确认），容忍度只针对持仓股；
+    `_confirm_expected` 基准缺失保持 `await_intraday_confirm`，不误弃。
+  - 同步 PT bridge `model/rules/publish` 的 bad_seal 常量、独立三态、
+    一字开盘档位与 `open_times/max_seal_money` 字段，AXquant 复盘产物可直接消费。
 
 ### v1.26
 - v1.26 打板/扫板场景拆分（2026-11-02 用户确认“A 新题材首板扫板 / B 动态唯一扫板，其它打板统一涨停价首帧成交后最快买入”）：
