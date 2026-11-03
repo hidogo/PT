@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.28"                                                        
+STRATEGY_VERSION = "v1.29"                                                        
 
 def _warn(msg):
                                                                  
@@ -331,6 +331,8 @@ BLS = {
     'seal_low_sell_enabled': True,                                      
     'seal_low_confirm_sec': 6.0,                                              
     'seal_low_fast_ratio': 0.15,                                                   
+    'seal_low_tail_auction_start': '14:57',                                        
+    'seal_low_tail_auction_end': '15:00',                     
     'seal_low_batch_invalid_ratio': 0.3,                                                 
     'seal_low_batch_invalid_min': 5,                                      
                                                          
@@ -1731,8 +1733,9 @@ def _seal_metrics(sec):
 def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_ratio=0.15):
                                             
     if fs > 0 and book_ok and seal < fs * sfr:
+        _tail = _is_tail_auction()
         fast = float(fast_ratio or 0.0) > 0.0 and seal < fs * float(fast_ratio)
-        if fast:
+        if fast and not _tail:
             if not ft.get('seal_low_fast'):
                 ft['seal_low_fast'] = True
                 ft['seal_low_fast_ts'] = time.time()
@@ -1740,6 +1743,14 @@ def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_
             if not ft.get('seal_low'):
                 ft['seal_low'] = True
                 ft['seal_low_confirm_ts'] = time.time()
+        elif fast and _tail:
+                                                    
+            ft['tail_auction'] = True
+            if not ft.get('seal_low'):
+                ft['seal_low'] = True
+                ft['seal_low_confirm_ts'] = time.time()
+            if not ft.get('seal_low_fast'):
+                log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW_FAST(尾盘竞价降级两帧确认 tail_auction=1)' % (_sn(sec), seal, fs, seal / fs, bids))
         elif not ft.get('seal_low'):
             ft['seal_low'] = True
             ft['seal_low_confirm_ts'] = time.time()
@@ -1748,9 +1759,25 @@ def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_
         if (book_ok and seal >= fs * sfr) or (last >= u - 1e-9 and not ft.get('break')):
             ft['seal_low'] = False
             ft['seal_low_fast'] = False
+            ft['tail_auction'] = False
             ft.pop('seal_low_fast_ts', None)
             ft.pop('seal_low_confirm_ts', None)
             log.info('[seal-low-guard] %s 封单恢复(seal=%.0f ratio=%.2f)或仍封死 -> 撤销 SEAL_LOW' % (_sn(sec), seal, (seal / fs if fs else 0.0)))
+
+def _is_tail_auction():
+                                           
+    s = _hhmmss()
+    try:
+        h, m, sec = int(s[:2]), int(s[3:5]), int(s[6:8])
+        cur = h * 3600 + m * 60 + sec
+        def _to_sec(v):
+            a, b = v.split(':')
+            return int(a) * 3600 + int(b) * 60
+        start = _to_sec(str(BLS.get('seal_low_tail_auction_start', '14:57') or '14:57'))
+        end = _to_sec(str(BLS.get('seal_low_tail_auction_end', '15:00') or '15:00'))
+        return start <= cur < end
+    except Exception:
+        return False
 
 def _gear_batch_health():
                                                                 
@@ -8376,6 +8403,10 @@ def _firstzt_rebreak_log(sec):
 
 def tick_data(context, data):
                                                    
+    try:
+        _set_now(context)                          
+    except Exception:
+        pass
     try:
         g.gear_invalid_cnt = 0
         g.gear_total_cnt = 0

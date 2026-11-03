@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.27（2026-11-02）
-# 部署核对：日志首行 `buysell_core init version=v1.28 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.29（2026-11-03）
+# 部署核对：日志首行 `buysell_core init version=v1.29 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.28"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
+STRATEGY_VERSION = "v1.29"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
 
 
 def _warn(msg):
@@ -341,6 +341,8 @@ BLS = {
     'seal_low_sell_enabled': True,   # 封单大减卖出：first_zt.seal_low 首触发 -> 卖
     'seal_low_confirm_sec': 6.0,     # v1.23 封单大减两帧确认（3s tick 约 2 帧），尾盘竞价段同样生效
     'seal_low_fast_ratio': 0.15,     # v1.23 封单骤减快确认：seal <= 首封*该比例（含0）时 1 帧即卖，保灵敏度
+    'seal_low_tail_auction_start': '14:57',   # v1.29 收盘集合竞价开始：SEAL_LOW_FAST 降级两帧确认
+    'seal_low_tail_auction_end': '15:00',     # v1.29 收盘集合竞价结束
     'seal_low_batch_invalid_ratio': 0.3,  # v1.23 同帧 L2 十档缺失占比超阈值 -> 整批不健康，跳过 SEAL_LOW 卖出
     'seal_low_batch_invalid_min': 5,      # v1.23 整批不健康的缺失家数下限（与占比同时满足才熔断）
     # v1.24 竞价-开盘-10:00 跌停题材因子（docs/43 扩展）：全市场跌停归集到题材/概念，
@@ -1824,8 +1826,9 @@ def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_
     # v1.23 封单大减两帧确认：数据有效才置位；封单恢复/仍封死涨停立即撤销，
     # 防止 L2 整批空档或单帧抖动被当成真实封单清零（2026-11-02 红太阳误卖根因）。
     if fs > 0 and book_ok and seal < fs * sfr:
+        _tail = _is_tail_auction()
         fast = float(fast_ratio or 0.0) > 0.0 and seal < fs * float(fast_ratio)
-        if fast:
+        if fast and not _tail:
             if not ft.get('seal_low_fast'):
                 ft['seal_low_fast'] = True
                 ft['seal_low_fast_ts'] = time.time()
@@ -1833,6 +1836,15 @@ def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_
             if not ft.get('seal_low'):
                 ft['seal_low'] = True
                 ft['seal_low_confirm_ts'] = time.time()
+        elif fast and _tail:
+            # v1.29 收盘集合竞价（14:57-15:00）封单归零属正常撤单/撮合，
+            # FAST 一帧卖出降级两帧确认，防尾盘竞价误卖（2026-11-03 14:59 六票 SEAL_LOW_FAST 根因）。
+            ft['tail_auction'] = True
+            if not ft.get('seal_low'):
+                ft['seal_low'] = True
+                ft['seal_low_confirm_ts'] = time.time()
+            if not ft.get('seal_low_fast'):
+                log.info('[firstzt] %s seal=%.0f first=%.0f ratio=%.2f bids=%d -> SEAL_LOW_FAST(尾盘竞价降级两帧确认 tail_auction=1)' % (_sn(sec), seal, fs, seal / fs, bids))
         elif not ft.get('seal_low'):
             ft['seal_low'] = True
             ft['seal_low_confirm_ts'] = time.time()
@@ -1841,9 +1853,26 @@ def _update_seal_low_state(ft, sec, last, u, seal, bids, book_ok, fs, sfr, fast_
         if (book_ok and seal >= fs * sfr) or (last >= u - 1e-9 and not ft.get('break')):
             ft['seal_low'] = False
             ft['seal_low_fast'] = False
+            ft['tail_auction'] = False
             ft.pop('seal_low_fast_ts', None)
             ft.pop('seal_low_confirm_ts', None)
             log.info('[seal-low-guard] %s 封单恢复(seal=%.0f ratio=%.2f)或仍封死 -> 撤销 SEAL_LOW' % (_sn(sec), seal, (seal / fs if fs else 0.0)))
+
+
+def _is_tail_auction():
+    # v1.29 收盘集合竞价段判定（默认 14:57-15:00，参数化窗口）
+    s = _hhmmss()
+    try:
+        h, m, sec = int(s[:2]), int(s[3:5]), int(s[6:8])
+        cur = h * 3600 + m * 60 + sec
+        def _to_sec(v):
+            a, b = v.split(':')
+            return int(a) * 3600 + int(b) * 60
+        start = _to_sec(str(BLS.get('seal_low_tail_auction_start', '14:57') or '14:57'))
+        end = _to_sec(str(BLS.get('seal_low_tail_auction_end', '15:00') or '15:00'))
+        return start <= cur < end
+    except Exception:
+        return False
 
 
 def _gear_batch_health():
@@ -8905,6 +8934,10 @@ def _firstzt_rebreak_log(sec):
 def tick_data(context, data):
     # 仅交易，9:30-14:59 每 3s 一次。L2 涨停首笔成交感知 + 封单/破板节奏。
     # 只采集状态与 [firstzt] 日志，下单仍走 1m handle_data（采集/决策解耦）。
+    try:
+        _set_now(context)   # v1.29 尾盘竞价段判定需要当前交易时间
+    except Exception:
+        pass
     try:
         g.gear_invalid_cnt = 0
         g.gear_total_cnt = 0
