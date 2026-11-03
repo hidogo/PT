@@ -69,6 +69,7 @@ def mod():
     m._l2_big_ratio = lambda sec: 0.15
     m._l2_big_ok = lambda sec: True
     m._lb_senti_gate_apply = lambda sec, action: True
+    m._dyn_unq_theme_rank_ok = lambda sec: True   # v1.30 题材强度门默认放行（单测聚焦下单链路）
     m._new_themes_of = lambda sec: ["THS:新概念"]
     m.g = SimpleNamespace(
         daily=m._new_daily(),

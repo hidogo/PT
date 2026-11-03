@@ -3,14 +3,37 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.28（2026-11-03）
+- 当前版本：v1.30（2026-11-03）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.28 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.30 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.30
+- v1.30 动态唯一题材化重构 + T+1 当日买入保护持久化（2026-11-03 用户确认后实施）：
+  - 盘中动态唯一改为题材桶 + 连板梯队口径：比较集 = 所属题材全部涨停池成员 + 今日已首触/近涨停
+    成员（含当日新首板），取消“概念前 15 截断”假唯一；唯一只授主题内最高存活身位且身位>=2，
+    同身位竞品全部分离（未首触/已破板/涨幅落后>=2%）才成立；成员数>=3、行情覆盖>=80%，
+    覆盖不足或成员不足不判唯一并记 `[dyn-unq-skip]`。
+  - 跟风确认同主题化：同题材、身位更低、未封板、涨幅>0 前 5 名算 1m surge；
+    surge 缺失计 `na`，缺失占比>50% 不确认；并发唯一上限 `dyn_unq_max_active=3`，
+    按（-身位，首触时间）淘汰；扫板 B 新增题材强度门（存量梯队名次<=3，临时 THS 桶需发酵
+    confirmed/hot）；非唯一重评节流由 60s 收紧到 15s。
+  - T+1 保护持久化：当日买入可卖=0 时 `_t1_protect_capture` 只记录 BREAK/SEAL_LOW/P1/P2E/P3/
+    P7a/P7b/P7d/P8 触发（不卖单），`[t1-protect]` 日志 + 60s 节流落盘；次日 09:30-10:00
+    `_t1_protect_consume` 复核：弱开（竞价<=-2%）或止损补卖，强开（>=+3%）/封死清 pending
+    转常规监控，10:00 后转常规；跨日/重启保留 pending。
+  - 测试：新增 `tests/test_buysell_core_v130_theme_unique_t1.py`（唯一题材门、同身位分离、
+    higher 拦截、跟风 surge_na、并发上限、题材强度门、T+1 capture/consume 四态）；
+    PT 全量 pytest 205 passed。
+
+### v1.29
+- v1.29 尾盘竞价段封单衰减保护（2026-11-03 用户确认后实施）：
+  - tick 进入 14:57 后 SEAL_LOW FAST 路径降级两帧确认或跳过（收盘集合竞价段卖出单无法正常排队，
+    保护意义低）；14:59 日志追加 `tail_auction=1` 审计标记。
 
 ### v1.28
 - v1.28 P2E 持仓自身反证 + 审计（2026-11-03 用户确认“超预期个股给容忍度和盘中反证机会”后实施）：

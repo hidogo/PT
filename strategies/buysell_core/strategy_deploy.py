@@ -2,7 +2,7 @@
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.29"                                                        
+STRATEGY_VERSION = "v1.30"                                                        
 
 def _warn(msg):
                                                                  
@@ -114,6 +114,11 @@ BLS = {
     'sell_avail_backfill_enabled': True,                                             
     'sell_avail_t1_strict': True,                                                      
     'sell_avail_amt0_warn_only': True,                                          
+    't1_protect_enabled': True,                                               
+    't1_protect_open_drop': 0.02,                                                       
+    't1_protect_strong_open': 3.0,                                                          
+    't1_protect_consume_until_minute': 10,                                  
+    't1_pending_save_sec': 60.0,                                              
     'order_no_reply_timeout': 90.0,                                              
     'order_reconcile_interval_sec': 60.0,                          
     'board_cancel_warn_sec': 300.0,                        
@@ -374,6 +379,16 @@ BLS = {
     'dyn_unq_follower_min': 2,                    
     'dyn_unq_surge_pct': 1.5,                         
     'dyn_unq_sort_bonus': 2.0,                                        
+    'dyn_unq_theme_mode': True,                                             
+    'dyn_unq_min_level': 2,                                       
+    'dyn_unq_min_members': 3,                                     
+    'dyn_unq_min_covered': 0.8,                                      
+    'dyn_unq_sep_chg_gap': 2.0,                                
+    'dyn_unq_max_active': 3,                                        
+    'dyn_unq_pool_cache_sec': 15,                                   
+    'dyn_unq_sep_recheck_sec': 15,                              
+    'dyn_unq_surge_na_max': 0.5,                                      
+    'dyn_unq_theme_rank_max': 3,                                   
     'dyn_sweep_enabled': True,                     
     'dyn_sweep_window_minute': 30,                                                   
     'dyn_sweep_budget_ratio': 0.20,                      
@@ -738,6 +753,10 @@ def initialize(context):
     g.hist_recover_once = {}                                                       
     g.firstzt_log_ts = {}                                         
     g.bought_qty = {}                                                            
+    g.t1_pending_sell = {}                                               
+    g.t1_pending_log_ts = {}                                              
+    g.t1_pending_save_ts = 0.0                                      
+    g.dyn_unq_pool_cache = {}                                 
     g.pos_cap_skips = 0                                                   
     g.pos_cap_shrinks = 0                                                   
     g.sell_skip_cnt = {}                                             
@@ -975,6 +994,10 @@ def handle_data(context, data):
         _score_recover_probe()                           
     except Exception:
         pass
+    try:
+        _t1_protect_consume(context)                          
+    except Exception as _e:
+        _warn('t1 protect consume fail %r' % _e)
     sell_manager(context)
     try:
         _board_queue_cancel_scan()                                         
@@ -5094,15 +5117,49 @@ def _dyn_unq_auction_eval():
     st['auction_done'] = True
     return len(st['auction'])
 
-def _dyn_unq_eval_uniq(sec, st, now):
-                                              
-    boards = [b for b in _concept_boards_of(sec) if _board_members_file(b, 1)]
-    if not boards:
-        return
-    board = boards[0]
-    members = [m for m in _board_members_file(board, int(BLS.get('dyn_unq_member_cap', 15))) if m]
-    if not members:
-        return
+def _dyn_unq_themes_of(sec):
+                                                        
+    out = []
+    for t in (_zt_themes_of(sec) + _new_themes_of(sec)):
+        if t and t not in out:
+            out.append(t)
+    return out
+
+def _dyn_unq_theme_pool(theme):
+                                                 
+    now = time.time()
+    cache = getattr(g, 'dyn_unq_pool_cache', None)
+    if not isinstance(cache, dict):
+        cache = {'ts': 0.0, 'data': {}}
+        g.dyn_unq_pool_cache = cache
+    cache.setdefault('data', {})
+    ttl = float(BLS.get('dyn_unq_pool_cache_sec', 15) or 15)
+    ent = cache['data'].get(theme)
+    if ent and now - float(ent.get('ts') or 0) < ttl:
+        return ent.get('members') or [], float(ent.get('covered') or 0.0)
+    members = set()
+    tb = (getattr(g, 'zt_theme', {}) or {}).get(theme) or {}
+    for m in (tb.get('members') or []):
+        m = _norm_sec(m)
+        if m:
+            members.add(m)
+    for c, ft in (getattr(g, 'first_zt', None) or {}).items():
+        c = _norm_sec(c)
+        if not c or not ft:
+            continue
+        if theme.startswith('THS:'):
+            hit = theme in _new_themes_of(c)
+        else:
+            hit = theme in _zt_themes_of(c)
+        if hit:
+            members.add(c)
+    if not members and theme.startswith('THS:'):
+        name = theme.split(':', 1)[1]
+        for m in _board_members_file(name, int(BLS.get('dyn_unq_member_cap', 15))):
+            m = _norm_sec(m)
+            if m:
+                members.add(m)
+    members = sorted(m for m in members if m)
     _need = [m for m in members if not (g.spot.get(m) or {}).get('last_px')]
     if _need:
         try:
@@ -5112,35 +5169,166 @@ def _dyn_unq_eval_uniq(sec, st, now):
                     g.spot[_m] = _d
         except Exception:
             pass
+    covered = (sum(1 for m in members if (g.spot.get(m) or {}).get('last_px')) / len(members)) if members else 0.0
+    cache['data'][theme] = {'ts': now, 'members': members, 'covered': covered}
+    cache['ts'] = now
+    return members, covered
+
+def _dyn_unq_peer_chg(sec, d=None):
+                                  
+    d = d if d is not None else (g.spot.get(sec) or {})
+    try:
+        px = float(d.get('last_px') or 0.0)
+        pre = float(d.get('preclose_px') or 0.0)
+        if px > 0 and pre > 0:
+            return (px / pre - 1.0) * 100.0
+    except Exception:
+        pass
+    return None
+
+def _dyn_unq_peer_alive(sec):
+                         
+    ft = (g.first_zt or {}).get(sec) or {}
+    return bool(ft and not ft.get('break'))
+
+def _dyn_unq_peer_separated(sec, peer, my_chg):
+                                                     
+    pft = (g.first_zt or {}).get(peer) or {}
+    if not pft:
+        return True
+    if pft.get('break'):
+        return True
+    pchg = _dyn_unq_peer_chg(peer)
+    if pchg is None or my_chg is None:
+        return False
+    return (my_chg - pchg) >= float(BLS.get('dyn_unq_sep_chg_gap', 2.0) or 2.0)
+
+def _dyn_unq_surge_raw(sec):
+                                                                       
+    try:
+        dh = _get_ds()
+        return dh.cached('m1_surge', sec, float(BLS.get('m1_surge_cache_ttl', 15.0)),
+                         lambda: _calc_1m_surge(sec), budget='m1')
+    except Exception:
+        return None
+
+def _dyn_unq_theme_rank_ok(sec):
+                                                                            
+    themes = _dyn_unq_themes_of(sec)
+    if not themes:
+        return False
+    fm = _dyn_theme_ferment()
+    mx = int(BLS.get('dyn_unq_theme_rank_max', 3) or 3)
+    for name in themes:
+        if name.startswith('THS:'):
+            d = fm.get(name) or {}
+            if d.get('confirmed') or d.get('stage') in ('confirmed', 'hot'):
+                return True
+        else:
+            rk = int((getattr(g, 'zt_theme', {}) or {}).get(name, {}).get('rank') or 0)
+            if 0 < rk <= mx:
+                return True
+    return False
+
+def _dyn_unq_skip_log(sec, theme, reason, extra='', throttle_sec=5.0):
+                                                                              
+    try:
+        _skip_log('dyn_unq', sec, reason,
+                  '[dyn-unq-skip] %s theme=%s reason=%s%s' % (
+                      _sn(sec), theme or '-', reason, (' ' + extra) if extra else ''),
+                  throttle_sec=throttle_sec)
+    except Exception:
+        pass
+
+def _dyn_unq_eval_uniq(sec, st, now):
+                                                            
+    uniq_map = st.setdefault('uniq', {})
+    themes = _dyn_unq_themes_of(sec)
+    if not themes:
+        _dyn_unq_skip_log(sec, '-', 'no_theme')
+        uniq_map.pop(sec, None)
+        return
     my_lvl = _dyn_level_of(sec, {sec: g.spot.get(sec) or {}})
-    higher = same = False
-    for m in members:
+    if my_lvl < int(BLS.get('dyn_unq_min_level', 2) or 2):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'low_level', 'lvl=%d' % my_lvl)
+        uniq_map.pop(sec, None)
+        return
+    pool = set()
+    in_sample = False
+    for theme in themes:
+        members, covered = _dyn_unq_theme_pool(theme)
+        if not members:
+            continue
+        mset = set(_norm_sec(m) for m in members)
+        if _norm_sec(sec) in mset:
+            in_sample = True
+        pool.update(mset)
+    pool = sorted(m for m in pool if m)
+    if not in_sample:
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'no_in_sample')
+        uniq_map.pop(sec, None)
+        return
+    member_total = len(pool)
+    if member_total < int(BLS.get('dyn_unq_min_members', 3) or 3):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'member_low', 'total=%d' % member_total)
+        uniq_map.pop(sec, None)
+        return
+    covered = sum(1 for m in pool if (g.spot.get(m) or {}).get('last_px')) / float(member_total)
+    if covered < float(BLS.get('dyn_unq_min_covered', 0.8) or 0.8):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'covered_low',
+                          'total=%d covered=%.0f%%' % (member_total, covered * 100))
+        uniq_map.pop(sec, None)
+        return
+    my_chg = _dyn_unq_peer_chg(sec)
+    higher = False
+    same = []
+    for m in pool:
         if m == sec:
             continue
         ml = _dyn_level_of(m, {m: g.spot.get(m) or {}})
-        if ml > my_lvl:
+        if ml > my_lvl and _dyn_unq_peer_alive(m):
             higher = True
-        elif ml == my_lvl:
-            same = True
+        elif ml == my_lvl and _dyn_unq_peer_alive(m) and not _dyn_unq_peer_separated(sec, m, my_chg):
+            same.append(m)
+    old = uniq_map.get(sec) or {}
     if higher or same:
-        st['uniq'][sec] = {'board': board, 'uniq': False, 'ts': now, 'level': my_lvl, 'members': members}
+        uniq_map[sec] = {'theme': ','.join(themes[:3]), 'uniq': False, 'ts': now,
+                         'level': my_lvl, 'members': pool, 'member_total': member_total,
+                         'covered': covered, 'higher': higher, 'same': same,
+                         'confirm': False, 'confirm_ts': 0, 'follow_ev': False,
+                         'last_follow': 0.0, 'surge_cnt': 0}
+        log.info('[dyn-unq] %s theme=%s 身位=%d total=%d covered=%.0f%% higher=%d same=%s -> 非唯一(15s重评)' % (
+            _sn(sec), uniq_map[sec]['theme'], my_lvl, member_total, covered * 100,
+            int(higher), ','.join(_sn(x) for x in same[:5])))
         return
-    st['uniq'][sec] = {'board': board, 'uniq': True, 'ts': now, 'level': my_lvl,
-                       'members': members, 'confirm': False, 'confirm_ts': 0,
-                       'follow_ev': False, 'last_follow': 0.0, 'surge_cnt': 0}
-    log.info('[dyn-unq] %s 板块=%s 身位=%d -> 动态唯一龙头(首触)' % (_sn(sec), board, my_lvl))
+    prev_uniq = bool(old.get('uniq'))
+    uniq_map[sec] = {'theme': ','.join(themes[:3]), 'uniq': True, 'ts': now,
+                     'level': my_lvl, 'members': pool, 'member_total': member_total,
+                     'covered': covered,
+                     'unique_ts': old.get('unique_ts') if prev_uniq else now,
+                     'separation_ts': old.get('separation_ts') if prev_uniq else now,
+                     'confirm': bool(old.get('confirm')),
+                     'confirm_ts': old.get('confirm_ts') or 0,
+                     'follow_ev': bool(old.get('follow_ev')),
+                     'last_follow': float(old.get('last_follow') or 0.0),
+                     'surge_cnt': int(old.get('surge_cnt') or 0)}
+    log.info('[dyn-unq] %s theme=%s 身位=%d total=%d covered=%.0f%% sep=%.1f%% -> 动态唯一成立' % (
+        _sn(sec), uniq_map[sec]['theme'], my_lvl, member_total, covered * 100,
+        my_chg if my_chg is not None else -99.0))
 def _dyn_unq_eval_follow(sec, st, u):
-                                                
+                                                    
     now = time.time()
     if u.get('confirm'):
         return
-    if now - float(u.get('last_follow') or 0) < 15.0:
+    if now - float(u.get('last_follow') or 0) < float(BLS.get('dyn_unq_sep_recheck_sec', 15) or 15):
         return
     u['last_follow'] = now
     first_ts = ((g.first_zt or {}).get(sec) or {}).get('ts') or u.get('ts') or now
     if now - float(first_ts) > float(BLS.get('dyn_unq_follow_win_sec', 300.0)):
         return
     members = u.get('members') or []
+    if not members:
+        return
     if not u.get('follow_ev'):
         _need = [m for m in members if m != sec and not (g.spot.get(m) or {}).get('last_px')]
         if _need:
@@ -5159,7 +5347,8 @@ def _dyn_unq_eval_follow(sec, st, u):
             continue
         d = g.spot.get(m) or {}
         try:
-            up = float(d.get('up_px') or 0.0); px = float(d.get('last_px') or 0.0)
+            up = float(d.get('up_px') or 0.0)
+            px = float(d.get('last_px') or 0.0)
             pre = float(d.get('preclose_px') or 0.0)
         except Exception:
             continue
@@ -5171,16 +5360,26 @@ def _dyn_unq_eval_follow(sec, st, u):
         if chg > 0:
             followers.append((chg, m))
     followers.sort(reverse=True)
+    top = followers[:int(BLS.get('dyn_unq_surge_top_n', 5))]
     surge_cnt = 0
-    for _chg, m in followers[:int(BLS.get('dyn_unq_surge_top_n', 5))]:
+    na_cnt = 0
+    for _chg, m in top:
         try:
-            if _elastic_1m_surge(m) >= float(BLS.get('dyn_unq_surge_pct', 1.5)):
+            v = _dyn_unq_surge_raw(m)
+            if v is None:
+                na_cnt += 1
+            elif v >= float(BLS.get('dyn_unq_surge_pct', 1.5)):
                 surge_cnt += 1
         except Exception:
-            continue
+            na_cnt += 1
     u['surge_cnt'] = surge_cnt
+    u['surge_na'] = na_cnt
+    if top and float(na_cnt) / float(len(top)) > float(BLS.get('dyn_unq_surge_na_max', 0.5) or 0.5):
+        log.info('[dyn-unq] %s 跟风确认 surge_na=%d/%d -> 暂不确认(数据缺失)' % (_sn(sec), na_cnt, len(top)))
+        return
     if surge_cnt >= int(BLS.get('dyn_unq_follower_min', 2)):
-        u['confirm'] = True; u['confirm_ts'] = now
+        u['confirm'] = True
+        u['confirm_ts'] = now
         log.info('[dyn-unq] %s 跟风确认 %d家(1m>=%.1f%%) -> 确认' % (
             _sn(sec), surge_cnt, float(BLS.get('dyn_unq_surge_pct', 1.5))))
 
@@ -5267,6 +5466,12 @@ def _try_dyn_sweep(context, st=None):
             continue
         if not _dyn_unq_auction_unique(sec) or not _dyn_unq_confirmed(sec):
             continue
+        if not _dyn_unq_theme_rank_ok(sec):
+            _skip_log('sweep_b', sec, 'theme_rank',
+                      '[sweep-b] %s 题材强度不足(rank>%d或新题材未确认) -> skip' % (
+                          _sn(sec), int(BLS.get('dyn_unq_theme_rank_max', 3))),
+                      throttle_sec=60.0)
+            continue
         if not trade_open(sec):
             continue
         if _is_one_word_open(sec) or _block_sealed_buy(sec):
@@ -5312,8 +5517,8 @@ def _try_dyn_unq(context):
         try:
             u = st['uniq'].get(sec)
             if u is not None and u.get('uniq') is False:
-                if now - float(u.get('ts') or 0) < 60.0:
-                    continue                                              
+                if now - float(u.get('ts') or 0) < float(BLS.get('dyn_unq_sep_recheck_sec', 15) or 15):
+                    continue                                                      
                 u['ts'] = now
             if u is None or u.get('uniq') is False:
                 _dyn_unq_eval_uniq(sec, st, now)                  
@@ -5323,6 +5528,19 @@ def _try_dyn_unq(context):
             _dyn_unq_eval_follow(sec, st, u)               
         except Exception as e:
             _warn('dyn_unq %s fail %r' % (_sn(sec), e))
+                                                       
+    active = {s: u for s, u in st.get('uniq', {}).items() if u and u.get('uniq')}
+    mx_active = int(BLS.get('dyn_unq_max_active', 3) or 3)
+    if len(active) > mx_active:
+        rank = sorted(active.items(),
+                      key=lambda kv: (-int(kv[1].get('level') or 0),
+                                      float(kv[1].get('unique_ts') or 0.0)))
+        keep = set(k for k, _ in rank[:mx_active])
+        for k in list(active):
+            if k not in keep:
+                _dyn_unq_skip_log(k, str((active[k] or {}).get('theme') or '-'),
+                                  'over_cap', 'active=%d' % len(active), throttle_sec=60.0)
+                st['uniq'].pop(k, None)
     _try_dyn_sweep(context, st)                              
 
 def _pool_exp_priority(code, direction=None):
@@ -5973,7 +6191,7 @@ def _calc_1m_surge(sec):
                                                                      
     df = get_price(sec, start_date=None, end_date=None, count=2, frequency='1m')
     if df is None or len(df) < 1:
-        return 0.0
+        return None                                                               
     o = float(df['open'].iloc[-1] or 0.0); close_px = float(df['close'].iloc[-1] or 0.0)
     return (close_px / o - 1.0) * 100.0 if o > 0 else 0.0
 
@@ -6979,6 +7197,150 @@ def _do_sell(context, sec, qty, note, urgent=False, mode=None, cool=True):
         g.sold_log[sec] = time.time()                                                     
     place_order(context, sec, 'sell', qty=qty, note=note, mode=mode or ('sell_urgent' if urgent else 'sell'))
 
+def _t1_protect_capture(sec, raw, positions):
+                                                               
+    try:
+        if not BLS.get('t1_protect_enabled', True):
+            return
+        daily = getattr(g, 'daily', None) or {}
+        bought = daily.get('bought') or []
+        if sec not in bought and raw not in bought:
+            return
+        bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
+        if bq <= 0:
+            bq = int((getattr(g, 'bought_qty', None) or {}).get(raw) or 0)
+        if bq <= 0:
+            return
+        today = str(get_trading_day())
+        px = last_px(sec) or 0.0
+        cost = my_cost(raw, positions)
+        ft = (g.first_zt or {}).get(sec) or {}
+        triggers = []
+        if ft.get('break'):
+            triggers.append('BREAK')
+        if ft.get('seal_low') or ft.get('seal_low_fast'):
+            triggers.append('SEAL_LOW')
+        rp = _role_tolerance(sec)
+        if _auction_change(sec) <= float(BLS.get('green_open_drop', -5.0) or -5.0) * float(rp.get('green_tol') or 1.0):
+            triggers.append('P1_green_open')
+        try:
+            if _p2e_core_sell_check(sec)[0]:
+                triggers.append('P2E')
+        except Exception:
+            pass
+        if cost > 0 and px > 0 and (px / cost - 1.0) <= -get_stop_loss_pct(sec) * float(rp.get('stop_adj') or 1.0):
+            triggers.append('P3_stop')
+        for _nm, _chk in (('P7a', _p7a_check), ('P7b', _p7b_check), ('P7d', _p7d_check)):
+            try:
+                if _chk(sec, 100):
+                    triggers.append(_nm)
+            except Exception:
+                pass
+        try:
+            if _lb_senti_cut_hold(sec):
+                triggers.append('P8')
+        except Exception:
+            pass
+        if not triggers:
+            triggers.append('amt0')
+        now = time.time()
+        pend = getattr(g, 't1_pending_sell', None)
+        if not isinstance(pend, dict):
+            pend = {}
+            g.t1_pending_sell = pend
+        rec = pend.get(sec)
+        if not isinstance(rec, dict) or rec.get('day') != today:
+            rec = {'day': today, 'triggers': [], 'ts': 0.0, 'qty': bq, 'cost': cost, 'px': px, 'note': ''}
+            pend[sec] = rec
+        rec['ts'] = now
+        rec['qty'] = bq
+        rec['cost'] = cost
+        rec['px'] = px
+        for t in triggers:
+            if t not in rec['triggers']:
+                rec['triggers'].append(t)
+        rec['note'] = ','.join(rec['triggers'])
+        gl = getattr(g, 't1_pending_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}
+            g.t1_pending_log_ts = gl
+        if now - float(gl.get(sec) or 0.0) >= float(BLS.get('t1_pending_save_sec', 60.0) or 60.0):
+            gl[sec] = now
+            log.info('[t1-protect] %s 当日买入可卖0 -> 记录保护触发 %s qty=%d cost=%.2f px=%.2f (次日复核)' % (
+                _sn(sec), rec['note'], bq, cost, px))
+        if now - float(getattr(g, 't1_pending_save_ts', 0.0) or 0.0) >= float(BLS.get('t1_pending_save_sec', 60.0) or 60.0):
+            g.t1_pending_save_ts = now
+            _save_state()
+    except Exception as e:
+        _warn('t1 protect capture fail %r' % e)
+
+def _t1_protect_consume(context):
+                                                                    
+    try:
+        if not BLS.get('t1_protect_enabled', True):
+            return
+        pend = getattr(g, 't1_pending_sell', None)
+        if not isinstance(pend, dict) or not pend:
+            return
+        today = str(get_trading_day())
+        positions = _sellable_source() or context.portfolio.positions
+        now = time.time()
+        until = int(BLS.get('t1_protect_consume_until_minute', 10) or 10)
+        gl = getattr(g, 't1_pending_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}
+            g.t1_pending_log_ts = gl
+        consumed = False
+        for sec, rec in list(pend.items()):
+            sec = _norm_sec(sec) or sec
+            if str(rec.get('day') or '') == today:
+                continue
+            if _min_age() > until:
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 窗口结束(>%d分钟) -> 清 pending 转常规监控' % (_sn(sec), until))
+                consumed = True
+                continue
+            raw = None
+            for k in list(positions.keys()):
+                if _norm_sec(k) == sec:
+                    raw = k
+                    break
+            if raw is None:
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 次日复核 已不在持仓 -> 清理' % _sn(sec))
+                consumed = True
+                continue
+            amt = _sellable(raw, positions)
+            if amt <= 0:
+                continue                                       
+            ac = _auction_change(sec)
+            if ac >= float(BLS.get('t1_protect_strong_open', 3.0) or 3.0) or _sealed_now(sec) or _today_zt(sec):
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 次日强开 ac=%.1f%%/封死 -> 清 pending 转常规监控' % (_sn(sec), ac))
+                consumed = True
+                continue
+            cost = float(rec.get('cost') or 0.0) or my_cost(raw, positions)
+            px = last_px(sec) or 0.0
+            rp = _role_tolerance(sec)
+            p3 = cost > 0 and px > 0 and (px / cost - 1.0) <= -get_stop_loss_pct(sec) * float(rp.get('stop_adj') or 1.0)
+            if ac <= -float(BLS.get('t1_protect_open_drop', 0.02) or 0.02) or p3:
+                note = 'T1_protect_weak_open ac=%.1f%% triggers=%s' % (ac, rec.get('note') or '-')
+                if p3:
+                    note = 'T1_protect_stop pnl=%.1f%% triggers=%s' % ((px / cost - 1.0) * 100.0, rec.get('note') or '-')
+                pend.pop(sec, None)
+                _do_sell(context, sec, amt, note, urgent=True)
+                log.info('[t1-protect] %s 次日复核 -> %s qty=%d' % (_sn(sec), note, amt))
+                consumed = True
+                continue
+            if now - float(gl.get(sec) or 0.0) >= 60.0:
+                gl[sec] = now
+                log.info('[t1-protect] %s 次日复核 pending 待定 ac=%.1f%% triggers=%s' % (
+                    _sn(sec), ac, rec.get('note') or '-'))
+        if consumed:
+            _save_state()
+    except Exception as e:
+        _warn('t1 protect consume fail %r' % e)
+
 def _audit_pos_fields(sec, p):
                                             
     try:
@@ -7199,6 +7561,10 @@ def sell_manager(context):
         amt = _sellable(_raw, positions)
         if amt <= 0:
             _audit_sell_amt0(sec, _raw, positions)                                  
+            try:
+                _t1_protect_capture(sec, _raw, positions)                            
+            except Exception as _e:
+                _warn('t1 protect capture fail %r' % _e)
             continue
         now = time.time()
         if _sell_inflight(sec):                                           
@@ -7293,6 +7659,10 @@ def tick_sell_manager(context):
             continue
         amt = _sellable(_raw, positions)
         if amt <= 0:
+            try:
+                _t1_protect_capture(sec, _raw, positions)                            
+            except Exception as _e:
+                _warn('t1 protect capture fail %r' % _e)
             continue
         try:
             _hold_exp_init(sec)                            
@@ -8540,6 +8910,10 @@ def tick_data(context, data):
     except Exception as _e:
         _warn('gear batch health fail: %r' % _e)
     try:
+        _t1_protect_consume(context)                         
+    except Exception as e:
+        _warn('t1 protect consume fail: %r' % e)
+    try:
         tick_sell_manager(context)
     except Exception as e:
         _warn('tick sell fail: %r' % e)
@@ -9705,6 +10079,8 @@ def load_state():
             g.ma5_pending = set(st.get('ma5_pending') or [])                     
             g.bought_qty = dict(st.get('bought_qty') or {})                        
             g.hist_recover_once = dict(st.get('hist_recover_once') or {})                      
+            g.t1_pending_sell = dict(st.get('t1_pending_sell') or {})                        
+            g.t1_pending_log_ts = dict(st.get('t1_pending_log_ts') or {})
         else:
             g.auction_c = {}                             
             g.first_zt = {}                                   
@@ -9725,6 +10101,8 @@ def load_state():
             g.exp_file = {}                        
             g.bought_qty = {}                      
             g.hist_recover_once = {}                     
+            g.t1_pending_sell = dict(st.get('t1_pending_sell') or {})                                 
+            g.t1_pending_log_ts = {}
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = _new_daily(); g.state_day = None
@@ -9734,6 +10112,7 @@ def load_state():
         g.auction_c = {}; g.first_zt = {}                                 
         g.exp_file = {}                                          
         g.bought_qty = {}; g.hist_recover_once = {}                   
+        g.t1_pending_sell = {}; g.t1_pending_log_ts = {}                     
 
 def _save_state():
                                                         
@@ -9775,7 +10154,9 @@ def _save_state():
                          'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {}),
                          'ma5_pending': sorted(getattr(g, 'ma5_pending', None) or []),
                          'bought_qty': dict(getattr(g, 'bought_qty', None) or {}),                      
-                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {})}, f, protocol=2)                    
+                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {}),                    
+                         't1_pending_sell': dict(getattr(g, 't1_pending_sell', None) or {}),                      
+                         't1_pending_log_ts': dict(getattr(g, 't1_pending_log_ts', None) or {})}, f, protocol=2)                    
     except Exception as e:
         _warn('save_state fail %r' % e)
 

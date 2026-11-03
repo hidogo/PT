@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# 当前版本：v1.29（2026-11-03）
-# 部署核对：日志首行 `buysell_core init version=v1.29 ...`（init 打印 STRATEGY_VERSION）
+# 当前版本：v1.30（2026-11-03）
+# 部署核对：日志首行 `buysell_core init version=v1.30 ...`（init 打印 STRATEGY_VERSION）
 # 变更记录统一存 strategies/buysell_core/README.md；本文件只保留版本/部署核对。
 # ============================================================
 import time, pickle, csv
 from datetime import timedelta
 
-STRATEGY_VERSION = "v1.29"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
+STRATEGY_VERSION = "v1.30"   # 部署核对：日志首行 buysell_core init version=.. （2026-11-03）
 
 
 def _warn(msg):
@@ -124,6 +124,11 @@ BLS = {
     'sell_avail_backfill_enabled': True, # v1.20 桥 enable_amount 缺失/0 时按总量回填（防卖出监控空转）
     'sell_avail_t1_strict': True,        # v1.20 T+1 严格：当日买入 enable=0 不回填；False 才允许当日回填
     'sell_avail_amt0_warn_only': True,   # v1.22 总量=0 时仅审计 [pos-amt0] 不回填（防虚构可卖）
+    't1_protect_enabled': True,          # v1.30 T+1 当日买入保护触发持久化（记录不卖单，次日首帧复核）
+    't1_protect_open_drop': 0.02,        # v1.30 T+1 次日弱开复核阈值：竞价涨幅 <= -2% -> urgent sell
+    't1_protect_strong_open': 3.0,       # v1.30 T+1 次日强开复核阈值：竞价涨幅 >= +3% -> 清 pending 转常规监控
+    't1_protect_consume_until_minute': 10, # v1.30 T+1 pending 复核窗口：开盘后 N 分钟
+    't1_pending_save_sec': 60.0,         # v1.30 [t1-protect] 状态落盘节流（3s 帧内不写盘）
     'order_no_reply_timeout': 90.0,  # v1.13 发单后无任何回报超时（_no_reply_reconcile 兜底查询）
     'order_reconcile_interval_sec': 60.0,  # v1.13 撤单失败/无回报委托兜底对账节流
     'board_cancel_warn_sec': 300.0,  # v1.15 撤单终态长时间未确认告警阈值
@@ -385,6 +390,16 @@ BLS = {
     'dyn_unq_follower_min': 2,          # 跟风确认最少家数
     'dyn_unq_surge_pct': 1.5,           # 跟风 1m 拉升阈值 %
     'dyn_unq_sort_bonus': 2.0,          # 确认龙头排序加分（_pool_exp_priority）
+    'dyn_unq_theme_mode': True,         # v1.30 盘中唯一以题材桶+连板梯队为口径（替代概念前15假唯一）
+    'dyn_unq_min_level': 2,             # v1.30 唯一只授主题内最高存活身位且 >=2
+    'dyn_unq_min_members': 3,           # v1.30 主题比较集最少成员数（不足不判唯一）
+    'dyn_unq_min_covered': 0.8,         # v1.30 主题比较集行情覆盖最低比例（不足不判唯一）
+    'dyn_unq_sep_chg_gap': 2.0,         # v1.30 同身位竞品分离涨幅落后阈值 %
+    'dyn_unq_max_active': 3,            # v1.30 并发盘中唯一上限（按身位+首触时间淘汰）
+    'dyn_unq_pool_cache_sec': 15,       # v1.30 主题比较池缓存 s（与题材动态状态同频）
+    'dyn_unq_sep_recheck_sec': 15,      # v1.30 未分离/分离后唯一性重评节流 s
+    'dyn_unq_surge_na_max': 0.5,        # v1.30 跟风 surge 缺失占比上限（超过不确认）
+    'dyn_unq_theme_rank_max': 3,        # v1.30 扫板 B 题材强度门：主题梯队名次上限
     'dyn_sweep_enabled': True,          # 竞价唯一扫板 开关
     'dyn_sweep_window_minute': 30,      # v1.11 扫板窗口 09:30-10:00（15->30 与动态唯一/预期买入对齐）
     'dyn_sweep_budget_ratio': 0.20,     # 扫板单笔预算（=打板 20%）
@@ -762,6 +777,10 @@ def initialize(context):
     g.hist_recover_once = {}          # v1.22 (tag|day|sec) -> ts 恢复日志当日去重（补拉不刷重复行）
     g.firstzt_log_ts = {}             # v1.22 反复炸板/回封日志节流表 sec->ts
     g.bought_qty = {}                 # v1.22 当日买入成交累计 sec->qty（桥 enable 未回填审计基准）
+    g.t1_pending_sell = {}            # v1.30 T+1 当日买入保护触发持久化（记录不卖单，次日复核）
+    g.t1_pending_log_ts = {}          # v1.30 [t1-protect] 落盘/日志节流 sec->ts
+    g.t1_pending_save_ts = 0.0        # v1.30 [t1-protect] 落盘全局节流时间戳
+    g.dyn_unq_pool_cache = {}         # v1.30 动态唯一主题比较池缓存（15s）
     g.pos_cap_skips = 0               # v1.12 情绪仓位闸门当日拦截次数（skip 日志带 total）
     g.pos_cap_shrinks = 0             # v1.17 情绪仓位闸门当日缩量次数（shrink 日志带 total）
     g.sell_skip_cnt = {}              # v1.12 [sell-skip] 60s 窗口内重复计数
@@ -1006,6 +1025,10 @@ def handle_data(context, data):
         _score_recover_probe()   # v1.12 评分未就绪恢复探针（1m 帧末）
     except Exception:
         pass
+    try:
+        _t1_protect_consume(context)   # v1.30 T+1 次日复核（1m 兜底）
+    except Exception as _e:
+        _warn('t1 protect consume fail %r' % _e)
     sell_manager(context)
     try:
         _board_queue_cancel_scan()   # v1.6 打板排单封单衰减撤单（1m 兜底；tick 帧内另有逐票检查）
@@ -5431,15 +5454,51 @@ def _dyn_unq_auction_eval():
     return len(st['auction'])
 
 
-def _dyn_unq_eval_uniq(sec, st, now):
-    # A 动态唯一首评：取首概念板块成员批量回填快照，身位无更高/并列 -> 唯一龙头
-    boards = [b for b in _concept_boards_of(sec) if _board_members_file(b, 1)]
-    if not boards:
-        return
-    board = boards[0]
-    members = [m for m in _board_members_file(board, int(BLS.get('dyn_unq_member_cap', 15))) if m]
-    if not members:
-        return
+def _dyn_unq_themes_of(sec):
+    # v1.30 盘中唯一主题口径：T-1 题材桶 + 当日新题材（THS 临时桶）并集，交叉题材不漏归。
+    out = []
+    for t in (_zt_themes_of(sec) + _new_themes_of(sec)):
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _dyn_unq_theme_pool(theme):
+    # v1.30 主题比较池：T-1 题材桶成员 + 今日已首触命中该主题的票（含新首板）；
+    # THS:* 无存量时回退概念板块文件。15s 节流缓存，缺行情批量补快照。
+    now = time.time()
+    cache = getattr(g, 'dyn_unq_pool_cache', None)
+    if not isinstance(cache, dict):
+        cache = {'ts': 0.0, 'data': {}}
+        g.dyn_unq_pool_cache = cache
+    cache.setdefault('data', {})
+    ttl = float(BLS.get('dyn_unq_pool_cache_sec', 15) or 15)
+    ent = cache['data'].get(theme)
+    if ent and now - float(ent.get('ts') or 0) < ttl:
+        return ent.get('members') or [], float(ent.get('covered') or 0.0)
+    members = set()
+    tb = (getattr(g, 'zt_theme', {}) or {}).get(theme) or {}
+    for m in (tb.get('members') or []):
+        m = _norm_sec(m)
+        if m:
+            members.add(m)
+    for c, ft in (getattr(g, 'first_zt', None) or {}).items():
+        c = _norm_sec(c)
+        if not c or not ft:
+            continue
+        if theme.startswith('THS:'):
+            hit = theme in _new_themes_of(c)
+        else:
+            hit = theme in _zt_themes_of(c)
+        if hit:
+            members.add(c)
+    if not members and theme.startswith('THS:'):
+        name = theme.split(':', 1)[1]
+        for m in _board_members_file(name, int(BLS.get('dyn_unq_member_cap', 15))):
+            m = _norm_sec(m)
+            if m:
+                members.add(m)
+    members = sorted(m for m in members if m)
     _need = [m for m in members if not (g.spot.get(m) or {}).get('last_px')]
     if _need:
         try:
@@ -5449,36 +5508,175 @@ def _dyn_unq_eval_uniq(sec, st, now):
                     g.spot[_m] = _d
         except Exception:
             pass
+    covered = (sum(1 for m in members if (g.spot.get(m) or {}).get('last_px')) / len(members)) if members else 0.0
+    cache['data'][theme] = {'ts': now, 'members': members, 'covered': covered}
+    cache['ts'] = now
+    return members, covered
+
+
+def _dyn_unq_peer_chg(sec, d=None):
+    # 现价相对前收涨幅；行情缺失返回 None（不视为分离）。
+    d = d if d is not None else (g.spot.get(sec) or {})
+    try:
+        px = float(d.get('last_px') or 0.0)
+        pre = float(d.get('preclose_px') or 0.0)
+        if px > 0 and pre > 0:
+            return (px / pre - 1.0) * 100.0
+    except Exception:
+        pass
+    return None
+
+
+def _dyn_unq_peer_alive(sec):
+    # 今日已首触且当前未破板，才算存活竞品。
+    ft = (g.first_zt or {}).get(sec) or {}
+    return bool(ft and not ft.get('break'))
+
+
+def _dyn_unq_peer_separated(sec, peer, my_chg):
+    # 竞品分离：今日未首触 / 已破板 / 涨幅落后本票 >= sep_gap；行情缺失不视为分离。
+    pft = (g.first_zt or {}).get(peer) or {}
+    if not pft:
+        return True
+    if pft.get('break'):
+        return True
+    pchg = _dyn_unq_peer_chg(peer)
+    if pchg is None or my_chg is None:
+        return False
+    return (my_chg - pchg) >= float(BLS.get('dyn_unq_sep_chg_gap', 2.0) or 2.0)
+
+
+def _dyn_unq_surge_raw(sec):
+    # v1.30 原始 1m surge：None=数据缺失（供跟风确认 na 占比），不走 _elastic_1m_surge 抹零。
+    try:
+        dh = _get_ds()
+        return dh.cached('m1_surge', sec, float(BLS.get('m1_surge_cache_ttl', 15.0)),
+                         lambda: _calc_1m_surge(sec), budget='m1')
+    except Exception:
+        return None
+
+
+def _dyn_unq_theme_rank_ok(sec):
+    # v1.30 扫板 B 题材强度门：存量题材梯队名次 <= theme_rank_max；临时 THS 桶需发酵 confirmed/hot。
+    themes = _dyn_unq_themes_of(sec)
+    if not themes:
+        return False
+    fm = _dyn_theme_ferment()
+    mx = int(BLS.get('dyn_unq_theme_rank_max', 3) or 3)
+    for name in themes:
+        if name.startswith('THS:'):
+            d = fm.get(name) or {}
+            if d.get('confirmed') or d.get('stage') in ('confirmed', 'hot'):
+                return True
+        else:
+            rk = int((getattr(g, 'zt_theme', {}) or {}).get(name, {}).get('rank') or 0)
+            if 0 < rk <= mx:
+                return True
+    return False
+
+
+def _dyn_unq_skip_log(sec, theme, reason, extra='', throttle_sec=5.0):
+    # v1.30 动态唯一跳过审计：theme/member/covered/in_sample/lvl/same/higher/reason 留痕。
+    try:
+        _skip_log('dyn_unq', sec, reason,
+                  '[dyn-unq-skip] %s theme=%s reason=%s%s' % (
+                      _sn(sec), theme or '-', reason, (' ' + extra) if extra else ''),
+                  throttle_sec=throttle_sec)
+    except Exception:
+        pass
+
+
+def _dyn_unq_eval_uniq(sec, st, now):
+    # v1.30 动态唯一重构：以题材桶 + 连板梯队为比较集（T-1 涨停池成员 + 今日已首触/近涨停成员），
+    # 唯一 = 主题内最高存活身位且身位>=2；同身位竞品全部分离；覆盖不足/成员不足不判唯一。
+    uniq_map = st.setdefault('uniq', {})
+    themes = _dyn_unq_themes_of(sec)
+    if not themes:
+        _dyn_unq_skip_log(sec, '-', 'no_theme')
+        uniq_map.pop(sec, None)
+        return
     my_lvl = _dyn_level_of(sec, {sec: g.spot.get(sec) or {}})
-    higher = same = False
-    for m in members:
+    if my_lvl < int(BLS.get('dyn_unq_min_level', 2) or 2):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'low_level', 'lvl=%d' % my_lvl)
+        uniq_map.pop(sec, None)
+        return
+    pool = set()
+    in_sample = False
+    for theme in themes:
+        members, covered = _dyn_unq_theme_pool(theme)
+        if not members:
+            continue
+        mset = set(_norm_sec(m) for m in members)
+        if _norm_sec(sec) in mset:
+            in_sample = True
+        pool.update(mset)
+    pool = sorted(m for m in pool if m)
+    if not in_sample:
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'no_in_sample')
+        uniq_map.pop(sec, None)
+        return
+    member_total = len(pool)
+    if member_total < int(BLS.get('dyn_unq_min_members', 3) or 3):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'member_low', 'total=%d' % member_total)
+        uniq_map.pop(sec, None)
+        return
+    covered = sum(1 for m in pool if (g.spot.get(m) or {}).get('last_px')) / float(member_total)
+    if covered < float(BLS.get('dyn_unq_min_covered', 0.8) or 0.8):
+        _dyn_unq_skip_log(sec, ','.join(themes[:3]), 'covered_low',
+                          'total=%d covered=%.0f%%' % (member_total, covered * 100))
+        uniq_map.pop(sec, None)
+        return
+    my_chg = _dyn_unq_peer_chg(sec)
+    higher = False
+    same = []
+    for m in pool:
         if m == sec:
             continue
         ml = _dyn_level_of(m, {m: g.spot.get(m) or {}})
-        if ml > my_lvl:
+        if ml > my_lvl and _dyn_unq_peer_alive(m):
             higher = True
-        elif ml == my_lvl:
-            same = True
+        elif ml == my_lvl and _dyn_unq_peer_alive(m) and not _dyn_unq_peer_separated(sec, m, my_chg):
+            same.append(m)
+    old = uniq_map.get(sec) or {}
     if higher or same:
-        st['uniq'][sec] = {'board': board, 'uniq': False, 'ts': now, 'level': my_lvl, 'members': members}
+        uniq_map[sec] = {'theme': ','.join(themes[:3]), 'uniq': False, 'ts': now,
+                         'level': my_lvl, 'members': pool, 'member_total': member_total,
+                         'covered': covered, 'higher': higher, 'same': same,
+                         'confirm': False, 'confirm_ts': 0, 'follow_ev': False,
+                         'last_follow': 0.0, 'surge_cnt': 0}
+        log.info('[dyn-unq] %s theme=%s 身位=%d total=%d covered=%.0f%% higher=%d same=%s -> 非唯一(15s重评)' % (
+            _sn(sec), uniq_map[sec]['theme'], my_lvl, member_total, covered * 100,
+            int(higher), ','.join(_sn(x) for x in same[:5])))
         return
-    st['uniq'][sec] = {'board': board, 'uniq': True, 'ts': now, 'level': my_lvl,
-                       'members': members, 'confirm': False, 'confirm_ts': 0,
-                       'follow_ev': False, 'last_follow': 0.0, 'surge_cnt': 0}
-    log.info('[dyn-unq] %s 板块=%s 身位=%d -> 动态唯一龙头(首触)' % (_sn(sec), board, my_lvl))
+    prev_uniq = bool(old.get('uniq'))
+    uniq_map[sec] = {'theme': ','.join(themes[:3]), 'uniq': True, 'ts': now,
+                     'level': my_lvl, 'members': pool, 'member_total': member_total,
+                     'covered': covered,
+                     'unique_ts': old.get('unique_ts') if prev_uniq else now,
+                     'separation_ts': old.get('separation_ts') if prev_uniq else now,
+                     'confirm': bool(old.get('confirm')),
+                     'confirm_ts': old.get('confirm_ts') or 0,
+                     'follow_ev': bool(old.get('follow_ev')),
+                     'last_follow': float(old.get('last_follow') or 0.0),
+                     'surge_cnt': int(old.get('surge_cnt') or 0)}
+    log.info('[dyn-unq] %s theme=%s 身位=%d total=%d covered=%.0f%% sep=%.1f%% -> 动态唯一成立' % (
+        _sn(sec), uniq_map[sec]['theme'], my_lvl, member_total, covered * 100,
+        my_chg if my_chg is not None else -99.0))
 def _dyn_unq_eval_follow(sec, st, u):
-    # B 跟风确认：首触后窗口内，同板块身位更低且未封板成员涨幅前5算 1m surge，
-    # 达标家数 >= dyn_unq_follower_min -> confirm（15s 节流重评，窗口内批量快照一次）。
+    # v1.30 跟风确认同主题化：候选 = 主题池内同题材、身位更低、未封板、涨幅>0 前 N；
+    # surge 缺失计 na，缺失占比超限不确认；达标家数 >= follower_min -> confirm（15s 节流重评）。
     now = time.time()
     if u.get('confirm'):
         return
-    if now - float(u.get('last_follow') or 0) < 15.0:
+    if now - float(u.get('last_follow') or 0) < float(BLS.get('dyn_unq_sep_recheck_sec', 15) or 15):
         return
     u['last_follow'] = now
     first_ts = ((g.first_zt or {}).get(sec) or {}).get('ts') or u.get('ts') or now
     if now - float(first_ts) > float(BLS.get('dyn_unq_follow_win_sec', 300.0)):
         return
     members = u.get('members') or []
+    if not members:
+        return
     if not u.get('follow_ev'):
         _need = [m for m in members if m != sec and not (g.spot.get(m) or {}).get('last_px')]
         if _need:
@@ -5497,7 +5695,8 @@ def _dyn_unq_eval_follow(sec, st, u):
             continue
         d = g.spot.get(m) or {}
         try:
-            up = float(d.get('up_px') or 0.0); px = float(d.get('last_px') or 0.0)
+            up = float(d.get('up_px') or 0.0)
+            px = float(d.get('last_px') or 0.0)
             pre = float(d.get('preclose_px') or 0.0)
         except Exception:
             continue
@@ -5509,16 +5708,26 @@ def _dyn_unq_eval_follow(sec, st, u):
         if chg > 0:
             followers.append((chg, m))
     followers.sort(reverse=True)
+    top = followers[:int(BLS.get('dyn_unq_surge_top_n', 5))]
     surge_cnt = 0
-    for _chg, m in followers[:int(BLS.get('dyn_unq_surge_top_n', 5))]:
+    na_cnt = 0
+    for _chg, m in top:
         try:
-            if _elastic_1m_surge(m) >= float(BLS.get('dyn_unq_surge_pct', 1.5)):
+            v = _dyn_unq_surge_raw(m)
+            if v is None:
+                na_cnt += 1
+            elif v >= float(BLS.get('dyn_unq_surge_pct', 1.5)):
                 surge_cnt += 1
         except Exception:
-            continue
+            na_cnt += 1
     u['surge_cnt'] = surge_cnt
+    u['surge_na'] = na_cnt
+    if top and float(na_cnt) / float(len(top)) > float(BLS.get('dyn_unq_surge_na_max', 0.5) or 0.5):
+        log.info('[dyn-unq] %s 跟风确认 surge_na=%d/%d -> 暂不确认(数据缺失)' % (_sn(sec), na_cnt, len(top)))
+        return
     if surge_cnt >= int(BLS.get('dyn_unq_follower_min', 2)):
-        u['confirm'] = True; u['confirm_ts'] = now
+        u['confirm'] = True
+        u['confirm_ts'] = now
         log.info('[dyn-unq] %s 跟风确认 %d家(1m>=%.1f%%) -> 确认' % (
             _sn(sec), surge_cnt, float(BLS.get('dyn_unq_surge_pct', 1.5))))
 
@@ -5610,6 +5819,12 @@ def _try_dyn_sweep(context, st=None):
             continue
         if not _dyn_unq_auction_unique(sec) or not _dyn_unq_confirmed(sec):
             continue
+        if not _dyn_unq_theme_rank_ok(sec):
+            _skip_log('sweep_b', sec, 'theme_rank',
+                      '[sweep-b] %s 题材强度不足(rank>%d或新题材未确认) -> skip' % (
+                          _sn(sec), int(BLS.get('dyn_unq_theme_rank_max', 3))),
+                      throttle_sec=60.0)
+            continue
         if not trade_open(sec):
             continue
         if _is_one_word_open(sec) or _block_sealed_buy(sec):
@@ -5655,8 +5870,8 @@ def _try_dyn_unq(context):
         try:
             u = st['uniq'].get(sec)
             if u is not None and u.get('uniq') is False:
-                if now - float(u.get('ts') or 0) < 60.0:
-                    continue                       # 非唯一重评节流（竞品炸板身位回落可转唯一）
+                if now - float(u.get('ts') or 0) < float(BLS.get('dyn_unq_sep_recheck_sec', 15) or 15):
+                    continue                       # v1.30 非唯一 15s 重评（竞品炸板/分离可转唯一）
                 u['ts'] = now
             if u is None or u.get('uniq') is False:
                 _dyn_unq_eval_uniq(sec, st, now)   # A 动态唯一（首评/重评）
@@ -5666,6 +5881,19 @@ def _try_dyn_unq(context):
             _dyn_unq_eval_follow(sec, st, u)       # B 跟风确认
         except Exception as e:
             _warn('dyn_unq %s fail %r' % (_sn(sec), e))
+    # v1.30 并发唯一上限：按 (-身位, 首触时间) 保留前 N，超出淘汰（防截断式假唯一扩散）。
+    active = {s: u for s, u in st.get('uniq', {}).items() if u and u.get('uniq')}
+    mx_active = int(BLS.get('dyn_unq_max_active', 3) or 3)
+    if len(active) > mx_active:
+        rank = sorted(active.items(),
+                      key=lambda kv: (-int(kv[1].get('level') or 0),
+                                      float(kv[1].get('unique_ts') or 0.0)))
+        keep = set(k for k, _ in rank[:mx_active])
+        for k in list(active):
+            if k not in keep:
+                _dyn_unq_skip_log(k, str((active[k] or {}).get('theme') or '-'),
+                                  'over_cap', 'active=%d' % len(active), throttle_sec=60.0)
+                st['uniq'].pop(k, None)
     _try_dyn_sweep(context, st)                    # B 动态唯一扫板
 
 
@@ -6360,7 +6588,7 @@ def _calc_1m_surge(sec):
     # 最新 1m 柱 (close-open)/open 涨幅 %；无数据返回 0（对齐 AXquant min_1m_surge）
     df = get_price(sec, start_date=None, end_date=None, count=2, frequency='1m')
     if df is None or len(df) < 1:
-        return 0.0
+        return None   # v1.30 None=数据缺失，供跟风确认 surge_na 判定；_elastic_1m_surge 已兼容转 0
     o = float(df['open'].iloc[-1] or 0.0); close_px = float(df['close'].iloc[-1] or 0.0)
     return (close_px / o - 1.0) * 100.0 if o > 0 else 0.0
 
@@ -7435,6 +7663,153 @@ def _do_sell(context, sec, qty, note, urgent=False, mode=None, cool=True):
         g.sold_log[sec] = time.time()   # v0.59 P7c 分批卖出 cool=False：批次间隔自控（10s）不写通用 30s 冷却
     place_order(context, sec, 'sell', qty=qty, note=note, mode=mode or ('sell_urgent' if urgent else 'sell'))
 
+def _t1_protect_capture(sec, raw, positions):
+    # v1.30 T+1 当日买入保护：可卖=0 时只记录保护触发（不卖单），次日 09:30-10:00 复核再执行。
+    try:
+        if not BLS.get('t1_protect_enabled', True):
+            return
+        daily = getattr(g, 'daily', None) or {}
+        bought = daily.get('bought') or []
+        if sec not in bought and raw not in bought:
+            return
+        bq = int((getattr(g, 'bought_qty', None) or {}).get(sec) or 0)
+        if bq <= 0:
+            bq = int((getattr(g, 'bought_qty', None) or {}).get(raw) or 0)
+        if bq <= 0:
+            return
+        today = str(get_trading_day())
+        px = last_px(sec) or 0.0
+        cost = my_cost(raw, positions)
+        ft = (g.first_zt or {}).get(sec) or {}
+        triggers = []
+        if ft.get('break'):
+            triggers.append('BREAK')
+        if ft.get('seal_low') or ft.get('seal_low_fast'):
+            triggers.append('SEAL_LOW')
+        rp = _role_tolerance(sec)
+        if _auction_change(sec) <= float(BLS.get('green_open_drop', -5.0) or -5.0) * float(rp.get('green_tol') or 1.0):
+            triggers.append('P1_green_open')
+        try:
+            if _p2e_core_sell_check(sec)[0]:
+                triggers.append('P2E')
+        except Exception:
+            pass
+        if cost > 0 and px > 0 and (px / cost - 1.0) <= -get_stop_loss_pct(sec) * float(rp.get('stop_adj') or 1.0):
+            triggers.append('P3_stop')
+        for _nm, _chk in (('P7a', _p7a_check), ('P7b', _p7b_check), ('P7d', _p7d_check)):
+            try:
+                if _chk(sec, 100):
+                    triggers.append(_nm)
+            except Exception:
+                pass
+        try:
+            if _lb_senti_cut_hold(sec):
+                triggers.append('P8')
+        except Exception:
+            pass
+        if not triggers:
+            triggers.append('amt0')
+        now = time.time()
+        pend = getattr(g, 't1_pending_sell', None)
+        if not isinstance(pend, dict):
+            pend = {}
+            g.t1_pending_sell = pend
+        rec = pend.get(sec)
+        if not isinstance(rec, dict) or rec.get('day') != today:
+            rec = {'day': today, 'triggers': [], 'ts': 0.0, 'qty': bq, 'cost': cost, 'px': px, 'note': ''}
+            pend[sec] = rec
+        rec['ts'] = now
+        rec['qty'] = bq
+        rec['cost'] = cost
+        rec['px'] = px
+        for t in triggers:
+            if t not in rec['triggers']:
+                rec['triggers'].append(t)
+        rec['note'] = ','.join(rec['triggers'])
+        gl = getattr(g, 't1_pending_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}
+            g.t1_pending_log_ts = gl
+        if now - float(gl.get(sec) or 0.0) >= float(BLS.get('t1_pending_save_sec', 60.0) or 60.0):
+            gl[sec] = now
+            log.info('[t1-protect] %s 当日买入可卖0 -> 记录保护触发 %s qty=%d cost=%.2f px=%.2f (次日复核)' % (
+                _sn(sec), rec['note'], bq, cost, px))
+        if now - float(getattr(g, 't1_pending_save_ts', 0.0) or 0.0) >= float(BLS.get('t1_pending_save_sec', 60.0) or 60.0):
+            g.t1_pending_save_ts = now
+            _save_state()
+    except Exception as e:
+        _warn('t1 protect capture fail %r' % e)
+
+
+def _t1_protect_consume(context):
+    # v1.30 T+1 次日复核：仅消费 day != today 的 pending；09:30-10:00 弱开/止损补卖，
+    # 强开/封死清 pending 转常规监控；10:00 后清 pending 转常规。
+    try:
+        if not BLS.get('t1_protect_enabled', True):
+            return
+        pend = getattr(g, 't1_pending_sell', None)
+        if not isinstance(pend, dict) or not pend:
+            return
+        today = str(get_trading_day())
+        positions = _sellable_source() or context.portfolio.positions
+        now = time.time()
+        until = int(BLS.get('t1_protect_consume_until_minute', 10) or 10)
+        gl = getattr(g, 't1_pending_log_ts', None)
+        if not isinstance(gl, dict):
+            gl = {}
+            g.t1_pending_log_ts = gl
+        consumed = False
+        for sec, rec in list(pend.items()):
+            sec = _norm_sec(sec) or sec
+            if str(rec.get('day') or '') == today:
+                continue
+            if _min_age() > until:
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 窗口结束(>%d分钟) -> 清 pending 转常规监控' % (_sn(sec), until))
+                consumed = True
+                continue
+            raw = None
+            for k in list(positions.keys()):
+                if _norm_sec(k) == sec:
+                    raw = k
+                    break
+            if raw is None:
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 次日复核 已不在持仓 -> 清理' % _sn(sec))
+                consumed = True
+                continue
+            amt = _sellable(raw, positions)
+            if amt <= 0:
+                continue                       # 桥可卖仍未回填：保留等下一帧
+            ac = _auction_change(sec)
+            if ac >= float(BLS.get('t1_protect_strong_open', 3.0) or 3.0) or _sealed_now(sec) or _today_zt(sec):
+                pend.pop(sec, None)
+                log.info('[t1-protect] %s 次日强开 ac=%.1f%%/封死 -> 清 pending 转常规监控' % (_sn(sec), ac))
+                consumed = True
+                continue
+            cost = float(rec.get('cost') or 0.0) or my_cost(raw, positions)
+            px = last_px(sec) or 0.0
+            rp = _role_tolerance(sec)
+            p3 = cost > 0 and px > 0 and (px / cost - 1.0) <= -get_stop_loss_pct(sec) * float(rp.get('stop_adj') or 1.0)
+            if ac <= -float(BLS.get('t1_protect_open_drop', 0.02) or 0.02) or p3:
+                note = 'T1_protect_weak_open ac=%.1f%% triggers=%s' % (ac, rec.get('note') or '-')
+                if p3:
+                    note = 'T1_protect_stop pnl=%.1f%% triggers=%s' % ((px / cost - 1.0) * 100.0, rec.get('note') or '-')
+                pend.pop(sec, None)
+                _do_sell(context, sec, amt, note, urgent=True)
+                log.info('[t1-protect] %s 次日复核 -> %s qty=%d' % (_sn(sec), note, amt))
+                consumed = True
+                continue
+            if now - float(gl.get(sec) or 0.0) >= 60.0:
+                gl[sec] = now
+                log.info('[t1-protect] %s 次日复核 pending 待定 ac=%.1f%% triggers=%s' % (
+                    _sn(sec), ac, rec.get('note') or '-'))
+        if consumed:
+            _save_state()
+    except Exception as e:
+        _warn('t1 protect consume fail %r' % e)
+
+
 def _audit_pos_fields(sec, p):
     # 一次性(1h节流)打印该持仓可用字段，定位实盘可卖数量真实字段名（不猜字段）
     try:
@@ -7670,6 +8045,10 @@ def sell_manager(context):
         amt = _sellable(_raw, positions)
         if amt <= 0:
             _audit_sell_amt0(sec, _raw, positions)   # v1.28 打印可卖字段真实值+总量，防 avail 误读
+            try:
+                _t1_protect_capture(sec, _raw, positions)   # v1.30 T+1 当日买入保护记录（不卖单）
+            except Exception as _e:
+                _warn('t1 protect capture fail %r' % _e)
             continue
         now = time.time()
         if _sell_inflight(sec):            # 订单/成交回报驱动的去重：有未终态卖单在途则跳过(防叠单)
@@ -7768,6 +8147,10 @@ def tick_sell_manager(context):
             continue
         amt = _sellable(_raw, positions)
         if amt <= 0:
+            try:
+                _t1_protect_capture(sec, _raw, positions)   # v1.30 T+1 当日买入保护记录（不卖单）
+            except Exception as _e:
+                _warn('t1 protect capture fail %r' % _e)
             continue
         try:
             _hold_exp_init(sec)   # v0.32 持仓预期管理：确保条目存在（幂等）
@@ -9072,6 +9455,10 @@ def tick_data(context, data):
     except Exception as _e:
         _warn('gear batch health fail: %r' % _e)
     try:
+        _t1_protect_consume(context)   # v1.30 T+1 次日复核（3s 帧）
+    except Exception as e:
+        _warn('t1 protect consume fail: %r' % e)
+    try:
         tick_sell_manager(context)
     except Exception as e:
         _warn('tick sell fail: %r' % e)
@@ -10302,6 +10689,8 @@ def load_state():
             g.ma5_pending = set(st.get('ma5_pending') or [])   # v1.21 MA5 未就绪待补评
             g.bought_qty = dict(st.get('bought_qty') or {})   # v1.22 当日买入成交累计跨重启恢复
             g.hist_recover_once = dict(st.get('hist_recover_once') or {})   # v1.22 恢复日志去重跨重启恢复
+            g.t1_pending_sell = dict(st.get('t1_pending_sell') or {})   # v1.30 T+1 保护记录跨重启恢复
+            g.t1_pending_log_ts = dict(st.get('t1_pending_log_ts') or {})
         else:
             g.auction_c = {}   # v1.3 跨日不再沿用内存旧值（防进程跨日残留）
             g.first_zt = {}    # v1.3 跨日强制清空，由当日 tick/重建队列重新建立
@@ -10322,6 +10711,8 @@ def load_state():
             g.exp_file = {}      # v1.5 跨日强制清空预期文件池
             g.bought_qty = {}    # v1.22 跨日清空买入成交累计
             g.hist_recover_once = {}   # v1.22 跨日清空恢复日志去重
+            g.t1_pending_sell = dict(st.get('t1_pending_sell') or {})   # v1.30 跨日保留 T+1 pending 给次日消费
+            g.t1_pending_log_ts = {}
     except Exception:
         g.buy_log = {}; g.sold_log = {}
         g.daily = _new_daily(); g.state_day = None
@@ -10331,6 +10722,7 @@ def load_state():
         g.auction_c = {}; g.first_zt = {}   # v1.3 异常分支不保留内存旧行情/首触（防毒状态固化）
         g.exp_file = {}                      # v1.5 异常分支同样清空预期文件池
         g.bought_qty = {}; g.hist_recover_once = {}   # v1.22 异常分支同样清空
+        g.t1_pending_sell = {}; g.t1_pending_log_ts = {}   # v1.30 异常分支清空保护记录
 
 
 def _save_state():
@@ -10373,7 +10765,9 @@ def _save_state():
                          'ma5_lows': dict(getattr(g, 'ma5_lows', None) or {}),
                          'ma5_pending': sorted(getattr(g, 'ma5_pending', None) or []),
                          'bought_qty': dict(getattr(g, 'bought_qty', None) or {}),   # v1.22 当日买入成交累计持久化
-                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {})}, f, protocol=2)   # v1.22 恢复日志去重持久化
+                         'hist_recover_once': dict(getattr(g, 'hist_recover_once', None) or {}),   # v1.22 恢复日志去重持久化
+                         't1_pending_sell': dict(getattr(g, 't1_pending_sell', None) or {}),   # v1.30 T+1 保护记录持久化
+                         't1_pending_log_ts': dict(getattr(g, 't1_pending_log_ts', None) or {})}, f, protocol=2)   # v1.30 保护日志节流持久化
     except Exception as e:
         _warn('save_state fail %r' % e)
 
