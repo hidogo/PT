@@ -197,7 +197,7 @@ def test_sellable_source_filters_fully_sold(mod):
         "600001.XSHG": {"amount": 200, "enable_amount": 200},
     }
     mod.g.daily["sold"] = ["600000.XSHG"]
-    mod.g.pending["600000.XSHG"] = {"side": "sell", "status": "FILLED", "filled": 100, "qty": 100}
+    mod.g.pending["600000.XSHG"] = {"side": "sell", "status": "FILLED", "filled": 100, "qty": 100, "src_qty": 100}
 
     src = mod._sellable_source()
 

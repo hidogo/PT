@@ -173,7 +173,7 @@ def test_hist1d_prewarm_caches_ma5_without_repeat_fetch(mod):
     mod._pool = lambda: ["A"]
     mod.get_positions = lambda: []
     mod._is_hist_priority = lambda sec: True
-    mod._hist_1d = lambda sec, prio=0: hist_calls.append((sec, prio)) or object()
+    mod._hist_1d = lambda sec, prio=0, ttl=None: hist_calls.append((sec, prio)) or object()
     mod._ma5_base4 = lambda sec: ma5_calls.append(sec) or 10.0
 
     ok = mod._hist1d_prewarm("09:25")

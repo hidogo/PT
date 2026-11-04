@@ -3,14 +3,71 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.31（2026-11-03）
+- 当前版本：v1.34（2026-11-04）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.31 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.34 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.34
+- v1.34 买入链路同帧事件派发 + 首帧双基准 + 灵敏度审计（2026-11-04 用户确认 A→B→C→D 后实施）：
+  - 首帧动作基准参数化：`board_first_frame_baseline='ts'` 用检测帧判定动作（provider 延迟时仍灵敏），
+    `tx` 作为严格审计/回放基准；`_board_first_frame_ok` 支持两种基准，`[buy-ff]` 统一打印
+    `path/baseline/age/tx_ms/feed_lag/src/break_cnt`。
+  - tick 同帧事件统一派发：`_run_tick_buy_events` 收集 `firstzt/reboard/near` 三类事件，按
+    `_tick_buy_event_key`（评分 + 动态唯一 + 题材身位 + 最早首触）排序后帧内立即评估，
+    预期/核心/首板/回封/扫板 A/弹性 arb 各通道同享 6s 首帧窗口；同票任一通道下单后不再重复评估，
+    sweep A 与弹性 arb 保持一帧一单（`tick_event_sweep_one_per_frame=True`）。
+  - firstzt 创建后补 `_tx_lag_warn`：`feed_lag`（检测帧-真实首笔）超 `tx_lag_warn_sec=10s` 打
+    `[tx-lag]`，区分 provider/批处理延迟与真实首触；`_ft_state_str` 追加 `lag=`。
+  - 预期买入审计：`_attempt_expected_buy` 与 `place_expected_order` 在首帧门前后打
+    `[buy-ff] path=expected gate=ok/wait`，与首板/核心/回封口径统一。
+  - `_try_new_theme_sweep` / `_try_elastic_arb_buy` 支持 `event_sec` 单票事件路径并返回是否下单，
+    帧末全量扫描保留兜底。
+  - 测试：新增 `tests/test_buysell_core_v134_first_frame_events.py`（ts/tx 双基准、事件排序、
+    同票下单去重、sweep 一帧一单、`[tx-lag]`/`[buy-ff]` 审计、tick_data 事件收集）。
+
+### v1.33
+- v1.33 卖出完成判定改为数量级（2026-11-04 凯撒文化半仓 400 卖出后剩余 400 失联修复）：
+  - 下卖单时记录 `pending['src_qty']`（当时整票可卖量），成交 `FILLED` 后仅当
+    `filled >= src_qty` 才判定整票卖完并写入 `daily.sold`；
+    P6/P8/P7c/break2 半仓、分批卖出完成后剩余仓继续留在 `_sellable_source` 监控。
+  - `_sold_today_fully` 不再以“卖单 FILLED”等价于“整票清仓”；旧状态无 `src_qty`
+    时以桥当前持仓总量兜底，总量>0 宁可多监控不漏卖。
+  - 成交回报新增 `[sell-remain]` 审计：卖单 FILLED 但仍有剩余时打印
+    `src_qty/filled`，并清理旧版误入 `daily.sold` 的半仓/分批卖单。
+  - 测试：新增 `tests/test_buysell_core_v133_sell_remain.py`（半仓 FILLED 剩余仓
+    进入卖出视图、整票 FILLED 陈旧桥残留仍过滤、旧状态无 src_qty 时按桥总量兜底），
+    并同步修正 v1.18 整票过滤用例为带 `src_qty` 的新口径。
+
+### v1.32
+- v1.32 扫板A弹性分流 + 逐票审计 + 数据链路灵敏度修复（2026-11-04 用户确认选项 2 后实施）：
+  - 扫板 A 新题材首板 20cm/北交票分流：当前涨幅>=弹性下限且 `< 涨停价×0.99` 时优先归弹性语义
+    （10% 仓位 `elastic_from_sweep_ratio`、elastic_arb 独立名额、chase 卖2/上浮限价），
+    `>= 涨停价×0.99` 保留临板 sweep A 打板语义；参数
+    `elastic_from_sweep_enabled / elastic_from_sweep_limit_ratio / elastic_from_sweep_ratio`。
+    技术条件沿用 sweep A（新题材前排、两1m/1分钟触板、均价跟随、L2 净量>=10%、方向闸），
+    落单审计带 `chg/board_limit/src=elastic_arb`；回暖确认日弹性最前排排序优先
+    （warm_confirm_day 加分排序 + 落单 `stage=warm_confirm_day` 标记）。
+  - 弹性 arb 跳过审计文案修正：`reason=strong_board` -> `reason=not_strong_board`。
+  - 三态逐票日志 `[auction-confirm]`：09:25 原始竞价终态 `src=original_0925`，
+    09:31 兜底/同日重启重建 `src=restart_rebuild`，按 (day, sec, status, src) 幂等去重，
+    逐票记录 `open_chg/yopen/has`，消除重启结果混源。
+  - hist1d 预温保活：`hist1d_prewarm_ttl=600s`（10:05 前核心/预期票日线 TTL 放大，
+    `hist1d_prewarm_until_hhmm='10:05'`），09:25/09:31 预温结果续期不中途失效；
+    恢复探针 10:00 前单帧上限 40->60（`score_recover_probe_cap_fast`），核心/预期先补；
+    `[hist-na]` 日志带 `prio=`。
+  - 扫板 A 落单题材跌停快照：`[sweep-a]`/订单 note 带 `ld=n/n_old`，买入后同题材跌停 hard
+    由 0->1 时 T+1 pending 记录 `LD_HARD_AFTER_BUY`（当日不主动卖），次日 09:30-10:00 复核
+    绿开即优先补卖；`g.sweep_a_ld_buy` 随状态持久化。
+  - senti-hist 落档主题涨停清单 `theme_zt_list`（T-1 题材桶存活 + 今日新首板助攻，前 20），
+    日志带 `members=`，用于核对 09:25 光伏 11 家 -> 10:00 羊字辈 8 家是轮动还是口径漂移。
+  - 测试：新增 `tests/test_buysell_core_v132_elastic_sweep_audit.py`（弹性分流/临板保留/
+    warm 排序/not_strong_board 文案/三态日志幂等/hist1d TTL/恢复优先/senti-hist 清单/
+    LD_HARD_AFTER_BUY 标记与次日优先卖出）。
 
 ### v1.31
 - v1.31 云端近期情绪温度历史 + 阶段消费（2026-11-03 用户确认后实施）：

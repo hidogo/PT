@@ -59,7 +59,7 @@ def mod():
 
 
 def test_100day_high_excludes_unfinished_today_row(mod):
-    mod._hist_1d = lambda sec, prio=0: FakeDf(
+    mod._hist_1d = lambda sec, prio=0, ttl=None: FakeDf(
         [10.0, 11.0, 12.0, 13.0, 999.0],
         ["2026-10-28", "2026-10-29", "2026-10-30", "2026-10-31", "2026-11-01"],
     )
@@ -72,7 +72,7 @@ def test_100day_high_excludes_unfinished_today_row(mod):
 
 
 def test_100day_high_missing_hist_is_pending_not_false(mod):
-    mod._hist_1d = lambda sec, prio=0: None
+    mod._hist_1d = lambda sec, prio=0, ttl=None: None
 
     assert mod._is_100day_high("A") is None
     assert "A" in mod.g.hist_na_pending
@@ -96,7 +96,7 @@ def test_hist1d_prewarm_only_uses_prio_one(mod):
     mod.g.exp_file = {"B": {"side": "buy"}}
     mod.g.zt_lianban = {"C": {"board_cnt": 3}}
     mod.g.hist_prio_cache = {"tok": int(time.time() / 5.0), "set": {"B", "C"}}
-    mod._hist_1d = lambda sec, prio=0: (calls.append((sec, prio)) or FakeDf(
+    mod._hist_1d = lambda sec, prio=0, ttl=None: (calls.append((sec, prio)) or FakeDf(
         [1.0, 2.0], ["2026-10-29", "2026-10-30"]))
 
     ok = mod._hist1d_prewarm("09:25")
