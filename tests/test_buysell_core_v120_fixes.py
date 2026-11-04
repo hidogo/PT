@@ -101,8 +101,10 @@ def test_source_limit_hist1d_prio_fast_before_1000(mod):
 
 def test_source_limit_hist1d_prio_normal_after_1000(mod):
     mod._min_age = lambda: 35
+    mod._hhmm = lambda: "13:40"   # v1.36 避开午后 13:00-13:30 快速窗口，口径固定
 
-    assert mod._source_limit("hist1d", prio=1) == 12
+    # v1.35 10:00 后高优先级日线走午盘降频档
+    assert mod._source_limit("hist1d", prio=1) == 6
 
 
 def test_hist1d_core_ttl_amplified(mod):

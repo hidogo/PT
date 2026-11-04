@@ -3,14 +3,55 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.34（2026-11-04）
+- 当前版本：v1.36（2026-11-04）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.34 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.36 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.36
+- v1.36 午后新题材爆发前排试点 + 午后快速刷新 + 滚动窗口发酵识别（2026-11-04 用户确认 B 方案并补充后实施）：
+  - 新增 `_try_pm_theme_buy`：13:00-13:30（`pm_theme_buy_after_hhmm/until_hhmm`）只消费滚动窗口
+    confirmed/hot 题材的 `burst_front`；技术条件沿用扫板 A（非一字/非封死、分时拉升、均价跟随、
+    L2 净大单>=10%、方向闸非 avoid）；打板名额可用走 board/sweep 20%（`pm_theme_buy_board_ratio`），
+    打板名额已耗尽快速切前排弹性套利 10%（`pm_theme_buy_ratio`、elastic_arb 独立名额）；买入后由
+    现有 T+1 保护闭环。tick firstzt/near 事件、3s 帧末、1m 兜底三路接入。
+  - 午后快速刷新：`_fast_window()` 把 13:00-13:30（`pm_fast_after_hhmm/until_hhmm`）纳入快速窗口，
+    `_source_limit` 走 `frame_*_limit_fast`（hist1d 24/prio 40/board 24/m1 30），板块强度/红盘/跌停
+    题材 TTL 恢复 3s/30s/15s，午后 scan 热点优先与 tick 板块成员采集同步开启。
+  - 发酵识别滚动窗口：`_dyn_theme_ferment` 增加 `burst_count/burst_span_ms/burst_front`，用任意
+    25 分钟滑动窗口取最大助攻簇，解决“上午存活成员拖垮午后新簇跨度”导致无法确认的问题；午后通道
+    按 `burst_front` 授前排，存量龙头仍保留为全局 `front`，不影响上午消费。
+  - 测试：新增 `tests/test_buysell_core_v136_pm_theme_buy.py`（快速窗口、午后限额、TTL、滚动窗口、
+    board/弹性双路径、窗口/前排/封死门、tick near 事件派发）；同步 v1.20 旧用例固定 `_hhmm` 避开
+    午后快速窗口。
+
+### v1.35
+- v1.35 持仓口径验证链 + 重建审计 + 日志节流 + 午后预算降频（2026-11-04 三项方案确认后实施）：
+  - `[pos-dump]` 持仓原始字段 dump：`_sellable_detail` 命中可卖字段存在但值为 0、
+    `_sellable_backfill_detail` 可卖与总量双 0 时调用 `_audit_pos_fields`，当日/股一次性打印
+    持仓全部字段名与值（`pos_raw_dump_log` 幂等），定位 603533 类“客户端可卖 400 但桥
+    amount/enable_amount 双 0”的真实可用字段；原 1h 节流改为当日去重。
+  - 重启重建审计：`[restart-rebuild] 放弃(...)` 追加 `tx_zt_hit=N`（重建回看命中涨停价成交
+    累计）；放弃名单记入 `first_zt_rebuild_gave_up`，后续 tick 正常补建时打一次
+    `[restart-rebuild] rebuilt_later`，区分“未涨停正确放弃”与“已涨停回看失败后补建”。
+  - `[t1-protect]` 日志节流：完整保护行当日一次，之后 `t1_pending_heartbeat_sec=300s`
+    计数心跳（`t1_pending_cnt` 仅按落档行累计），消除 60s/票刷屏。
+  - 尾盘 SEAL_LOW 日志节流：`seal_low_tail_log_sec=15s` 同票节流，且尾盘分支不再设置
+    `seal_low_fast=True`，保持 14:57 后两帧降级语义；状态机仍每帧评估。
+  - 逐笔延迟与预算超限日终汇总：`_tx_lag_warn` 累计 `tx_lag_stats`，日终打
+    `[tx-lag-summary] cnt/avg/max/sample`；`_budget_log` 维护 `budget_over_peak`，
+    日终打 `[budget-over-summary]`，均跨重启持久化。
+  - 午后预算降频（灵敏度优先）：10:00 后普通/高优先级独立配额走
+    `frame_hist1d_limit_afternoon=4`、`frame_hist1d_prio_limit_afternoon=6`、
+    `frame_board_limit_afternoon=3`；14:45 后（`budget_tail_idle_after_hhmm='14:45'`）
+    非核心 board/hist1d 普通配额返回 0，预算留给首触/封单/snapshot/tx。
+  - 测试：新增 `tests/test_buysell_core_v135_audit_throttle_budget.py`（午后配额、尾盘空闲、
+    `[pos-dump]` 当日一次、t1-protect 心跳、尾盘 SEAL_LOW 节流、tx-lag 累计、rebuilt_later、
+    budget 峰值）；同步 v1.20 旧用例为午后 `frame_hist1d_prio_limit_afternoon=6` 预期。
 
 ### v1.34
 - v1.34 买入链路同帧事件派发 + 首帧双基准 + 灵敏度审计（2026-11-04 用户确认 A→B→C→D 后实施）：
