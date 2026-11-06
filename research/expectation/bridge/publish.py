@@ -34,6 +34,7 @@ from .model import (
     ROLE_DETAIL_CAPACITY_ARB,
     ROLE_DETAIL_JUNK_FOLLOWER,
     ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP,
+    ROLE_DETAIL_BAD_SEAL_BOARD,
     ROLE_DETAILS,
     ROLES,
     STATUS_AWAITING_AUCTION,
@@ -45,7 +46,13 @@ from .rules import (
     evaluate_auction_status,
     evaluate_intraday_status,
     evaluate_one_word_expectation,
+    one_word_open_meet_min_pct,
 )
+
+
+BAD_SEAL_MIN_OPEN_TIMES = 2
+BAD_SEAL_MAX_SEAL_MONEY = 1e7
+BAD_SEAL_MAX_SEAL_RATIO = 0.3
 
 
 LIMIT_UP_REVIEW_GLOB = "limit-up-review-*.md"
@@ -375,6 +382,8 @@ def load_closing_pool_rows(
                             "limit_up_time": str(item.get("limit_up_time") or ""),
                             "seal_money": _float(item.get("seal_money"), 0),
                             "limit_up_reason": str(item.get("limit_up_reason") or ""),
+                            "open_times": _int(item.get("open_times"), 0),
+                            "max_seal_money": _float(item.get("max_seal_money"), 0),
                         }
                     )
     if rows:
@@ -391,6 +400,8 @@ def load_closing_pool_rows(
                     row.get("seal_money"), _float(row.get("seal_amount_t0"), 0)
                 ),
                 "limit_up_reason": str(row.get("limit_up_reason") or ""),
+                "open_times": _int(row.get("open_times"), 0),
+                "max_seal_money": _float(row.get("max_seal_money"), 0),
             }
         )
     return rows
@@ -826,6 +837,8 @@ def seedling_open_reasons(
                 "unique_high_board": bool(closing.get("unique_high_board")),
                 "follower_count": int(closing.get("follower_count") or 0),
                 "follower_codes": list(closing.get("follower_codes") or []),
+                "open_times": _int(row.get("open_times"), 0),
+                "max_seal_money": _float(row.get("max_seal_money"), 0),
                 "review_kind": "seedling",
                 "source_agent": "core_seedling",
             }
@@ -860,6 +873,9 @@ def _role_detail_evidence(
     snapshot = snapshot or {}
     reason = reason or {}
     reasons: list[str] = []
+    open_times = _int(snapshot.get("open_times"), _int(reason.get("open_times"), 0))
+    if open_times >= 1:
+        reasons.append(f"open_times_{open_times}")
     if _flag(snapshot.get("unique_high_board"), _flag(reason.get("unique_high_board"), False)):
         reasons.append("unique_high_board")
     board_rank = _int(snapshot.get("board_rank"), _int(reason.get("board_rank"), 0))
@@ -877,6 +893,7 @@ def _role_detail_evidence(
     return {
         "decision_reasons": reasons,
         "role_detail_sample": {
+            "open_times": open_times,
             "board_rank": board_rank,
             "limit_up_time": limit_up_time,
             "seal_amount_t0": seal_amount_t0,
@@ -916,6 +933,21 @@ def _junk_follower_evidence(
     return ""
 
 
+def _bad_seal_weak(snapshot: dict[str, Any] | None, reason: dict[str, Any] | None) -> bool:
+    """放量烂板弱封判据：开板>=2 次且封单弱（<1e7 或 <=最大封单*30%）。"""
+    snapshot = snapshot or {}
+    reason = reason or {}
+    seal = _float(snapshot.get("seal_money"), _float(reason.get("seal_amount_t0"), 0))
+    if seal <= 0:
+        return False
+    if seal < BAD_SEAL_MAX_SEAL_MONEY:
+        return True
+    max_seal = _float(
+        snapshot.get("max_seal_money"), _float(reason.get("max_seal_money"), 0)
+    )
+    return bool(max_seal > 0 and seal <= max_seal * BAD_SEAL_MAX_SEAL_RATIO)
+
+
 def derive_role_detail(
     code: str,
     role: str | None = None,
@@ -939,6 +971,9 @@ def derive_role_detail(
         return ROLE_DETAIL_JUNK_FOLLOWER, evidence, True
     if str(snapshot.get("break_kind") or "") == "broken":
         return ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP, _role_detail_evidence(snapshot, reason), True
+    open_times = _int(snapshot.get("open_times"), _int(reason.get("open_times"), 0))
+    if open_times >= BAD_SEAL_MIN_OPEN_TIMES and _bad_seal_weak(snapshot, reason):
+        return ROLE_DETAIL_BAD_SEAL_BOARD, _role_detail_evidence(snapshot, reason), True
     role = role or derive_role(code, reason, snapshot)
     if role == ROLE_FIRST_BOARD:
         unique = _flag(snapshot.get("unique_high_board"), _flag(reason.get("unique_high_board"), False))
@@ -976,6 +1011,7 @@ def derive_expectation_weight(
         ROLE_DETAIL_CAPACITY_ARB: 58.0,
         ROLE_DETAIL_JUNK_FOLLOWER: 30.0,
         ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP: 35.0,
+        ROLE_DETAIL_BAD_SEAL_BOARD: 35.0,
     }.get(role_detail, 50.0)
     if entry_type == ENTRY_TYPE_ONE_WORD:
         base += 8.0
@@ -999,6 +1035,8 @@ def derive_sell_policy_hint(role_detail: str) -> str:
         return "fast_exit_on_weak"
     if role_detail == ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP:
         return "break_weak_escape"
+    if role_detail == ROLE_DETAIL_BAD_SEAL_BOARD:
+        return "fast_exit_on_weak"
     return "none"
 
 
@@ -1018,6 +1056,7 @@ T1_BASE_PROBABILITY = {
     ROLE_DETAIL_CAPACITY_ARB: (0.40, 0.40, 0.20),
     ROLE_DETAIL_JUNK_FOLLOWER: (0.18, 0.34, 0.48),
     ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP: (0.16, 0.34, 0.50),
+    ROLE_DETAIL_BAD_SEAL_BOARD: (0.18, 0.36, 0.46),
 }
 T1_DEFAULT_PROBABILITY = (0.32, 0.40, 0.28)
 
@@ -1175,9 +1214,15 @@ def make_review_records(
             "follower_codes",
             "board_rank",
             "board_name",
+            "open_times",
+            "max_seal_money",
         ):
             if closing.get(field) is not None:
                 snap2.setdefault(field, closing[field])
+        if snap2.get("open_times") is None:
+            snap2["open_times"] = _int(raw.get("open_times"), 0)
+        if snap2.get("max_seal_money") is None:
+            snap2["max_seal_money"] = _float(raw.get("max_seal_money"), 0)
         bk = break_status.get(code) or {}
         is_broken = str(bk.get("break_kind") or "") == "broken"
         if is_broken:
@@ -1521,6 +1566,15 @@ def confirm_auction(
                 seal_amount_t1=seal_amount_t1,
                 is_one_word_t1=bool(is_one_word_t1),
             )
+            if status != STATUS_CONFIRMED_EXCEED and auction_change_pct is not None:
+                limit_pct = (
+                    (limit_up / last_close - 1.0) * 100.0
+                    if last_close > 0 and limit_up > 0
+                    else 10.0
+                )
+                if auction_change_pct < one_word_open_meet_min_pct(limit_pct):
+                    status = STATUS_CONFIRMED_MISS
+                    reasons = list(reasons) + ["one_word_open_below_min"]
             auction_status = status
         else:
             status, reasons = evaluate_auction_status(

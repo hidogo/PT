@@ -63,7 +63,8 @@ def test_exp_board_gate_blocks_broken_and_allows_resealed(mod):
 def test_exp_board_gate_blocks_low_seal(mod):
     mod.g.first_zt = {"A": {"break_cnt": 1, "break": False}}
     mod.g.spot["A"] = {"last_px": 10.0, "up_px": 10.0}
-    mod._seal_metrics = lambda sec: (50000.0, 5)
+    # v1.48 预期打板封单下限统一为 exp_board_seal_min=50000，低于下限应拦截
+    mod._seal_metrics = lambda sec: (40000.0, 5)
 
     ok, reason = mod._exp_board_gate("A")
 
@@ -109,7 +110,7 @@ def test_place_expected_order_board_gate_allows_resealed(mod):
     mod._log_order_limit = lambda sec, limit: None
     mod._calc_buy_qty = lambda context, sec, px, ratio: 100
     mod._buy_pos_cap_qty = lambda context, sec, qty, limit: qty
-    mod._sim_mode = lambda: False
+    mod._sim_mode = lambda: True   # v1.48 无 L2 的测试环境按模拟/回测兼容放行
     mod._ft_state_str = lambda sec: "src:- ms:- bc:1 seal:0"
     mod._signal = lambda *args, **kwargs: None
 

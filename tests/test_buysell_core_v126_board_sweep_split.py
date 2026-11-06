@@ -59,6 +59,7 @@ def mod():
     m._norm_sec = lambda code: code
     m._save_state = lambda: None
     m._fmt_big_ratio = lambda big: '%.1f%%' % (big * 100.0 if big and big > 0 else 0.0)
+    m.get_trading_day = lambda: "2026-11-06"
     m._is_st = lambda sec: False
     m._is_one_word_open = lambda sec: False
     m._block_sealed_buy = lambda sec: False

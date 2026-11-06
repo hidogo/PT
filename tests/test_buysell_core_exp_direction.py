@@ -255,6 +255,8 @@ def test_place_expected_order_ratio_is_independent_of_direction(mod):
     mod._avail_cash = lambda context: 1_000_000.0
     mod._block_sealed_buy = lambda sec: False
     mod._order_limit = lambda sec, side, mode: 11.0
+    mod._sim_mode = lambda: True   # v1.48 无 L2 的测试环境按模拟/回测兼容放行
+    mod.BLS["sim_cash_base"] = 1_000_000.0
 
     def _calc(context, sec, px, ratio):
         captured["ratio"] = ratio

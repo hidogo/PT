@@ -20,7 +20,7 @@ def _load_strategy():
         "sell_avail_t1_strict": True,
         "frame_hist1d_prio_limit_fast": 40,
         "frame_hist1d_prio_limit": 12,
-        "hist1d_core_ttl": 180.0,
+        "hist1d_core_ttl": 600.0,
         "p6_two_frame_enabled": True,
         "p6_confirm_frames": 2,
         "p6_confirm_win_sec": 30.0,
@@ -118,7 +118,7 @@ def test_hist1d_core_ttl_amplified(mod):
     mod._hist_1d("A", prio=1)
     mod._hist_1d("A", prio=0)
 
-    assert seen == [(180.0, 1), (60.0, 0)]
+    assert seen == [(600.0, 1), (60.0, 0)]
 
 
 def test_score_recover_probe_hist_uses_prio1(mod):

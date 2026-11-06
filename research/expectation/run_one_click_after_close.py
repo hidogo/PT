@@ -29,7 +29,7 @@ import closeout_review as cr       # noqa: E402
 import run_expectation_build as rb # noqa: E402
 from bridge import axquant_contract as axc # noqa: E402
 
-SCRIPT_VERSION = "v0.72b"   # 运维小版（不改策略交易语义，strategy.py 仍 v0.71）
+SCRIPT_VERSION = "v0.73"   # 家族映射每日导出（v1.42）：步骤4c 每日刷新 board_family_latest.csv（UNCHANGED 跳过）
 
 
 def _resolve_next_date(td: str, next_date: str) -> str:
@@ -197,6 +197,15 @@ def main(argv=None) -> int:
         export_sentiment.run(a.date or None, a.out_dir or None)
     except Exception as e:
         print("[oneclick] export_sentiment 失败(不影响预期/名单): %r" % e)
+    # 步骤4c: 家族映射每日导出（v1.42，全量概念成员+近10日题材桶；内容未变 UNCHANGED 不覆盖）
+    print("[oneclick] 步骤4c 家族映射每日导出检查 ...")
+    try:
+        import export_board_family as _ebf
+        _fr = _ebf.run(out_dir=_out_dir)
+        print("  [family] %s rows=%d boards=%d auto=%d manual=%d"
+              % (_fr["status"], _fr["rows"], _fr["boards"], _fr.get("auto_boards", 0), _fr.get("manual_rows", 0)))
+    except Exception as e:
+        print("[oneclick] export_board_family 失败(不影响预期/名单): %r" % e)
 
     # 步骤5：产出一致性核对 —— 预期CSV vs 源jsonl, zt名单 vs 涨停池
     print("[oneclick] 步骤5 产出一致性核对 ...")
@@ -225,6 +234,7 @@ def main(argv=None) -> int:
             "expectation_t1": _src_csv,
             "zt_lianban_latest": _zt_csv,
             "sentiment_latest": os.path.join(_out, "sentiment_latest.csv"),
+            "board_family_latest": os.path.join(_out, "board_family_latest.csv"),
         })
     return rc
 

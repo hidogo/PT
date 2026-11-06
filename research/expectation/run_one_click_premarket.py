@@ -36,7 +36,7 @@ import bridge  # noqa: E402
 import run_expectation_build as rb  # noqa: E402
 from bridge import axquant_contract as axc  # noqa: E402
 
-SCRIPT_VERSION = "v0.72c"   # 板块周更（周一固定）：步骤2e 概念板块映射每周一检查刷新（低频，内容未变跳过覆盖）
+SCRIPT_VERSION = "v0.73"   # 家族映射每日导出（v1.42）：步骤2f 每日刷新 board_family_latest.csv（UNCHANGED 跳过）
 
 
 def _resolve_defaults(td: str, nt: str) -> tuple:
@@ -325,6 +325,16 @@ def main(argv=None) -> int:
     except Exception as e:
         print("[premarket] 板块周更检查失败(不影响预期/名单): %r" % e)
 
+    # 步骤2f: 家族映射每日导出（v1.42，全量概念成员+近10日题材桶；内容未变 UNCHANGED 不覆盖）
+    print("[premarket] 步骤2f 家族映射每日导出检查 ...")
+    try:
+        import export_board_family as _ebf
+        _fr = _ebf.run(out_dir=out)
+        print("  [family] %s rows=%d boards=%d auto=%d manual=%d"
+              % (_fr["status"], _fr["rows"], _fr["boards"], _fr.get("auto_boards", 0), _fr.get("manual_rows", 0)))
+    except Exception as e:
+        print("[premarket] 家族映射导出失败(不影响预期/名单): %r" % e)
+
     # 步骤3：产出一致性核对
     print("[premarket] 步骤3 产出一致性核对 ...")
     _exp_csv = os.path.join(out, "expectation_latest.csv")
@@ -383,6 +393,7 @@ def main(argv=None) -> int:
         ("预期 CSV(latest 稳定指针)", _latest_csv),
         ("涨停/连板名单(latest)", _zt_csv),
         ("情绪基线(latest)", os.path.join(out, "sentiment_latest.csv")),
+        ("家族映射(latest)", os.path.join(out, "board_family_latest.csv")),
         ("自选股(可选)", os.path.join(out, "selfwatch.csv")),
     ]
     for label, fp in files:

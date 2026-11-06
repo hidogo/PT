@@ -17,7 +17,7 @@ for line in open(REV, encoding="utf-8"):
     side="buy" if kind=="seedling" else "hold"
     st="pending_exceed" if side=="buy" else "pending_meet"
     auc=ln(r.get("auction_change_pct"))
-    exp_auc=max(auc,3.0) if side=="buy" else auc
+    exp_auc=auc
     role,role_detail=r.get("role") or "", r.get("role_detail") or ""
     if code in role_fix:
         role,role_detail=role_fix[code]

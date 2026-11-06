@@ -387,10 +387,13 @@ def _init_expectation_from_review(rev, trade_date, review_date):
     t1 = rev.get("t1_expectation") or {}
     primary = str(t1.get("primary") or "").lower()
     status = ("pending_" + primary) if primary in ("exceed", "meet", "miss") else "awaiting_auction"
+    # AXquant 核心苗子(review_kind=seedling) -> side=buy；持仓/普通记录不标，导出回落 hold。
+    side = "buy" if str(rev.get("review_kind") or "") == "seedling" else ""
     return {
         "trade_date": trade_date,
         "code": rev.get("code"),
         "name": rev.get("name") or "",
+        "side": side,
         "review_date": review_date,
         "role": rev.get("role") or "",
         "role_detail": rev.get("role_detail") or "",
@@ -462,6 +465,21 @@ def cmd_review(args):
             if os.path.isfile(ax):
                 snap_path = ax
     snapshot_map = _snapshot_map_from_file(snap_path)
+    # 收盘地位/身位权威输入：AXquant limit_up_boards（涨停池+炸板池/断板池）。
+    # 持仓角色必须按当日收盘状态重算（烂板弱封/炸板不回封/连板身位），
+    # 否则 position_fallback 会全部误标为首板套利（2026-11-02 案例）。
+    ax_boards_dir = os.path.join(_HERE, "..", "..", "..", "AXquant", "docs", "review")
+    closing_board_status = bridge.derive_closing_board_status(
+        td, boards_dir=ax_boards_dir
+    )
+    break_status = bridge.derive_closing_break_status(td, boards_dir=ax_boards_dir)
+    try:
+        for _row in bridge.load_closing_pool_rows(td, boards_dir=ax_boards_dir):
+            _code = str(_row.get("code") or "")
+            if _code:
+                snapshot_map.setdefault(_code, _row)
+    except Exception as exc:
+        print("[review] 收盘涨停池加载失败(继续): %r" % exc, file=sys.stderr)
 
     positions = _read_jsonl(args.positions) if args.positions else _default_positions(ex, td)
     insights = {}
@@ -498,7 +516,8 @@ def cmd_review(args):
     if confirmed:
         try:
             records = bridge.make_review_records(td, confirmed, snapshot_map,
-                                                 insights, set(), {}, {})
+                                                 insights, set(),
+                                                 closing_board_status, break_status)
         except Exception as exc:
             print("[review] make_review_records 出错: %s" % exc, file=sys.stderr)
             return 4
@@ -508,6 +527,26 @@ def cmd_review(args):
         ex.write_position_reviews(td, records, path=review_path)
 
     expected = [_init_expectation_from_review(r.to_dict(), next_td, td) for r in records]
+    # 并入 AXquant 权威核心苗子（review_kind=seedling -> side=buy）：
+    # 避免本地持仓重建把盘前预期买入候选覆盖掉（2026-11-02 3 持仓覆盖 2 苗子案例）。
+    ax_review_path = os.path.join(_HERE, "..", "..", "..", "AXquant", "data", "review",
+                                  "position_review_%s.jsonl" % td)
+    if os.path.isfile(ax_review_path):
+        have = {
+            str(e.get("code") or "").split(".")[0]
+            for e in expected if e.get("code")
+        }
+        for r in _read_jsonl(ax_review_path):
+            if str(r.get("review_kind") or "") != "seedling":
+                continue
+            code_num = str(r.get("code") or "").split(".")[0]
+            if not code_num or code_num in have:
+                continue
+            rec = _init_expectation_from_review(r, next_td, td)
+            rec["side"] = "buy"
+            rec["reasons"] = list(r.get("reasons") or ["axquant_seedling_merged"])
+            expected.append(rec)
+            print("[review] 并入 AXquant 核心苗子 %s %s (side=buy)" % (code_num, r.get("name") or ""))
     _n = _correct_yopen(expected, td)
     if _n:
         print("[review] 修正昨日开盘涨幅 %d 行(open(S)/close(S-1))" % _n)

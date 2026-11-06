@@ -3,14 +3,237 @@
 > 变更记录统一存本文件；strategy.py 文件头仅保留「当前版本 / 部署核对」。
 
 ## 当前版本
-- 当前版本：v1.36（2026-11-04）
+- 当前版本：v1.49（2026-11-06）
 
 ## 审计与比对文档
 - 状态机数据链路逐日审计：`docs/audit/2026-10-30-状态机数据链路审计.md`（每日新审计新增独立日期文件）
 
 ## 部署核对
-- 部署核对：日志首行 `buysell_core init version=v1.36 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
+- 部署核对：日志首行 `buysell_core init version=v1.49 ... DO_ORDER=True EXPECT_ORDER=True sim_cash=0.0`（init 打印 STRATEGY_VERSION）
 - 每次更新版本号后重传 strategy.py 云端，以日志首行 `buysell_core init version=..` 核对。
+
+### v1.49
+- v1.49 2026-11-06 弹性概念并集账本拆分 + 跨日死单收口（用户确认 A1→A2→A3→B1→B2→B3→C 实施）：
+  - A1 账本分段：`_concept_snap_union` 拆“稳定核心 + 动态增量”两段，覆盖率 `ratio` 只按
+    T-1 涨停池/固定池派生核心成员计算；盘中 watch 新增板块追加到动态队列，不再重置核心
+    进度（修复 2026-11-06 弹性 `[elastic-top-scan] reason=coverage` 空转根因）。
+    `_csnap_diag` 增加 `core_total/core_ratio/dyn_total/dyn_done`，旧 `members/idx/boards/ratio`
+    兼容字段保留。
+  - A2 部分快照出值：覆盖率低于 `csnap_coverage_min` 但已有部分成员快照时不再静默返回空，
+    先用已覆盖成员算强度并打 `[csnap-partial]`，返回 top1 时保留 `reason=partial/partial=1`
+    审计；完全无快照才 `reason=coverage`。
+  - A3 预算档位：`frame_board_union_limit_fast=12`/`frame_snap_batch_fast=250` 快速窗口生效，
+    `_source_limit`/`_csnap_batch_cap` 快速/常规档回归覆盖。
+  - B1 跨日隔离：`place_order`/`place_expected_order`/重启对账为 pending 补 `day` 戳；
+    日切时 `_quarantine_stale_pending` 把昨日买单移入 `pending_stale`，与当日对账隔离；
+    `_board_cancel_reconcile`/`_no_reply_reconcile` 对跨日单直接跳过，不再 60s 刷屏。
+  - B2 收盘收口：`after_trading_end` 最先执行 `_close_order_sweep`，对当日未决买单做终态
+    查询（只查询、不发撤单），FILLED 保留名额释放承诺、CANCELLED/REJECTED 释放名额，
+    无法确认终态移入 `pending_stale` 次日复核（001360 类死单闭环）。
+  - B3 隔夜复核：`_stale_pending_reconcile` 每日一次终态核对（在途保持隔离并 300s 心跳，
+    无匹配但有持仓视为成交，无匹配无持仓按 `pending_stale_release_on_lost` 参数释放），
+    状态随 `_save_state` 持久化、跨重启恢复。
+  - 测试：新增 `tests/test_buysell_core_v149_elastic_union_stable.py`（7 用例）与
+    `tests/test_buysell_core_v149_stale_pending.py`（8 用例），覆盖动态板不重置核心覆盖率、
+    部分快照出 top1、快速/常规预算档、日切隔离、收盘收口不撤单、终态回填、有持仓视为成交、
+    无匹配参数化释放；同步修正 v1.38 旧用例 pending 日戳。
+
+### v1.48
+- v1.48 2026-11-06 全策略全局修复（审查后确认实施，图谱驱动全局核对）：
+  - A 数据基准：`_yesterday_open_chg` 缓存允许权威文件迟到刷新——缓存源为
+    `hist_window`/合成且真实 `exp_file` 文件值到位时立即覆盖（`_src=zt_pool/selfwatch`
+    的合成条目不视为权威），消除与 `_auction_benchmark` 的基准口径分裂；
+    `_maybe_roll_day` 日切清理 `yopen_cache/hist_window_dates/offer_consume/p2e_reverse_log`。
+  - B 打板/排单链路统一：`_exp_board_gate` 封单下限统一 `exp_board_seal_min=50000`
+    并接入总卖单消耗确认，tx 首帧成交保持豁免（修复 20 万历史门槛与 v1.47 冲突）；
+    回封打板弱封单接入 `_l2_big_ok or _offer_consume_ok` 消耗确认；首板/预期/回封在
+    L2 封单与总卖单未就绪时不静默放行（`[firstboard-seal-na]`/`[exp-board-seal-na]`/
+    `[reboard-seal-na]`，模拟/回测保持原兼容路径）；`_offer_qty` 限定涨停价档位
+    （价格 >= 涨停价×0.999）；`[firstboard-seal-thin]`/`[exp-board]` 审计补 `offer=`；
+    弱封单续等增加 `weak_seal_extend_max=1` 次数上限，达到后按超时撤单。
+  - C 卖出普适“仍封死不核卖”：新增 `_sealed_sell_hold`（`sealed_sell_hold` 默认开，
+    `sealed_sell_px_ratio=0.998`），`sell_manager`/`tick_sell_manager` 在
+    break/seal_low 封单衰减链之后、P1/P2E/P3/P4/P5/P6/P7/P8 等硬卖之前统一拦截，
+    打 `[sell-sealed-hold]` 审计；`_p2e_core_sell_check` 封死保护命中返回空 note，
+    避免 `hit=0 reverse=1 reason=P2E_exp_miss` 误读。
+  - 测试：新增 `tests/test_buysell_core_v148_global_fixes.py`（15 用例，覆盖文件迟到
+    刷新、合成条目不权威、日切清理、exp gate 消耗确认/tx 豁免/seal_na、回封消耗确认
+    放行与拒绝、首板 seal_na 实盘拦截与模拟放行、弱封单续等限次、普适封死保护、
+    break 卖出不被误拦截、offer 涨停档过滤）。
+
+### v1.47
+- v1.47 2026-11-06 涨停价总卖单快速消耗确认 + hist1d 当日剔除/yopen 缓存 + P2E 封死硬保护
+  （用户确认优化后实施）：
+  - A 数据基准：`_hist_window` 与 `_ma5_base4`/`_is_100day_high` 统一，末行为当日未完成
+    日线时剔除（`hist_window_skip_today`）；`_yesterday_open_chg` 按交易日缓存
+    （`yopen_cache_by_day`），首次计算后盘中不重算，缺失不写缓存待数据就绪补上；
+    `[P2E-reverse]`/`[auction-confirm]` 审计补 `yopen/has/src/hist_last`。
+  - B P2E 封死硬保护：`_p2e_core_sell_check` 命中 A/B 但当前仍封死涨停
+    （`px >= up×p2e_sealed_px_ratio` 且未 BREAK，`p2e_sealed_hold` 默认开）时不核卖，
+    交 `_update_seal_low_state` 封单衰减两帧确认链路，修复 002529 类基准异常仍误卖。
+  - C 首触打板/预期打板总卖单消耗确认：非 tx 首帧路径封单不足时，消费
+    `_offer_consume_ok`（L2 offer 连续 `offer_consume_frames` 帧下降
+    `offer_consume_ratio` 或归零即确认，3s tick 约 2 帧），涨停首帧确认信号；
+    tx 首帧成交路径保持封单硬门豁免；`_board_queue_cancel` 增加弱封单排队上限
+    `weak_seal_queue_max_sec`（默认 120s），仍封死且当前封单 >= 首封×
+    `weak_seal_extend_ratio` 可续等一个窗口（仍封死按 `weak_seal_sealed_px_ratio`
+    判定），否则撤单。
+  - 测试：新增 `tests/test_buysell_core_v147_offer_consume_hist_p2e.py`（11 用例，覆盖
+    hist 当日剔除、yopen 缓存与缺失补评、总卖单两帧/归零/窗口重置、P2E 封死保护、
+    弱封单超时撤单与续等、snap 弱封单消耗放行与拒绝）。
+
+### v1.46
+- v1.46 2026-11-05 打板灵敏度收敛到涨停首帧 3 秒内（用户确认后实施）：
+  - 采集侧：新增 `frame_tx_limit_fast=2` / `frame_tx_prio_limit_fast=12` 独立快速配额，
+    逐笔批量与缺票兜底统一走 `prio=1`，10:00 前不挤占普通 tx 配额；
+    `firsttx_near_px` 0.98 -> 0.96，提前 1-2 帧把近涨停票纳入逐笔候选；
+    快照兜底新增独立弱封门槛 `firstzt_snap_min_seal/bids`（默认 0/0），
+    tx 缺失时弱封票立即落 `src=snap`；打板通道的“非 tx 封单≥5 万或大单加持”质量门保持不变。
+  - 决策侧：所有 `_two_1m_break or _limit_up_within_1m` 判定改为
+    `_limit_up_within_1m` 优先短路（L2 首帧命中零 m1 RPC）、`_two_1m_break` 兜底，
+    覆盖预期买入三条确认、扫板 A/B、午后主题、核心票确认与 `_eval_intraday`；
+    `board_first_frame_fresh_sec` 6.0 -> 3.0，与 3s tick 同频，超窗票不再放行追板。
+  - 测试：新增 `tests/test_buysell_core_v146_first_frame_3s.py`（4 用例，覆盖
+    limit-1m 优先短路、tx fast/prio 预算与普通档回退、弱封 snap 兜底、首帧 3s 门）。
+
+### v1.45
+- v1.45 2026-11-05 一分钟冲涨停消费 L2 首帧 + 两分钟上攻第二根收价确认（用户确认后实施）：
+  - `_limit_up_within_1m` 前插 L2 首帧判定：保留现价 >= 涨停价*0.998 前提，`g.first_zt.ms`
+    真实首笔（tx/snap）距今 <= `limit_1m_window_sec`（默认 60s）才命中；最近回封
+    `last_reboard_ts` 距今 <= 窗口同样命中，避免首触超窗但回封在窗口内被漏掉；
+    `first_zt` 缺失或无 `ms` 时回退原 09:30-09:32 时段窗口，数据缺失不静默拒绝。
+  - `_calc_two_1m_break` 增加第二根 1m 收价高于第一根收价确认（`two_1m_close_up` 默认开启），
+    确认上攻延续而非单根冲高；开关关闭时保持原两分钟上攻语义。
+  - 审计：`[limit-1m]` 命中/回退按 `src=tx/reboard/legacy` 留痕，同票同源
+    `limit_1m_log_throttle_sec`（默认 60s）节流。
+  - 影响面：预期买入确认门、扫板 A/B、午后主题买、核心票确认门统一收紧“1 分钟冲板”语义。
+  - 测试：新增 `tests/test_buysell_core_v145_limit_1m_tx.py`（12 用例，覆盖 tx 窗口内、
+    tx 超窗回退 legacy、first_zt 缺失 legacy、回封窗口、snap 命中、破板现价不足拒绝、
+    开关关闭、两分钟上攻收价确认与开关回退）。
+
+### v1.44
+- v1.44 2026-11-05 CORE 标签收紧：CORE = 连板>=3 且热门板块命中（用户确认）：
+  - 热门板块命中口径：所属 T-1 题材梯队名次 `core_tag_hot_rank_max`（默认 3）以内，
+    或新题材发酵 `confirmed/hot`；无题材数据不命中（宁缺毋滥，防假核心扩散）。
+  - 影响面：CORE 加分（`tag_core`）、核心票买入门（`try_core_buy`）、MA5 低吸
+    `ma5_core_only` 同步收紧；日线预热 `_hist_prio_set` 保持 board_cnt>=3 宽口径不变
+    （数据优先级不改变交易行为）。
+  - 测试：新增 `tests/test_buysell_core_v144_core_tag_hot.py`（8 用例，覆盖热门 rank、
+    非热门/无题材拦截、新题材 confirmed/hot、连板门槛、LB/BS 不变、rank 参数化）。
+
+### v1.43
+- v1.43 2026-11-05 动态唯一扩充：同身位大单一字板竞品豁免（用户确认后实施）：
+  - 扩充条件：同概念存在非中位竞品且同身位股票为大单一字板（一字/封死 + 封单
+    `dyn_unq_yizi_extend_seal_min`（默认 200 万）或 L2 净大单
+    `dyn_unq_yizi_extend_big_min`（默认 10%）；本票满足盘中超预期确认
+    （`_exp_rt_status == confirmed_exceed`）且非一字/未封死（可参与的换手打板）。
+  - 授予语义：`uniq=True + extend_yizi=True`，超预期确认即作为确认，免跟风确认；
+    排序加分/CX 标注（`_dyn_unq_confirmed`）与动态唯一扫板 B 自动生效；
+    扫板 B 对扩充唯一豁免「竞价唯一」门（`dyn_unq_yizi_extend_enabled` 可关）。
+  - 保守边界：更高身位存活竞品、其他同身位未分离竞品、竞品中位、竞品大单证据不足、
+    本票未超预期确认或一字/封死，均不授扩充唯一；并发上限 `dyn_unq_max_active` 仍生效。
+  - 测试：新增 `tests/test_buysell_core_v143_dyn_unq_yizi.py`（9 用例，覆盖授唯一、
+    大单兜底、确认门、可参与门、中位/证据不足/其他同身位阻挡、开关回退、扫板豁免竞价唯一）。
+
+### v1.42
+- v1.42 2026-11-05 家族映射全量覆盖 + 每日刷新（用户确认后实施）：
+  - `export_board_family.py` 升级：生成优先级为「人工 override（最高）-> 最新日题材桶重叠 ->
+    近 10 交易日历史同名桶累积兜底」，概念成员源改为 `ths_board_mapping.json` 全量 concept
+    板（不再受 `boards_latest.csv` 280 板/前 5 概念截断限制），`min_overlap` 默认 2。
+  - 实测 318 概念板输出（约 81.5% 覆盖，overlap>=2 口径），7 条人工黄金/有色/资源映射保持
+    最高优先级；`overlap_dist` 显示 overlap=2 档 98 个为最低置信档，后续复盘发现明显误并可调阈值。
+  - 刷新节奏：盘前 `run_one_click_premarket.py` 步骤 2f 与收盘 `run_one_click_after_close.py`
+    步骤 4c 均改为每日导出（内容未变 UNCHANGED 不覆盖），不再复用 `boards_refresh_due`
+    周一/14 天低频；`boards_latest.csv` 保持低频不合并。
+  - 鲁棒性：人工 override / ths 主源缺失、损坏、为空时保留既有 CSV 不覆盖；题材桶缺失时
+    仅人工 + 空自动，不失败。策略侧 `_load_board_family` 无需改动。
+  - 测试：重写 `tests/test_export_board_family.py`（11 用例，覆盖自动映射、人工优先、最新日
+    优先、min_overlap 过滤、历史累积兜底、UNCHANGED 与源损坏保护）。
+
+### v1.41
+- v1.41 2026-11-05 家族映射云端化（策略代码内移除映射块，用户确认后实施）：
+  - 人工覆盖层迁移到云端稳定指针 `board_family_latest.csv`（契约 `board_name,family_name`，
+    与 `boards_latest.csv` 同一四层研究根/定时上传链路）；策略新增 `_load_board_family()`，
+    `_board_family_map()` 改为“云端文件覆盖层 -> T-1 题材桶自动映射兜底”。
+  - 本地源 `AXquant/data/board_family_override.json`，新增 `export_board_family.py` 导出；
+    盘前 `run_one_click_premarket.py` 步骤 2f 与收盘 `run_one_click_after_close.py` 步骤 4c
+    均复用 `boards_refresh_due` 周一/14 天低频刷新，内容未变 UNCHANGED 不覆盖。
+  - 鲁棒性：文件缺失/损坏/空映射只回退自动映射并打 `[board-family-file] missing -> auto only`
+    告警，策略交易行为不变；导出源损坏不覆盖既有 CSV，人工覆盖不静默丢失。
+  - 加载时机：09:10 首载、09:25 随 `auction_pre_confirm` 重读、09:31 `after_open_probe`
+    兜底补读，`_load_zt_lianban` 清缓存后的惰性重建自然重新读文件，迟到上传当天生效。
+  - 测试：新增 `tests/test_buysell_core_v141_board_family_file.py`（7 用例）与
+    `tests/test_export_board_family.py`（4 用例）；v1.39 家族 override 用例改为文件注入。
+
+### v1.40
+- v1.40 2026-11-05 首帧 tx 基准 + 卖出 FILLED 数量级 + 撤单终态口径（A/B/C 确认后实施）：
+  - A 首帧灵敏度：`board_first_frame_baseline` 默认 `ts` -> `tx`（真实首笔，缺 tx_ms 自动回退
+    检测帧），预期买入/核心/首板/回封四条入口统一收紧，拒绝已封超 6s 的票追板
+    （2026-11-05 001360 真实首笔 09:30:23.660、检测帧 09:30:46、feed_lag=23.13s 排单靠后根因）；
+    `_buy_ff_log` 在 gate=wait 且 feed_lag 超窗时新增 `[firstzt-lag]` 审计，供方延迟与策略拒绝分离。
+  - B 卖出残留闭环：`_sell_inflight` FILLED 分支改为数量级判定（`_sell_order_sold_out`），
+    整票卖完才锁死；未卖完清理本次卖单记录并打 `[sell-remain-clear]` 放行后续卖出评估，
+    兼容旧状态无 src_qty 时以桥总量兜底（002425 昨日卖 400/剩余 400 全天空转根因）。
+  - C 撤单口径：`_query_open_order_status` open 显示在途但 all 已有终态时终态优先，
+    消除“查询 SENT / 撤单报订单不存在”的分裂；`_board_queue_cancel` 撤单后查询非终态时
+    新增 `[cancel-audit] ent=... pending_no=...` 留痕，cancel_pending 兜底不释放。
+  - 测试：新增 `tests/test_buysell_core_v140_first_frame_sell_inflight.py`（9 用例，覆盖
+    tx 拒绝旧首笔/回退 ts、firstzt-lag 审计、FILLED 部分与整票卖完、旧状态桥总量兜底、
+    all 终态优先、SENT 保持、撤单 cancel_pending 与 audit）。
+
+### v1.39
+- v1.39 2026-11-05 弹性 top1/top3 概念并集节奏与卡点修复（强板块家族去重 + board_union 独立预算 +
+  账本 key 稳定 + 覆盖率审计，用户确认后实施）：
+  - 强板块“家族”去重：新增 `board_family_auto_enabled` / `board_family_min_overlap=3` /
+    `board_family_override`（默认含黄金概念/小金属概念/稀土永磁/金属回收/金属铜/金属锌/金属镍 ->
+    黄金/有色/资源），用 T-1 zt_lianban 题材桶反向建 `概念板 -> 题材族` 映射；top1 领先
+    与 top3 排名都先按族取最高强度代表，黄金/有色/资源类兄弟概念不再占多个席位。
+  - 独立预算：新增 `frame_board_union_limit_fast=12` / `frame_board_union_limit=3`，概念并集
+    快照改走 `board_union` 源，不再与 score/board_strength 的普通 `board` 配额抢；快速窗口新增
+    `frame_snap_batch_fast=250`，首帧即可覆盖大并集。
+  - 账本 key 稳定：`_concept_snap_union` 的 key 改为 `zt_lianban ∪ pool_static` 稳定核心集，
+    盘中动态 watch 新增概念板只增量追加成员，不再整账本重建、覆盖率归零。
+  - 预热：09:25 / 09:31 / 同日重启 三条入口新增 `_csnap_prewarm`，用独立配额在开盘前把
+    概念并集拉到覆盖完成，目标 09:30 首帧出 top1、09:30:06-09:30:15 完成稳定确认与候选排序。
+  - 审计：无 top 时打 `[csnap] no_top reason=coverage/... ratio=... key_changed=...`；
+    `[elastic-top-scan]` 无候选日志带 boards/total/idx/ratio/budget_spent；1m surge 缺失与真实 0
+    分开，新增 `[m1-surge-na]` 审计，阈值未放宽。
+  - 测试：新增 `tests/test_buysell_core_v139_elastic_top_union.py`（9 用例，覆盖家族去重、
+    族间领先、key 增量不重建、board_union 预算、no_top 审计、预热与 surge_na）。
+
+### v1.38
+- v1.38 2026-11-05 零回报无委托号排单封单衰减撤单闭环（001360 类单确认后实施）：
+  - `_query_open_order_status` 委托号为空且 `backfill=True` 时按 symbol 找回数字委托号并回填
+    `pending.no`，查询失败/无匹配仍返回原语义（None/''），不影响既有调用。
+  - `_board_queue_cancel` 不再因 `pending.no` 为空静默放弃：先按 symbol 找回；找回成功继续
+    封单衰减/炸板撤单；找回失败或无匹配时标记 `cancel_pending` 并打 `[board-cancel-noid]`
+    告警（不释放名额/承诺），由 `_board_cancel_reconcile` 兜底对账。
+  - `_board_cancel_reconcile` 对无委托号的 cancel_pending 单同样按 symbol 找回并确认终态，
+    只有 CANCELLED/REJECTED/FILLED 才释放承诺或名额。
+  - `_no_reply_reconcile` 对零回报且无委托号的在途单打 `[order-inflight] 无委托号 查询=...`
+    心跳，不再静默 continue，保证 001360 类排单可审计且始终在封单衰减撤单扫描内。
+  - 采样自选池改为上证主板/深证主板/创业板/科创板/北交所各 1 支；北交所使用 920 新代码段，
+    `_norm_sec` 补齐 92 开头归一化为 `.XBJ`（避免误判沪市）。
+  - 测试：新增 `tests/test_buysell_core_v138_noid_cancel.py`（5 用例，覆盖空委托号 backfill、
+    找回后撤单释放、找回失败保留 cancel_pending、兜底对账终态释放、无委托号心跳、920 北交归一化）。
+
+### v1.37
+- v1.37 2026-11-05 日志审计修复（P0 并发 / 预算 TTL / 委托监控闭环，A/B/C 确认后实施）：
+  - A exp_file 并发：`_try_expected_buys` 改为 `list(g.exp_file.items())` 快照遍历；
+    `_load_expectation(merge=True)` 改为构造新 dict 后原子替换；`_synth_pool_expect` /
+    `_synth_selfwatch_expect` 局部收集后原子合并，杜绝 09:31 after_open_probe 与
+    handle_data 并发写导致的 `RuntimeError(dictionary changed size during iteration)` 整帧中断。
+  - B 预算与 TTL：新增 `frame_board_prio_limit_fast=12` / `frame_board_prio_limit_afternoon=3`，
+    `_board_strength_info` 对核心/预期/持仓走 prio=1 独立配额（board 打满时核心票优先新鲜）；
+    `hist1d_core_ttl` 180->600 常驻、`hist1d_prewarm_until_hhmm` 10:05->11:00；
+    `[hist-na]` 追加 `reason=ttl_expired/lookup_fail` 审计。
+  - C 委托与监控闭环：`_no_reply_reconcile` 在途查询新增 `[order-inflight]` 60s 心跳；
+    `sell_manager/tick_sell_manager` 在途跳过新增 `[sell-inflight-skip]` 心跳；
+    `_sell_inflight` 超 `sell_inflight_stall_warn_sec=900` 无终态打 `[sell-inflight-warn]` 告警；
+    `[restart-rebuild]` 放弃日志追加 `one_word/zt_cnt` 并区分「无涨停证据」与「涨停证据未解析」。
+  - 测试：新增 `tests/test_buysell_core_v137_inflight_budget.py`（10 用例，覆盖并发快照、
+    原子合并、board prio、hist1d TTL/审计、在途心跳与重建证据）；同步 v1.20 旧用例
+    `hist1d_core_ttl` 断言 180->600。
 
 ### v1.36
 - v1.36 午后新题材爆发前排试点 + 午后快速刷新 + 滚动窗口发酵识别（2026-11-04 用户确认 B 方案并补充后实施）：

@@ -6,6 +6,8 @@ from typing import Any
 
 from .model import (
     ENTRY_TYPE_ONE_WORD,
+    ROLE_DETAIL_BAD_SEAL_BOARD,
+    ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP,
     STATUS_AWAITING_AUCTION,
     STATUS_PENDING_EXCEED,
     STATUS_PENDING_MEET,
@@ -23,6 +25,17 @@ def _as_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_bad_seal_role(review: dict[str, Any] | None) -> bool:
+    """放量烂板 / 炸板不回封：次日竞价三态用独立档位。"""
+    rd = str((review or {}).get("role_detail") or "")
+    return rd in (ROLE_DETAIL_BAD_SEAL_BOARD, ROLE_DETAIL_BROKEN_CONSECUTIVE_LIMIT_UP)
+
+
+def one_word_open_meet_min_pct(board_limit_pct: float = 10.0) -> float:
+    """一字/近一字开盘符合预期下限（主板 +8%，20cm +16%，30cm +24%）。"""
+    return max(1.0, float(board_limit_pct) * 0.8)
 
 
 def evaluate_one_word_expectation(
@@ -60,26 +73,43 @@ def evaluate_auction_status(
     if entry_type == ENTRY_TYPE_ONE_WORD:
         return STATUS_AWAITING_AUCTION, ["one_word_board_requires_seal_rule"]
 
-    yesterday_open_pct = _as_float((review or {}).get("yesterday_open_pct"), 0.0)
+    raw_yesterday_open = (review or {}).get("yesterday_open_pct")
+    has_yesterday_open = raw_yesterday_open is not None
+    yesterday_open_pct = _as_float(raw_yesterday_open, 0.0)
     reasons: list[str] = []
+
+    if auction_change_pct is None:
+        return STATUS_AWAITING_AUCTION, ["missing_auction_change"]
+
+    # 放量烂板 / 炸板不回封：红开=超预期；-2%<小绿开<=0=符合；<=-2% 或跌停开=低于。
+    if _is_bad_seal_role(review):
+        if auction_change_pct > 0:
+            reasons.append("bad_seal_red_open_exceed")
+            return STATUS_PENDING_EXCEED, reasons
+        if auction_change_pct <= -2.0:
+            reasons.append("bad_seal_big_green_miss")
+            return STATUS_PENDING_MISS, reasons
+        reasons.append("bad_seal_small_green_meet")
+        return STATUS_PENDING_MEET, reasons
 
     if opened_above_yesterday is True:
         reasons.append("opened_above_yesterday")
         return STATUS_PENDING_EXCEED, reasons
     if opened_above_yesterday is False:
         reasons.append("not_above_yesterday")
-        if auction_change_pct is not None and auction_change_pct < 0:
+        if auction_change_pct < 0:
             reasons.append("auction_green_open")
             return STATUS_PENDING_MISS, reasons
         return STATUS_PENDING_MEET, reasons
-    if auction_change_pct is None:
-        return STATUS_AWAITING_AUCTION, ["missing_auction_change"]
     if auction_change_pct < 0:
         reasons.append("auction_green_open")
         return STATUS_PENDING_MISS, reasons
-    if yesterday_open_pct > 0 and auction_change_pct > yesterday_open_pct:
+    if has_yesterday_open and auction_change_pct > yesterday_open_pct:
         reasons.append("auction_higher_than_yesterday")
         return STATUS_PENDING_EXCEED, reasons
+    if not has_yesterday_open:
+        reasons.append("missing_yesterday_open")
+        return STATUS_AWAITING_AUCTION, reasons
     reasons.append("auction_small_open")
     return STATUS_PENDING_MEET, reasons
 
